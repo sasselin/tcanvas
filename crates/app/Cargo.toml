@@ -1,0 +1,21 @@
+[package]
+name = "tcanvas"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }
+egui = { version = "0.37", features = ["serde", "monochrome_emoji_fonts"] }
+alacritty_terminal = "0.26"
+uuid = { version = "1", features = ["v4"] }
+directories = "6"
+nucleo-matcher = "0.3"
+
+[target.'cfg(windows)'.dependencies]
+tauri-winrt-notification = "0.7"
+
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["eframe"] }
