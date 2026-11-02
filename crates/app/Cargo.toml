@@ -17,5 +17,8 @@ nucleo-matcher = "0.3"
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.7"
 
+[build-dependencies]
+embed-resource = "3"
+
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["eframe"] }

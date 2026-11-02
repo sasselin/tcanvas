@@ -9,9 +9,10 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::shell::world::{Camera, Card, Project, ProjectId, Wire, World};
+use crate::shell::world::{Camera, Card, Project, ProjectId, Wire, World, project_at};
 
-const FORMAT_VERSION: u32 = 1;
+/// 2 : appartenance explicite des cartes aux groupes (`Card::project`), panneau « Changements ».
+const FORMAT_VERSION: u32 = 2;
 const SAVE_DELAY: Duration = Duration::from_millis(800);
 
 #[derive(Serialize, Deserialize)]
@@ -26,6 +27,8 @@ pub struct LayoutFile {
     pub space: Option<ProjectId>,
     #[serde(default)]
     pub space_cameras: BTreeMap<String, Camera>,
+    #[serde(default)]
+    pub changes_open: bool,
 }
 
 /// `%APPDATA%\tcanvas\config` sous Windows, `~/.config/tcanvas` sous Linux.
@@ -71,9 +74,17 @@ impl Persistence {
                 world.wires = file.wires;
                 world.space = file.space.filter(|id| world.project(id).is_some());
                 world.space_cameras = file.space_cameras;
-                for card in file.cards {
+                world.changes_open = file.changes_open;
+                for mut card in file.cards {
+                    // Version 1 : une carte appartenait au cadre qui contenait son centre.
+                    if file.version < 2 {
+                        card.project = project_at(&world.projects, card.rect.center()).map(|p| p.id.clone());
+                    }
+                    card.project = card.project.filter(|id| world.project(id).is_some());
                     world.add_card(card);
                 }
+                world.refit_projects();
+                world.separate_all();
                 self.saved_revision = world.revision;
             }
             Err(e) => {
@@ -106,6 +117,7 @@ impl Persistence {
             wires: world.wires.clone(),
             space: world.space.clone(),
             space_cameras: world.space_cameras.clone(),
+            changes_open: world.changes_open,
         };
         match write_atomic(&self.path, &serde_json::to_vec_pretty(&file).expect("layout serializes")) {
             Ok(()) => {
@@ -150,11 +162,14 @@ mod tests {
         a.name = Some("serveur".into());
         a.stall_secs = 15;
         a.attention = true;
+        a.project = Some("p1".into());
         let b = Card::new(Rect::from_min_size(pos2(400.0, 0.0), Vec2::new(300.0, 200.0)), None);
         w.wires.push(Wire { from: a.id.clone(), to: b.id.clone() });
         w.projects.push(Project { id: "p1".into(), name: "API".into(), color: [1, 2, 3], rect: Rect::from_min_size(pos2(-50.0, -50.0), Vec2::splat(900.0)), cwd: Some("~/api".into()) });
         w.add_card(a);
         w.add_card(b);
+        w.refit_projects();
+        w.changes_open = true;
         w
     }
 
@@ -176,7 +191,32 @@ mod tests {
         assert_eq!((a.id.as_str(), a.name.as_deref(), a.cwd.as_deref(), a.stall_secs), (w.cards[0].id.as_str(), Some("serveur"), Some("~/api"), 15));
         assert_eq!(a.rect, w.cards[0].rect);
         assert!(!a.attention, "l'état d'exécution n'est pas sauvegardé");
+        assert_eq!((a.project.as_deref(), loaded.cards[1].project.as_deref()), (Some("p1"), None));
+        assert!(loaded.changes_open);
         assert!(!dir.join("layout.json.tmp").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Un layout de la version 1 : pas de `project` sur les cartes, l'appartenance était géométrique.
+    #[test]
+    fn version_1_layouts_get_membership_from_geometry() {
+        let dir = temp_dir("v1");
+        fs::create_dir_all(&dir).unwrap();
+        let card = |id: &str, x: f32| format!(r#"{{"id":"{id}","name":null,"rect":{{"min":{{"x":{x},"y":0.0}},"max":{{"x":{},"y":100.0}}}},"cwd":null,"stall_secs":60}}"#, x + 100.0);
+        let json = format!(
+            r#"{{"version":1,"camera":{{"center":{{"x":0.0,"y":0.0}},"zoom":1.0}},"cards":[{},{}],
+               "projects":[{{"id":"p","name":"API","color":[1,2,3],"rect":{{"min":{{"x":-10.0,"y":-10.0}},"max":{{"x":5000.0,"y":5000.0}}}},"cwd":null}}],"wires":[]}}"#,
+            card("dedans", 100.0),
+            card("dehors", 9000.0)
+        );
+        fs::write(dir.join("layout.json"), json).unwrap();
+        let mut w = World::default();
+        let mut p = Persistence::new(&dir);
+        p.load(&mut w);
+        assert_eq!(p.last_error, None);
+        assert_eq!(w.card("dedans").unwrap().project.as_deref(), Some("p"));
+        assert_eq!(w.card("dehors").unwrap().project, None);
+        assert!(w.projects[0].rect.width() < 1000.0, "le cadre s'ajuste à son seul membre : {:?}", w.projects[0].rect);
         fs::remove_dir_all(dir).unwrap();
     }
 

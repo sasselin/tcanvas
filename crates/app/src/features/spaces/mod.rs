@@ -7,6 +7,8 @@ use crate::shell::event::Event;
 use crate::shell::theme;
 use crate::shell::world::{Camera, ProjectId, World};
 
+/// Fichiers modifiés depuis moins longtemps : le groupe est « en train d'écrire ».
+const WRITING_SECS: u64 = 30;
 /// Vue de repli tant que le canevas n'a pas encore été mesuré (première frame).
 const FALLBACK_VIEWPORT: Vec2 = Vec2::new(1280.0, 800.0);
 
@@ -26,18 +28,20 @@ pub fn space_bounds(world: &World) -> Option<Rect> {
     cards.chain(projects).reduce(|a, b| a.union(b))
 }
 
-/// Bascule vers `target` : retient la caméra de l'espace quitté et reprend celle de `target`
-/// (la première fois, cadre tout son contenu). Le terminal focalisé perd le clavier s'il
-/// n'est pas dans le nouvel espace. Renvoie `false` si `target` n'existe pas.
+/// Bascule vers `target`. Un projet s'ouvre toujours cadré sur tout son contenu (centré, prêt,
+/// en un seul clic) ; « Tous » reprend la vue d'ensemble laissée la dernière fois. Le terminal
+/// focalisé perd le clavier s'il n'est pas dans le nouvel espace. Renvoie `false` si `target`
+/// n'existe pas.
 pub fn enter(world: &mut World, target: Option<ProjectId>, vp: Rect) -> bool {
     if target.as_ref().is_some_and(|id| world.project(id).is_none()) {
         return false;
     }
     world.space_cameras.insert(camera_key(world.space.as_deref()), world.camera);
     world.space = target;
-    world.camera = match world.space_cameras.get(&camera_key(world.space.as_deref())) {
-        Some(cam) => *cam,
-        None => space_bounds(world).map(|r| Camera::fitting(r, vp, 60.0, 1.0)).unwrap_or(world.camera),
+    let fitted = || space_bounds(world).map(|r| Camera::fitting(r, vp, 60.0, 1.0)).unwrap_or(world.camera);
+    world.camera = match (&world.space, world.space_cameras.get(&camera_key(world.space.as_deref()))) {
+        (None, Some(cam)) => *cam,
+        _ => fitted(),
     };
     let focused_hidden = world.focused.as_deref().and_then(|id| world.card(id)).is_some_and(|c| !world.shows_card(c));
     if focused_hidden {
@@ -59,16 +63,21 @@ impl Spaces {
             return;
         }
         let all = world.space.is_none();
+        let now = crate::shell::world::unix_now();
+        if world.file_activity.values().any(|&t| now.saturating_sub(t) < WRITING_SECS) {
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
+        }
         let chip = Button::selectable(all, RichText::new("Tous").color(if all { theme::CARD_BG } else { theme::TEXT })).fill(if all { theme::TEXT } else { Color32::TRANSPARENT });
         if ui.add(chip).on_hover_text("Vue d'ensemble : tous les projets").clicked() {
             events.push(Event::EnterSpace(None));
         }
         for (n, p) in world.projects.iter().enumerate() {
             let on = world.space.as_ref() == Some(&p.id);
-            let rect = p.rect;
             // Une cloche signale un terminal qui demande l'attention dans un autre espace.
-            let calling = !on && world.cards.iter().any(|c| c.attention && rect.contains(c.rect.center()));
-            let label = if calling { format!("● {} 🔔", p.name) } else { format!("● {}", p.name) };
+            let calling = !on && world.members(&p.id).any(|c| c.attention);
+            // Un crayon signale des fichiers modifiés à l'instant dans le dossier d'un autre groupe.
+            let writing = !on && world.file_activity.get(&p.id).is_some_and(|&t| now.saturating_sub(t) < WRITING_SECS);
+            let label = format!("● {}{}{}", p.name, if writing { " ✎" } else { "" }, if calling { " 🔔" } else { "" });
             let text = RichText::new(label).color(if on { theme::CARD_BG } else { theme::rgb(p.color) });
             let chip = Button::selectable(on, text).fill(if on { theme::rgb(p.color) } else { Color32::TRANSPARENT });
             let hint = if n < 9 { format!("Ouvrir ce projet · Ctrl+Maj+{}", n + 1) } else { "Ouvrir ce projet".into() };
@@ -130,6 +139,7 @@ mod tests {
             w.projects.push(Project { id: id.into(), name: id.into(), color: [0; 3], rect: Rect::from_min_size(pos2(x, 0.0), Vec2::new(2000.0, 1200.0)), cwd: None });
             let mut c = Card::with_id(format!("{id}-1"), Rect::from_min_size(pos2(x + 100.0, 100.0), Vec2::new(500.0, 300.0)), None);
             c.name = Some(id.into());
+            c.project = Some(id.into());
             w.add_card(c);
         }
         w.add_card(Card::with_id("seul".into(), Rect::from_min_size(pos2(-9000.0, 0.0), Vec2::new(500.0, 300.0)), None));
@@ -153,19 +163,21 @@ mod tests {
     }
 
     #[test]
-    fn each_space_remembers_its_camera() {
+    fn a_project_always_opens_framed_and_the_overview_keeps_its_view() {
         let mut w = world();
         let mut s = Spaces { viewport: Some(vp()) };
         let overview = Camera { center: pos2(123.0, 45.0), zoom: 0.3 };
         w.camera = overview;
         handle(&mut s, &mut w, Event::EnterSpace(Some("api".into())));
-        let in_api = Camera { center: pos2(700.0, 500.0), zoom: 1.4 };
-        w.camera = in_api;
+        let framed = w.camera;
+        // On s'éloigne dans api, on passe par web, puis on revient : api est de nouveau cadré.
+        w.camera = Camera { center: pos2(-5000.0, 9000.0), zoom: 2.0 };
         handle(&mut s, &mut w, Event::EnterSpace(Some("web".into())));
+        assert!(vp().contains_rect(w.camera.rect_to_screen(w.projects[1].rect, vp()).shrink(1.0)), "web cadré dès le premier clic");
         handle(&mut s, &mut w, Event::EnterSpace(Some("api".into())));
-        assert_eq!(w.camera, in_api);
+        assert_eq!(w.camera, framed);
         handle(&mut s, &mut w, Event::EnterSpace(None));
-        assert_eq!(w.camera, overview);
+        assert_eq!(w.camera, overview, "« Tous » reprend la vue d'ensemble");
     }
 
     #[test]

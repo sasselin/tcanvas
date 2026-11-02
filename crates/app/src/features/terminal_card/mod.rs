@@ -232,6 +232,10 @@ impl TerminalCards {
             let dim = dimmed(world, &world.cards[i]);
             wheel_taken |= self.card_ui(ui, world, i, cell, dim, events);
         }
+        // Glissement interrompu (carte fermée, cachée…) : ne pas laisser un cadre gelé.
+        if world.dragging.is_some() && !ui.input(|i| i.pointer.primary_down()) {
+            world.dragging = None;
+        }
         self.wire_drag(ui, world, events);
         wheel_taken
     }
@@ -274,27 +278,38 @@ impl TerminalCards {
 
         // --- Interactions -------------------------------------------------------------
         if title_r.dragged_by(PointerButton::Primary) {
+            world.dragging = Some(id.clone());
             world.cards[i].rect = world.cards[i].rect.translate(title_r.drag_delta() / zoom);
             world.raise(&id);
-            world.keep_in_space(&id);
             world.touch();
+        }
+        if title_r.drag_stopped() && world.dragging.as_ref() == Some(&id) {
+            // Lâchée dans un cadre visible : elle en devient membre ; ailleurs : hors groupe.
+            world.dragging = None;
+            let target = world.drop_target(world.cards[i].rect.center());
+            if target != world.cards[i].project {
+                events.push(Event::AssignCard { card: id.clone(), project: target, relocate: false });
+            }
+            events.push(Event::SettleCard(id.clone()));
         }
         if title_r.double_clicked() {
             events.push(Event::FlyTo(id.clone()));
         } else if title_r.clicked() {
             events.push(Event::FocusCard(id.clone()));
         }
-        title_r.context_menu(|ui| self.context_menu(ui, &world.cards[i], events));
+        title_r.context_menu(|ui| self.context_menu(ui, world, i, events));
 
         if grip_r.hovered() || grip_r.dragged() {
             ui.ctx().set_cursor_icon(CursorIcon::ResizeNwSe);
+        }
+        if grip_r.drag_stopped() {
+            events.push(Event::SettleCard(id.clone()));
         }
         if grip_r.dragged() {
             let min = card_size(cell, MIN_COLS as f32, MIN_ROWS as f32);
             let r = &mut world.cards[i].rect;
             r.max += grip_r.drag_delta() / zoom;
             r.max = r.max.max(r.min + min);
-            world.keep_in_space(&id);
             world.touch();
         }
 
@@ -357,9 +372,16 @@ impl TerminalCards {
             let cell_screen = ui.ctx().fonts_mut(|f| vec2(f.glyph_width(&font, 'M'), f.row_height(&font)));
             let metrics = render::GridMetrics { origin: body_inner.min, cell: cell_screen, font, clip: body_inner.intersect(vp) };
             render::paint_grid(&painter, &rt.term.lock(), &metrics, focused);
-            if focused && !alt {
-                wheel_taken = self.forward_mouse(ui, &id, &body_r, body_inner.min, cell_screen);
+            // La molette fait défiler le terminal survolé, même sans le clavier ; les clics, eux,
+            // ne vont qu'au terminal focalisé.
+            if !alt {
+                self.forward_mouse(ui, &id, &body_r, body_inner.min, cell_screen, focused);
             }
+        }
+        // Un terminal lisible sous le pointeur garde toute la molette, y compris la queue du
+        // défilement lissé des frames suivantes : le canevas ne bouge pas derrière lui.
+        if !is_preview(zoom) && body_r.contains_pointer() {
+            wheel_taken = true;
         }
 
         // Bordure : focus, ou statut qui réclame l'attention (pulsation).
@@ -385,7 +407,8 @@ impl TerminalCards {
         wheel_taken
     }
 
-    fn context_menu(&mut self, ui: &mut Ui, card: &Card, events: &mut Vec<Event>) {
+    fn context_menu(&mut self, ui: &mut Ui, world: &World, i: usize, events: &mut Vec<Event>) {
+        let card = &world.cards[i];
         if ui.button("Renommer…").clicked() {
             self.rename = Some((card.id.clone(), card.name.clone().unwrap_or_default()));
             ui.close();
@@ -398,6 +421,23 @@ impl TerminalCards {
             events.push(Event::FlyTo(card.id.clone()));
             ui.close();
         }
+        ui.menu_button("Déplacer vers", |ui| {
+            for p in &world.projects {
+                let here = card.project.as_ref() == Some(&p.id);
+                let text = egui::RichText::new(&p.name).color(theme::rgb(p.color));
+                if ui.add_enabled(!here, egui::Button::new(text)).clicked() {
+                    events.push(Event::AssignCard { card: card.id.clone(), project: Some(p.id.clone()), relocate: true });
+                    ui.close();
+                }
+            }
+            if !world.projects.is_empty() {
+                ui.separator();
+            }
+            if ui.add_enabled(card.project.is_some(), egui::Button::new("Aucun groupe")).clicked() {
+                events.push(Event::AssignCard { card: card.id.clone(), project: None, relocate: true });
+                ui.close();
+            }
+        });
         ui.separator();
         if ui.button("Fermer le terminal…  (Ctrl+Maj+W)").clicked() {
             events.push(Event::RequestClose(card.id.clone()));
@@ -425,8 +465,8 @@ impl TerminalCards {
     }
 
     /// Souris → terminal (rapports xterm si l'application les demande, sinon défilement).
-    fn forward_mouse(&mut self, ui: &Ui, id: &str, body: &egui::Response, origin: Pos2, cell: Vec2) -> bool {
-        let Some(rt) = self.runtimes.get_mut(id) else { return false };
+    fn forward_mouse(&mut self, ui: &Ui, id: &str, body: &egui::Response, origin: Pos2, cell: Vec2, focused: bool) {
+        let Some(rt) = self.runtimes.get_mut(id) else { return };
         let mode = *rt.term.lock().mode();
         let mouse_mode = mode.intersects(TermMode::MOUSE_MODE);
         let sgr = mode.contains(TermMode::SGR_MOUSE);
@@ -435,11 +475,10 @@ impl TerminalCards {
             let v = (p - origin) / cell;
             ((v.x.max(0.0) as usize).min(size.cols as usize - 1), (v.y.max(0.0) as usize).min(size.rows as usize - 1))
         };
-        let mut wheel_taken = false;
         let mut out = Vec::new();
         for ev in ui.input(|i| i.events.clone()) {
             match ev {
-                egui::Event::PointerButton { pos, button, pressed, modifiers, .. } if mouse_mode => {
+                egui::Event::PointerButton { pos, button, pressed, modifiers, .. } if mouse_mode && focused => {
                     let b = match button {
                         PointerButton::Primary => MouseButton::Left,
                         PointerButton::Middle => MouseButton::Middle,
@@ -457,7 +496,7 @@ impl TerminalCards {
                         rt.mouse_down = None;
                     }
                 }
-                egui::Event::PointerMoved(pos) if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) => {
+                egui::Event::PointerMoved(pos) if focused && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) => {
                     if let Some((b, c0, l0)) = rt.mouse_down {
                         let (col, line) = cell_at(pos);
                         if (col, line) != (c0, l0) {
@@ -467,7 +506,6 @@ impl TerminalCards {
                     }
                 }
                 egui::Event::MouseWheel { unit, delta, modifiers, .. } if body.hovered() && !modifiers.ctrl => {
-                    wheel_taken = true;
                     let lines = match unit {
                         MouseWheelUnit::Line => delta.y,
                         MouseWheelUnit::Point => delta.y / cell.y,
@@ -497,7 +535,6 @@ impl TerminalCards {
             }
         }
         rt.write(out);
-        wheel_taken
     }
 
     fn wire_drag(&mut self, ui: &Ui, world: &World, events: &mut Vec<Event>) {
@@ -567,16 +604,23 @@ impl TerminalCards {
             Event::NewCard { at, project } => {
                 let cell = base_cell(&self.ctx);
                 let size = card_size(cell, DEFAULT_COLS, DEFAULT_ROWS);
-                let near = at.unwrap_or(world.camera.center);
-                let rect = world.free_spot(near, size);
                 // Sans projet précisé, le terminal naît dans l'espace ouvert.
                 let project = project.as_deref().or(world.space.as_deref());
-                let cwd = project.and_then(|p| world.project(p)).and_then(|p| p.cwd.clone());
-                let card = Card::new(rect, cwd);
+                let project = project.and_then(|p| world.project(p));
+                // Sans position : à droite des terminaux du groupe (ou au centre d'un groupe vide).
+                let beside = project.map(|p| match world.members(&p.id).map(|c| c.rect).reduce(|a, b| a.union(b)) {
+                    Some(r) => pos2(r.max.x + crate::shell::world::CARD_GAP + size.x / 2.0, r.min.y + size.y / 2.0),
+                    None => p.rect.center(),
+                });
+                let near = at.or(beside).unwrap_or(world.camera.center);
+                let rect = world.free_spot(near, size);
+                let mut card = Card::new(rect, project.and_then(|p| p.cwd.clone()));
+                card.project = project.map(|p| p.id.clone());
                 let id = card.id.clone();
                 world.add_card(card);
-                world.keep_in_space(&id);
                 // Toujours voler jusqu'au nouveau terminal : visible et assez grand pour taper.
+                // D'abord faire sa place (rien ne se chevauche), puis y voler.
+                out.push(Event::SettleCard(id.clone()));
                 out.push(Event::FlyTo(id));
             }
             Event::FocusCard(id) => {

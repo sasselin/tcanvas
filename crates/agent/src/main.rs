@@ -6,6 +6,7 @@
 //! - `tcanvas-agent kill <session>`: arrête tous les processus de la session, puis la session
 
 mod features {
+    pub mod changes;
     pub mod hooks;
     pub mod kill;
     pub mod serve;

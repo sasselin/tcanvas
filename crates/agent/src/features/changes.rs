@@ -1,0 +1,428 @@
+//! Fichiers modifiés des dossiers liés aux projets : liste (avec +/− par rapport à HEAD) et diffs.
+//! Tourne dans son propre fil : `git` ne retarde jamais l'observation des terminaux.
+
+use std::collections::HashMap;
+use std::fs;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use protocol::{AgentEvent, ChangeKind, ChangeSet, DirEntry, DirListing, FileChange};
+
+const SCAN_EVERY: Duration = Duration::from_secs(2);
+const MAX_FILES: usize = 500;
+/// Parcours d'un dossier hors git : au-delà, on s'arrête.
+const MAX_WALK: usize = 20_000;
+const MAX_DIFF: usize = 512 * 1024;
+/// Taille lue pour compter les lignes d'un fichier non suivi.
+const MAX_COUNT: u64 = 1024 * 1024;
+/// Arbre vide de git : base des diffs d'un dépôt sans commit.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+/// Dossiers ignorés hors git (dépendances, sorties de build).
+const SKIP_DIRS: [&str; 4] = ["node_modules", "target", "dist", "build"];
+
+pub enum Cmd {
+    Watch { key: String, path: String },
+    Unwatch { key: String },
+    Diff { key: String, file: String },
+    List { path: String },
+}
+
+struct Watched {
+    path: String,
+    /// Début de la surveillance : hors git, seuls les fichiers modifiés depuis comptent.
+    since: u64,
+    last_sent: Option<ChangeSet>,
+}
+
+/// Lance le fil de surveillance. Les événements produits passent par `send`.
+pub fn spawn(send: impl Fn(&AgentEvent) + Send + 'static) -> Sender<Cmd> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || run(rx, send));
+    tx
+}
+
+fn run(rx: Receiver<Cmd>, send: impl Fn(&AgentEvent)) {
+    let mut watched: HashMap<String, Watched> = HashMap::new();
+    let mut next_scan = Instant::now();
+    loop {
+        match rx.recv_timeout(next_scan.saturating_duration_since(Instant::now())) {
+            Ok(Cmd::Watch { key, path }) => {
+                if watched.get(&key).is_none_or(|w| w.path != path) {
+                    watched.insert(key.clone(), Watched { path, since: unix_now(), last_sent: None });
+                }
+                // Réponse immédiate (validation du dossier) : on rescanne tout de suite.
+                next_scan = Instant::now();
+            }
+            Ok(Cmd::Unwatch { key }) => {
+                watched.remove(&key);
+            }
+            Ok(Cmd::Diff { key, file }) => {
+                if let Some(w) = watched.get(&key) {
+                    let (text, truncated) = diff(w, &file);
+                    send(&AgentEvent::Diff { key, file, text, truncated });
+                }
+            }
+            Ok(Cmd::List { path }) => send(&AgentEvent::DirListing(list_dir(&path))),
+            Err(RecvTimeoutError::Timeout) => {
+                for (key, w) in watched.iter_mut() {
+                    let set = scan(key, &w.path, w.since);
+                    if w.last_sent.as_ref() != Some(&set) {
+                        send(&AgentEvent::Changes(set.clone()));
+                        w.last_sent = Some(set);
+                    }
+                }
+                next_scan = Instant::now() + SCAN_EVERY;
+            }
+            Err(RecvTimeoutError::Disconnected) => return,
+        }
+    }
+}
+
+/// `~` et `~/x` → dossier personnel. Les autres chemins sont rendus tels quels.
+pub fn expand_tilde(path: &str, home: Option<&str>) -> String {
+    let path = path.trim();
+    match (path, home) {
+        ("~", Some(h)) => h.to_string(),
+        (p, Some(h)) if p.starts_with("~/") => format!("{}/{}", h.trim_end_matches('/'), &p[2..]),
+        (p, _) => p.to_string(),
+    }
+}
+
+/// Chemin absolu d'un dossier existant, ou message d'erreur lisible.
+pub fn resolve(path: &str) -> Result<PathBuf, String> {
+    let expanded = expand_tilde(path, std::env::var("HOME").ok().as_deref());
+    match fs::canonicalize(&expanded) {
+        Ok(p) if p.is_dir() => Ok(p),
+        Ok(_) => Err(format!("« {path} » n'est pas un dossier")),
+        Err(_) => Err(format!("dossier introuvable : {path}")),
+    }
+}
+
+fn git(dir: &Path, args: &[&str]) -> Option<Output> {
+    // Pas de verrou optionnel sur l'index : ne jamais gêner le git de l'utilisateur (ou de Claude).
+    Command::new("git").arg("-C").arg(dir).args(args).env("GIT_OPTIONAL_LOCKS", "0").output().ok()
+}
+
+fn git_ok(dir: &Path, args: &[&str]) -> Option<String> {
+    git(dir, args).filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+struct Repo {
+    top: PathBuf,
+    /// HEAD, ou l'arbre vide si aucun commit.
+    base: String,
+}
+
+fn repo(dir: &Path) -> Option<Repo> {
+    let top = git_ok(dir, &["rev-parse", "--show-toplevel"])?;
+    let base = if git_ok(dir, &["rev-parse", "--verify", "-q", "HEAD"]).is_some() { "HEAD".into() } else { EMPTY_TREE.into() };
+    Some(Repo { top: PathBuf::from(top.trim_end()), base })
+}
+
+pub fn scan(key: &str, path: &str, since: u64) -> ChangeSet {
+    let mut set = ChangeSet { key: key.into(), root: None, git: false, branch: None, error: None, files: Vec::new(), truncated: false };
+    let dir = match resolve(path) {
+        Ok(d) => d,
+        Err(e) => {
+            set.error = Some(e);
+            return set;
+        }
+    };
+    let mut files = match repo(&dir) {
+        Some(repo) => {
+            set.git = true;
+            set.branch = git_ok(&dir, &["symbolic-ref", "--short", "-q", "HEAD"]).map(|b| b.trim().to_string()).or(Some("HEAD détachée".into()));
+            set.root = Some(repo.top.to_string_lossy().into_owned());
+            git_files(&dir, &repo)
+        }
+        None => {
+            set.root = Some(dir.to_string_lossy().into_owned());
+            walk_recent(&dir, since)
+        }
+    };
+    files.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.path.cmp(&b.path)));
+    set.truncated = files.len() > MAX_FILES;
+    files.truncate(MAX_FILES);
+    set.files = files;
+    set
+}
+
+fn git_files(dir: &Path, repo: &Repo) -> Vec<FileChange> {
+    let Some(status) = git(dir, &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."]) else { return Vec::new() };
+    let entries = parse_porcelain(&String::from_utf8_lossy(&status.stdout));
+    let numstat = git(dir, &["diff", &repo.base, "--numstat", "-z", "-M", "--no-ext-diff", "--", "."])
+        .map(|o| parse_numstat(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default();
+    entries
+        .into_iter()
+        .map(|(path, kind)| {
+            let full = repo.top.join(&path);
+            let (added, removed, binary) = match (&kind, numstat.get(&path)) {
+                (_, Some(&(a, r))) => (a, r, a.is_none()),
+                (ChangeKind::Untracked, None) => match count_lines(&full) {
+                    Some(n) => (Some(n), Some(0), false),
+                    None => (None, None, true),
+                },
+                _ => (None, None, false),
+            };
+            FileChange { mtime: mtime(&full), path, kind, added, removed, binary }
+        })
+        .collect()
+}
+
+/// `git status --porcelain=v1 -z` : `XY chemin\0`, suivi de `origine\0` pour un renommage ou une copie.
+pub fn parse_porcelain(out: &str) -> Vec<(String, ChangeKind)> {
+    let mut fields = out.split('\0').filter(|f| !f.is_empty());
+    let mut entries = Vec::new();
+    while let Some(entry) = fields.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let (xy, path) = (&entry[..2], entry[3..].to_string());
+        let (x, y) = (xy.as_bytes()[0], xy.as_bytes()[1]);
+        let kind = if xy == "??" {
+            ChangeKind::Untracked
+        } else if x == b'R' || x == b'C' {
+            let from = fields.next().unwrap_or_default().to_string();
+            if x == b'R' { ChangeKind::Renamed(from) } else { ChangeKind::Added }
+        } else if x == b'D' || y == b'D' {
+            ChangeKind::Deleted
+        } else if x == b'A' {
+            ChangeKind::Added
+        } else {
+            ChangeKind::Modified
+        };
+        entries.push((path, kind));
+    }
+    entries
+}
+
+/// `git diff --numstat -z` : `ajouts\tretraits\tchemin\0`, ou `ajouts\tretraits\t\0origine\0cible\0`
+/// pour un renommage. `-` pour un binaire (→ `None`). Clé : chemin cible.
+pub fn parse_numstat(out: &str) -> HashMap<String, (Option<u32>, Option<u32>)> {
+    let mut map = HashMap::new();
+    let mut fields = out.split('\0');
+    while let Some(entry) = fields.next() {
+        let mut parts = entry.splitn(3, '\t');
+        let (Some(a), Some(r), Some(path)) = (parts.next(), parts.next(), parts.next()) else { continue };
+        let path = if path.is_empty() {
+            let _from = fields.next();
+            fields.next().unwrap_or_default()
+        } else {
+            path
+        };
+        map.insert(path.to_string(), (a.parse().ok(), r.parse().ok()));
+    }
+    map
+}
+
+/// Nombre de lignes d'un fichier texte ; `None` pour un binaire ou un fichier illisible.
+fn count_lines(path: &Path) -> Option<u32> {
+    let mut buf = Vec::new();
+    fs::File::open(path).ok()?.take(MAX_COUNT).read_to_end(&mut buf).ok()?;
+    if buf.contains(&0) {
+        return None;
+    }
+    let n = buf.iter().filter(|&&b| b == b'\n').count() + usize::from(buf.last().is_some_and(|&b| b != b'\n'));
+    Some(n as u32)
+}
+
+fn mtime(path: &Path) -> u64 {
+    fs::symlink_metadata(path).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// Hors git : fichiers modifiés depuis `since` (début de la surveillance).
+fn walk_recent(root: &Path, since: u64) -> Vec<FileChange> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    let mut seen = 0;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > MAX_WALK {
+                return files;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Ok(ty) = entry.file_type() else { continue };
+            if ty.is_dir() {
+                if !name.starts_with('.') && !SKIP_DIRS.contains(&name.as_ref()) {
+                    stack.push(entry.path());
+                }
+            } else if ty.is_file() {
+                let path = entry.path();
+                let m = mtime(&path);
+                if m >= since {
+                    let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().into_owned();
+                    files.push(FileChange { path: rel, kind: ChangeKind::Modified, added: None, removed: None, mtime: m, binary: false });
+                }
+            }
+        }
+    }
+    files
+}
+
+/// Au-delà, la liste d'un dossier est coupée (dossier de cache géant…).
+const MAX_DIRS: usize = 2000;
+
+/// Sous-dossiers de `path` pour le sélecteur : visibles seulement, triés sans tenir compte de la casse.
+pub fn list_dir(path: &str) -> DirListing {
+    let mut listing = DirListing { request: path.into(), path: None, parent: None, git: false, dirs: Vec::new(), error: None };
+    let dir = match resolve(if path.trim().is_empty() { "~" } else { path }) {
+        Ok(d) => d,
+        Err(e) => {
+            listing.error = Some(e);
+            return listing;
+        }
+    };
+    listing.git = dir.join(".git").exists();
+    listing.parent = dir.parent().map(|p| p.to_string_lossy().into_owned());
+    match fs::read_dir(&dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                // `metadata` suit les liens : un lien vers un dossier compte comme un dossier.
+                if name.starts_with('.') || !entry.path().metadata().is_ok_and(|m| m.is_dir()) {
+                    continue;
+                }
+                listing.dirs.push(DirEntry { git: entry.path().join(".git").exists(), name });
+                if listing.dirs.len() >= MAX_DIRS {
+                    break;
+                }
+            }
+            listing.dirs.sort_by_key(|d| d.name.to_lowercase());
+        }
+        Err(e) => listing.error = Some(format!("lecture impossible : {e}")),
+    }
+    listing.path = Some(dir.to_string_lossy().into_owned());
+    listing
+}
+
+/// Un chemin relatif qui ne sort pas du dépôt.
+fn safe_relative(file: &str) -> bool {
+    let p = Path::new(file);
+    !file.is_empty() && p.is_relative() && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
+}
+
+fn diff(w: &Watched, file: &str) -> (String, bool) {
+    if !safe_relative(file) {
+        return ("chemin refusé".into(), false);
+    }
+    let Ok(dir) = resolve(&w.path) else { return ("dossier introuvable".into(), false) };
+    let Some(repo) = repo(&dir) else { return ("Pas un dépôt git : initialisez git dans ce dossier pour voir les diffs.".into(), false) };
+    let entry = w.last_sent.as_ref().and_then(|s| s.files.iter().find(|f| f.path == file));
+    let out = match entry.map(|f| &f.kind) {
+        Some(ChangeKind::Untracked) => git(&repo.top, &["diff", "--no-index", "--no-color", "--no-ext-diff", "--", "/dev/null", file]),
+        Some(ChangeKind::Renamed(from)) => git(&repo.top, &["diff", &repo.base, "--no-color", "--no-ext-diff", "-M", "--", from, file]),
+        _ => git(&repo.top, &["diff", &repo.base, "--no-color", "--no-ext-diff", "--", file]),
+    };
+    let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
+    if text.is_empty() {
+        return ("Aucune différence avec HEAD.".into(), false);
+    }
+    truncate(text, MAX_DIFF)
+}
+
+fn truncate(mut text: String, max: usize) -> (String, bool) {
+    if text.len() <= max {
+        return (text, false);
+    }
+    let mut cut = max;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    text.truncate(cut);
+    (text, true)
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tilde_expands_to_home_only_at_the_start() {
+        assert_eq!(expand_tilde("~", Some("/home/me")), "/home/me");
+        assert_eq!(expand_tilde(" ~/code/api ", Some("/home/me/")), "/home/me/code/api");
+        assert_eq!(expand_tilde("/srv/~x", Some("/home/me")), "/srv/~x");
+        assert_eq!(expand_tilde("~/x", None), "~/x");
+    }
+
+    #[test]
+    fn porcelain_kinds_and_renames() {
+        let out = " M src/a.rs\0A  new.rs\0R  b.rs\0old b.rs\0 D gone.rs\0?? notes/todo.md\0MM both.rs\0";
+        assert_eq!(
+            parse_porcelain(out),
+            vec![
+                ("src/a.rs".into(), ChangeKind::Modified),
+                ("new.rs".into(), ChangeKind::Added),
+                ("b.rs".into(), ChangeKind::Renamed("old b.rs".into())),
+                ("gone.rs".into(), ChangeKind::Deleted),
+                ("notes/todo.md".into(), ChangeKind::Untracked),
+                ("both.rs".into(), ChangeKind::Modified),
+            ]
+        );
+        assert!(parse_porcelain("").is_empty());
+    }
+
+    #[test]
+    fn numstat_counts_binaries_and_renames() {
+        let out = "3\t1\tsrc/a.rs\0-\t-\timg.png\x000\t2\t\0old.rs\0new.rs\0";
+        let map = parse_numstat(out);
+        assert_eq!(map["src/a.rs"], (Some(3), Some(1)));
+        assert_eq!(map["img.png"], (None, None));
+        assert_eq!(map["new.rs"], (Some(0), Some(2)));
+        assert_eq!(map.len(), 3);
+    }
+
+    #[test]
+    fn diff_paths_must_stay_inside() {
+        assert!(safe_relative("src/a.rs"));
+        assert!(!safe_relative("../etc/passwd"));
+        assert!(!safe_relative("/etc/passwd"));
+        assert!(!safe_relative(""));
+    }
+
+    #[test]
+    fn truncation_respects_utf8() {
+        let (t, cut) = truncate("ééé".into(), 3);
+        assert_eq!((t.as_str(), cut), ("é", true));
+        assert_eq!(truncate("abc".into(), 10), ("abc".into(), false));
+    }
+
+    #[test]
+    fn listing_shows_visible_subfolders_sorted_with_git_markers() {
+        let root = std::env::temp_dir().join(format!("tcanvas-list-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for d in ["beta/.git", "Alpha", ".cache", "gamma"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        fs::write(root.join("fichier.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(root.join("gamma"), root.join("lien")).unwrap();
+        let l = list_dir(&root.display().to_string());
+        assert_eq!(l.error, None);
+        let names: Vec<(&str, bool)> = l.dirs.iter().map(|d| (d.name.as_str(), d.git)).collect();
+        assert_eq!(names, vec![("Alpha", false), ("beta", true), ("gamma", false), ("lien", false)]);
+        assert_eq!(l.path.as_deref(), Some(fs::canonicalize(&root).unwrap().to_str().unwrap()));
+        assert!(l.parent.is_some() && !l.git);
+        assert!(list_dir(&root.join("beta").display().to_string()).git);
+        let missing = list_dir("/nexiste/pas");
+        assert!(missing.error.is_some() && missing.path.is_none());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn missing_folder_reports_an_error() {
+        let set = scan("k", "/nexiste/pas/du/tout", 0);
+        assert!(set.error.as_deref().is_some_and(|e| e.contains("introuvable")), "{set:?}");
+        assert!(set.root.is_none() && set.files.is_empty());
+    }
+}

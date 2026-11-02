@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- tcanvas, variante simplifiée pour 16 à 32 px : une carte >_ et deux nœuds reliés -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2E3550"/>
+      <stop offset="1" stop-color="#14161C"/>
+    </linearGradient>
+  </defs>
+  <path d="M128 4C226 4 252 30 252 128S226 252 128 252 4 226 4 128 30 4 128 4Z" fill="url(#bg)"/>
+  <g fill="none" stroke-width="14" stroke-linecap="round">
+    <path d="M160 96C184 96 180 64 200 64" stroke="#2EAA8C"/>
+    <path d="M160 168C184 168 180 196 200 196" stroke="#E6963C"/>
+  </g>
+  <rect x="180" y="40" width="56" height="48" rx="12" fill="#2EAA8C"/>
+  <rect x="180" y="172" width="56" height="48" rx="12" fill="#E6963C"/>
+  <rect x="26" y="62" width="140" height="132" rx="26" fill="#0C0D11" stroke="#6EA0FF" stroke-width="14"/>
+  <g fill="none" stroke="#E4EDFF" stroke-width="22" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M62 102L94 128 62 154"/>
+    <path d="M110 156H136"/>
+  </g>
+</svg>

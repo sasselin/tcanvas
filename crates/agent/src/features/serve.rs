@@ -2,13 +2,13 @@
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use protocol::{AgentCmd, AgentEvent, DEFAULT_STALL_SECS, SessionInfo, TermStatus};
 
-use super::{hooks, kill, status, tmux};
+use super::{changes, hooks, kill, status, tmux};
 
 const POLL: Duration = Duration::from_secs(1);
 const TAIL_LINES: usize = 3;
@@ -25,9 +25,14 @@ struct Tracked {
 }
 
 pub fn run() -> io::Result<()> {
-    let cmds = spawn_stdin_reader();
-    let mut out = io::stdout().lock();
-    send(&mut out, &AgentEvent::Hello { version: env!("CARGO_PKG_VERSION").into(), hooks_installed: hooks::installed() })?;
+    // Le fil des changements écrit aussi sur stdout : un verrou par message garde les lignes entières.
+    let watcher = changes::spawn(|ev| {
+        if send(ev).is_err() {
+            std::process::exit(0);
+        }
+    });
+    let cmds = spawn_stdin_reader(watcher);
+    send(&AgentEvent::Hello { version: env!("CARGO_PKG_VERSION").into(), hooks_installed: hooks::installed() })?;
 
     let mut tracked: HashMap<String, Tracked> = HashMap::new();
     loop {
@@ -37,13 +42,15 @@ pub fn run() -> io::Result<()> {
                 AgentCmd::Kill { session } => {
                     thread::spawn(move || kill::kill_session(&session));
                 }
+                // Relayées directement au fil des changements par le lecteur de stdin.
+                AgentCmd::Watch { .. } | AgentCmd::Unwatch { .. } | AgentCmd::Diff { .. } | AgentCmd::ListDir { .. } => {}
             }
         }
 
         let rows = match tmux::list_panes() {
             Ok(rows) => rows,
             Err(e) => {
-                send(&mut out, &AgentEvent::Error { message: format!("tmux introuvable : {e}") })?;
+                send(&AgentEvent::Error { message: format!("tmux introuvable : {e}") })?;
                 Vec::new()
             }
         };
@@ -53,7 +60,7 @@ pub fn run() -> io::Result<()> {
             let t = tracked.entry(row.session.clone()).or_default();
             let info = observe(row, t, now);
             if t.last_sent.as_ref() != Some(&info) {
-                send(&mut out, &AgentEvent::Session(info.clone()))?;
+                send(&AgentEvent::Session(info.clone()))?;
                 t.last_sent = Some(info);
             }
         }
@@ -65,7 +72,7 @@ pub fn run() -> io::Result<()> {
             .collect();
         for session in gone {
             tracked.remove(&session);
-            send(&mut out, &AgentEvent::Gone { session })?;
+            send(&AgentEvent::Gone { session })?;
         }
 
         thread::sleep(POLL);
@@ -112,13 +119,15 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64) -> SessionInfo {
     }
 }
 
-fn send(out: &mut impl Write, ev: &AgentEvent) -> io::Result<()> {
+fn send(ev: &AgentEvent) -> io::Result<()> {
+    let mut out = io::stdout().lock();
     out.write_all(protocol::encode(ev).as_bytes())?;
     out.flush()
 }
 
 /// Lit les commandes de l'application. La fin de stdin (application fermée) arrête l'agent.
-fn spawn_stdin_reader() -> Receiver<AgentCmd> {
+/// Les commandes de suivi des changements partent tout de suite à leur fil (diff sans attente).
+fn spawn_stdin_reader(watcher: Sender<changes::Cmd>) -> Receiver<AgentCmd> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         for line in io::stdin().lock().lines() {
@@ -127,6 +136,18 @@ fn spawn_stdin_reader() -> Receiver<AgentCmd> {
                 continue;
             }
             match protocol::decode::<AgentCmd>(&line) {
+                Ok(AgentCmd::Watch { key, path }) => {
+                    let _ = watcher.send(changes::Cmd::Watch { key, path });
+                }
+                Ok(AgentCmd::Unwatch { key }) => {
+                    let _ = watcher.send(changes::Cmd::Unwatch { key });
+                }
+                Ok(AgentCmd::Diff { key, file }) => {
+                    let _ = watcher.send(changes::Cmd::Diff { key, file });
+                }
+                Ok(AgentCmd::ListDir { path }) => {
+                    let _ = watcher.send(changes::Cmd::List { path });
+                }
                 Ok(cmd) => {
                     if tx.send(cmd).is_err() {
                         break;

@@ -14,6 +14,7 @@ use egui::{Align, Align2, CentralPanel, FontId, Frame, Id, Key, Layout, Panel, R
 
 use crate::features::agent_link::{AgentLink, AgentMode};
 use crate::features::canvas::Canvas;
+use crate::features::changes::Changes;
 use crate::features::filters::{self, Filters};
 use crate::features::jump::Jump;
 use crate::features::notifications::Notifications;
@@ -75,6 +76,7 @@ pub struct App {
     pub world: World,
     canvas: Canvas,
     pub cards: TerminalCards,
+    pub changes: Changes,
     projects: Projects,
     spaces: Spaces,
     wires: Wires,
@@ -99,6 +101,7 @@ impl App {
             world,
             canvas: Canvas::default(),
             cards: TerminalCards::new(ctx.clone(), config.launcher),
+            changes: Changes::default(),
             projects: Projects::default(),
             spaces: Spaces::default(),
             wires: Wires,
@@ -126,6 +129,11 @@ impl App {
 
     pub fn jump_open(&self) -> bool {
         self.jump.is_open()
+    }
+
+    /// Commandes adressées à l'agent quand il est désactivé (tests).
+    pub fn agent_sent(&self) -> &[protocol::AgentCmd] {
+        self.agent.sent()
     }
 
     pub fn agent_state(&self) -> &crate::features::agent_link::LinkState {
@@ -193,23 +201,34 @@ impl App {
         self.run_shortcuts(&ctx, &mut events);
         self.agent.poll(&self.world, &mut events);
         self.cards.poll(&mut self.world, &mut events);
+        self.changes.poll(&self.world, &mut events);
         self.notifications.poll(&ctx, &mut events);
 
-        Panel::top("toolbar").show(ui, |ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                self.agent.status_ui(ui);
-                if let Some(err) = &self.persistence.last_error {
-                    ui.label(RichText::new("⚠ layout").color(theme::status_color(Some(protocol::TermStatus::Exited(1))))).on_hover_text(err);
-                }
+        // Deux lignes fixes : actions et projets, puis recherche et filtres. Pas de mise en page
+        // centrée ni de retour à la ligne automatique : la barre garde sa hauteur quoi qu'il arrive.
+        Panel::top("toolbar").resizable(false).show(ui, |ui| {
+            ui.add_space(2.0);
+            ui.horizontal(|ui| {
+                Filters::actions_ui(ui, &mut events);
+                ui.separator();
                 let vp = self.canvas.viewport();
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    self.spaces.ui(ui, &self.world, vp, &mut events);
-                    self.filters.ui(ui, &self.world, &mut events);
+                self.spaces.ui(ui, &self.world, vp, &mut events);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    self.agent.status_ui(ui);
+                    self.changes.toolbar_ui(ui, &self.world, &mut events);
+                    if let Some(err) = &self.persistence.last_error {
+                        ui.label(RichText::new("⚠ layout").color(theme::status_color(Some(protocol::TermStatus::Exited(1))))).on_hover_text(err);
+                    }
                 });
             });
+            ui.horizontal(|ui| self.filters.ui(ui, &self.world, &mut events));
+            ui.add_space(2.0);
         });
 
+        self.changes.panel_ui(ui, &self.world, &mut events);
+
         CentralPanel::default().frame(Frame::NONE).show(ui, |ui| {
+            self.world.refit_projects();
             self.canvas.background(ui, &mut self.world, &mut events);
             let vp = self.canvas.viewport();
             self.projects.ui(ui, &mut self.world, vp, &mut events);
@@ -258,6 +277,7 @@ impl App {
             let w = &mut self.world;
             self.cards.handle(&ev, w, &mut out);
             self.projects.handle(&ev, w, &mut out);
+            self.changes.handle(&ev, w, &mut out);
             // Avant la caméra : aller à un terminal caché ouvre d'abord son espace.
             self.spaces.handle(&ev, w, &mut out);
             self.wires.handle(&ev, w, &mut out);
@@ -266,6 +286,7 @@ impl App {
             self.notifications.handle(&ev, w, &mut out);
             queue.extend(out);
         }
+        self.world.refit_projects();
     }
 
     pub fn save_now(&mut self) {

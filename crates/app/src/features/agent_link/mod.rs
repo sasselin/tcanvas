@@ -44,12 +44,14 @@ pub struct AgentLink {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     retry_at: Option<Instant>,
+    /// Agent désactivé (tests) : les commandes sont gardées ici au lieu d'être envoyées.
+    sent: Vec<AgentCmd>,
 }
 
 impl AgentLink {
     pub fn new(ctx: egui::Context, mode: AgentMode) -> Self {
         let (tx, rx) = mpsc::channel();
-        let mut link = Self { mode, ctx, state: LinkState::Off, child: None, stdin: None, tx, rx, retry_at: None };
+        let mut link = Self { mode, ctx, state: LinkState::Off, child: None, stdin: None, tx, rx, retry_at: None, sent: Vec::new() };
         link.start();
         link
     }
@@ -107,7 +109,15 @@ impl AgentLink {
         self.ctx.request_repaint_after(RETRY_AFTER);
     }
 
+    pub fn sent(&self) -> &[AgentCmd] {
+        &self.sent
+    }
+
     pub fn send(&mut self, cmd: &AgentCmd) {
+        if self.mode == AgentMode::Disabled {
+            self.sent.push(cmd.clone());
+            return;
+        }
         if let Some(stdin) = &mut self.stdin
             && stdin.write_all(protocol::encode(cmd).as_bytes()).and_then(|_| stdin.flush()).is_err() {
                 self.stdin = None;
@@ -162,11 +172,16 @@ impl AgentLink {
     }
 
     pub fn handle(&mut self, ev: &Event, world: &mut World, _out: &mut Vec<Event>) {
-        if let Event::SetStall(id, secs) = ev
-            && let Some(card) = world.card(id) {
-                let session = card.session();
-                self.send(&AgentCmd::SetStall { session, secs: *secs });
+        match ev {
+            Event::SetStall(id, secs) => {
+                if let Some(card) = world.card(id) {
+                    let session = card.session();
+                    self.send(&AgentCmd::SetStall { session, secs: *secs });
+                }
             }
+            Event::ToAgent(cmd) => self.send(cmd),
+            _ => {}
+        }
     }
 }
 

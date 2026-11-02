@@ -51,6 +51,8 @@ pub fn message(notice: &Notice, card: &Card) -> (String, String) {
         Notice::Failed(code) => (format!("✖ Échec (code {code})"), title),
         Notice::Finished { secs } => (format!("✔ Terminé en {}", human_duration(*secs)), title),
         Notice::Stopped => ("■ Terminal arrêté".into(), title),
+        Notice::Moved(Some(group)) => (format!("➜ Déplacé vers « {group} »"), format!("{title} · clic : y aller")),
+        Notice::Moved(None) => ("➜ Sorti du groupe".into(), format!("{title} est dans « Tous » · clic : y aller")),
     }
 }
 
@@ -123,12 +125,14 @@ impl Notifications {
         let window_focused = world.window_focused;
         let watching = window_focused && world.focused.as_ref() == Some(id);
         let Some(card) = world.card_mut(id) else { return };
-        if watching {
+        // Un déplacement est une simple information : ni bordure d'alerte, ni toast Windows.
+        let info_only = matches!(notice, Notice::Moved(_));
+        if watching && !info_only {
             return;
         }
-        card.attention = true;
+        card.attention |= !info_only;
         let (title, body) = message(notice, card);
-        if !window_focused {
+        if !window_focused && !info_only {
             self.os.show(&title, &body, id);
         }
         self.toasts.retain(|t| !(t.card == *id && t.notice == *notice));

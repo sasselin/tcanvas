@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- tcanvas : des terminaux posés sur un canevas infini, reliés par un fil -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2A3044"/>
+      <stop offset="0.55" stop-color="#191C25"/>
+      <stop offset="1" stop-color="#101115"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.3" cy="0.55" r="0.6">
+      <stop offset="0" stop-color="#6EA0FF" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#6EA0FF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="gridfade" cx="0.5" cy="0.45" r="0.6">
+      <stop offset="0" stop-color="#fff" stop-opacity="1"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0.15"/>
+    </radialGradient>
+    <mask id="gridmask"><rect width="256" height="256" fill="url(#gridfade)"/></mask>
+    <pattern id="dots" width="20" height="20" patternUnits="userSpaceOnUse" x="8" y="8">
+      <circle cx="10" cy="10" r="1.7" fill="#AFC4FF" fill-opacity="0.16"/>
+    </pattern>
+    <linearGradient id="wire" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#6EA0FF"/>
+      <stop offset="1" stop-color="#2EAA8C"/>
+    </linearGradient>
+    <linearGradient id="wire2" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#6EA0FF"/>
+      <stop offset="1" stop-color="#E6963C"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#fff" stop-opacity="0.22"/>
+      <stop offset="0.5" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4"/>
+    </filter>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="6"/>
+      <feOffset dy="6"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.55"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="halo" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="12"/>
+    </filter>
+    <linearGradient id="card" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1A1D27"/>
+      <stop offset="1" stop-color="#0E0F13"/>
+    </linearGradient>
+    <clipPath id="squircle">
+      <path id="sq" d="M128 8C222 8 248 34 248 128S222 248 128 248 8 222 8 128 34 8 128 8Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- fond : squircle sombre, halo bleu, grille de points -->
+  <path d="M128 8C222 8 248 34 248 128S222 248 128 248 8 222 8 128 34 8 128 8Z" fill="url(#bg)"/>
+  <g clip-path="url(#squircle)">
+    <rect width="256" height="256" fill="url(#glow)"/>
+    <rect width="256" height="256" fill="url(#dots)" mask="url(#gridmask)"/>
+  </g>
+  <path d="M128 8C222 8 248 34 248 128S222 248 128 248 8 222 8 128 34 8 128 8Z" fill="none" stroke="url(#sheen)" stroke-width="2"/>
+
+  <!-- fils (sous les cartes) -->
+  <g fill="none" stroke-linecap="round" stroke-width="5">
+    <path d="M150 112C172 112 160 76 178 76" stroke="url(#wire)"/>
+    <path d="M150 152C174 152 160 180 182 180" stroke="url(#wire2)"/>
+  </g>
+
+  <!-- cartes satellites -->
+  <g filter="url(#shadow)">
+    <rect x="170" y="52" width="54" height="48" rx="10" fill="#101115" stroke="#2EAA8C" stroke-width="4"/>
+    <rect x="174" y="156" width="54" height="48" rx="10" fill="#101115" stroke="#E6963C" stroke-width="4"/>
+  </g>
+  <g stroke-linecap="round" stroke-width="5">
+    <path d="M182 70H206" stroke="#2EAA8C" stroke-opacity="0.8"/>
+    <path d="M182 83H198" stroke="#2EAA8C" stroke-opacity="0.45"/>
+    <path d="M186 174H212" stroke="#E6963C" stroke-opacity="0.8"/>
+    <path d="M186 187H202" stroke="#E6963C" stroke-opacity="0.45"/>
+  </g>
+
+  <!-- carte principale (halo bleu derrière) -->
+  <rect x="28" y="78" width="124" height="108" rx="18" fill="#5E81F4" opacity="0.45" filter="url(#halo)"/>
+  <g filter="url(#shadow)">
+    <rect x="28" y="78" width="124" height="108" rx="18" fill="url(#card)" stroke="#5E81F4" stroke-width="4"/>
+  </g>
+  <circle cx="46" cy="96" r="4" fill="#5E81F4" fill-opacity="0.6"/>
+  <circle cx="59" cy="96" r="4" fill="#5E81F4" fill-opacity="0.35"/>
+  <!-- prompt >_ lumineux -->
+  <g fill="none" stroke="#6EA0FF" stroke-linecap="round" stroke-linejoin="round" stroke-width="12">
+    <g filter="url(#soft)" opacity="0.85">
+      <path d="M52 120L74 138 52 156"/>
+      <path d="M88 158H122"/>
+    </g>
+    <path d="M52 120L74 138 52 156" stroke="#CFE0FF"/>
+    <path d="M88 158H122" stroke="#CFE0FF"/>
+  </g>
+
+  <!-- prises du fil -->
+  <circle cx="150" cy="112" r="6" fill="#16181D" stroke="#6EA0FF" stroke-width="3.5"/>
+  <circle cx="150" cy="152" r="6" fill="#16181D" stroke="#6EA0FF" stroke-width="3.5"/>
+</svg>

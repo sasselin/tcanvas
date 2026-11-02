@@ -96,11 +96,16 @@ impl Canvas {
     }
 
     /// Molette : déplace la vue ; Ctrl + molette (ou pincement) : zoom autour du curseur.
+    /// Rien si le pointeur est sur autre chose que le canevas : panneau, menu, liste, fenêtre,
+    /// toast… (ils font défiler leur propre contenu) ou un terminal (`wheel_taken`).
     pub fn navigate(&mut self, ui: &mut Ui, world: &mut World, wheel_taken: bool) {
         let vp = self.viewport;
         let Some(pointer) = ui.input(|i| i.pointer.hover_pos()).filter(|p| vp.contains(*p)) else {
             return;
         };
+        if ui.ctx().layer_id_at(pointer).is_some_and(|layer| layer != ui.layer_id()) {
+            return;
+        }
         let (zoom, scroll) = ui.input(|i| (i.zoom_delta(), i.smooth_scroll_delta));
         if zoom != 1.0 {
             world.camera.zoom_around(pointer, zoom, vp);
@@ -170,6 +175,7 @@ impl Canvas {
                 }
             }
             Event::FitRect(r) => self.fly(world.camera, Camera::fitting(*r, vp, 60.0, 1.0), None),
+            Event::FlyCamera(to) => self.fly(world.camera, *to, None),
             // Changer d'espace remplace la caméra : un vol en cours n'a plus de sens.
             Event::EnterSpace(_) => self.flight = None,
             _ => {}

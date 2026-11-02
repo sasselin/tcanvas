@@ -1,18 +1,20 @@
-//! Projets : cadres nommés sur le canevas. Une carte appartient au cadre qui contient son centre.
+//! Projets (groupes) : cadres nommés sur le canevas. Une carte appartient explicitement à un groupe
+//! (`Card::project`) et le cadre s'ajuste à ses membres. Un groupe peut être lié à un dossier.
 
 use egui::text::CCursor;
 use egui::text_selection::CCursorRange;
 use egui::{Align2, CornerRadius, FontId, Id, Key, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, TextEdit, Ui, Vec2, pos2, vec2};
 
-use crate::shell::event::Event;
+mod folder_picker;
+
+use folder_picker::{Choice, FolderPicker};
+use crate::shell::event::{Event, Notice};
 use crate::shell::theme;
-use crate::shell::widgets::{confirm, text_prompt};
-use crate::shell::world::{CardId, PROJECT_COLORS, Project, ProjectId, World, new_id};
+use crate::shell::widgets::confirm;
+use crate::shell::world::{Body, CardId, EMPTY_PROJECT, PROJECT_COLORS, Project, ProjectId, World, new_id};
 
 /// Hauteur de l'étiquette au-dessus du cadre, en pixels écran (lisible à tout zoom).
 const HEADER_H: f32 = 24.0;
-const DEFAULT_SIZE: Vec2 = Vec2::new(1800.0, 1100.0);
-const MIN_SIZE: Vec2 = Vec2::new(200.0, 120.0);
 /// Largeur du bouton × au bout de l'étiquette.
 const CLOSE_W: f32 = 24.0;
 
@@ -26,17 +28,16 @@ struct Editing {
 
 #[derive(Default)]
 pub struct Projects {
-    /// Dossier des nouveaux terminaux, édité dans une boîte de saisie.
-    cwd_dialog: Option<(ProjectId, String)>,
+    /// Sélecteur du dossier lié, ouvert pour un groupe.
+    picker: Option<FolderPicker>,
     editing: Option<Editing>,
     /// Fermeture du groupe demandée, en attente de confirmation.
     confirm_close: Option<ProjectId>,
 }
 
-/// Terminaux du groupe : ceux dont le centre est dans le cadre (sous-groupes compris).
+/// Terminaux membres du groupe.
 pub fn cards_in(world: &World, id: &str) -> Vec<CardId> {
-    let Some(rect) = world.project(id).map(|p| p.rect) else { return Vec::new() };
-    world.cards.iter().filter(|c| rect.contains(c.rect.center())).map(|c| c.id.clone()).collect()
+    world.members(id).map(|c| c.id.clone()).collect()
 }
 
 /// Texte de la confirmation : chaque terminal, et ce qui y tourne.
@@ -59,19 +60,64 @@ pub fn close_message(world: &World, id: &str) -> (String, String) {
     (title, body)
 }
 
+/// Où poser une carte qui rejoint un groupe par le menu : à droite de ses membres, ou au centre
+/// du cadre s'il est vide.
+pub fn arrival_spot(world: &World, project: &str, card: &str) -> Option<Rect> {
+    let p = world.project(project)?;
+    let size = world.card(card)?.rect.size();
+    let members = world.members(project).filter(|c| c.id != card).map(|c| c.rect).reduce(|a, b| a.union(b));
+    let near = match members {
+        Some(r) => pos2(r.max.x + 40.0 + size.x / 2.0, r.min.y + size.y / 2.0),
+        None => p.rect.center(),
+    };
+    Some(world.free_spot(near, size))
+}
+
+/// Libellé du dossier lié, raccourci par la gauche pour garder la fin du chemin.
+pub fn folder_label(cwd: Option<&str>) -> String {
+    match cwd {
+        None => "📁 Lier un dossier".into(),
+        Some(c) if c.chars().count() > 40 => format!("📁 …{}", c.chars().skip(c.chars().count() - 39).collect::<String>()),
+        Some(c) => format!("📁 {c}"),
+    }
+}
+
+/// Valeur proposée dans la boîte « Dossier lié » : le dossier actuel, sinon celui d'un terminal
+/// du groupe (le focalisé d'abord) — le cas courant : « je suis déjà dans le repo, je lie ».
+pub fn suggested_folder(world: &World, id: &str) -> String {
+    if let Some(cwd) = world.project(id).and_then(|p| p.cwd.clone()) {
+        return cwd;
+    }
+    let focused = world.focused.as_deref().and_then(|f| world.card(f)).filter(|c| c.project.as_deref() == Some(id));
+    focused.into_iter().chain(world.members(id)).find_map(|c| c.current_cwd().map(str::to_string)).unwrap_or_default()
+}
+
+/// Raccourcis du sélecteur : dossiers des terminaux du groupe, puis dossiers liés des autres groupes.
+pub fn shortcuts(world: &World, id: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let members = world.members(id).filter_map(|c| c.current_cwd().map(str::to_string));
+    let others = world.projects.iter().filter(|p| p.id != id).filter_map(|p| p.cwd.clone());
+    for path in members.chain(others) {
+        if !out.contains(&path) {
+            out.push(path);
+        }
+    }
+    out.truncate(8);
+    out
+}
+
 /// Centre d'un nouveau cadre posé à droite de tout le contenu existant.
 fn free_area(world: &World) -> Pos2 {
     let all = world.cards.iter().map(|c| c.rect).chain(world.projects.iter().map(|p| p.rect)).reduce(|a, b| a.union(b));
     match all {
-        Some(r) => pos2(r.max.x + 400.0 + DEFAULT_SIZE.x / 2.0, r.min.y + DEFAULT_SIZE.y / 2.0),
+        Some(r) => pos2(r.max.x + 400.0 + EMPTY_PROJECT.x / 2.0, r.min.y + EMPTY_PROJECT.y / 2.0),
         None => world.camera.center,
     }
 }
 
-/// Déplace un cadre et toutes les cartes dont le centre est à l'intérieur.
+/// Déplace un cadre et tous ses membres.
 pub fn move_project(world: &mut World, id: &str, delta: Vec2) {
-    let Some(rect) = world.project(id).map(|p| p.rect) else { return };
-    for card in world.cards.iter_mut().filter(|c| rect.contains(c.rect.center())) {
+    for card in world.cards.iter_mut().filter(|c| c.project.as_deref() == Some(id)) {
         card.rect = card.rect.translate(delta);
     }
     if let Some(p) = world.projects.iter_mut().find(|p| p.id == id) {
@@ -82,7 +128,7 @@ pub fn move_project(world: &mut World, id: &str, delta: Vec2) {
 
 impl Projects {
     pub fn has_dialog(&self) -> bool {
-        self.cwd_dialog.is_some() || self.editing.is_some() || self.confirm_close.is_some()
+        self.picker.is_some() || self.editing.is_some() || self.confirm_close.is_some()
     }
 
     pub fn start_rename(&mut self, p: &Project) {
@@ -106,16 +152,21 @@ impl Projects {
             }
             painter.rect_filled(screen, CornerRadius::same(10), color.gamma_multiply(0.07));
             painter.rect_stroke(screen, CornerRadius::same(10), Stroke::new(1.5, color.gamma_multiply(0.6)), StrokeKind::Inside);
+            self.drag_feedback(ui, world, &id, screen, color);
+            let p = &world.projects[i];
 
             // Le numéro rappelle le raccourci Ctrl+Maj+<n>.
             let number = if i < 9 { format!("{}  ", i + 1) } else { String::new() };
-            let label = match &p.cwd {
-                Some(cwd) => format!("{number}{}   {}", p.name, cwd),
-                None => format!("{number}{}", p.name),
-            };
+            let label = format!("{number}{}", p.name);
+            let folder = folder_label(p.cwd.as_deref());
             let font = FontId::proportional(14.0);
-            let width = ui.ctx().fonts_mut(|f| f.layout_no_wrap(label.clone(), font.clone(), theme::TEXT).size().x) + 20.0 + CLOSE_W;
+            let measure = |text: &str, font: &FontId| ui.ctx().fonts_mut(|f| f.layout_no_wrap(text.to_string(), font.clone(), theme::TEXT).size().x);
+            let width = measure(&label, &font) + 20.0 + CLOSE_W;
             let header = Rect::from_min_size(pos2(screen.min.x, screen.min.y - HEADER_H - 4.0), vec2(width, HEADER_H));
+            let folder_font = FontId::proportional(12.0);
+            let folder_rect = Rect::from_min_size(pos2(header.max.x + 6.0, header.min.y), vec2(measure(&folder, &folder_font) + 16.0, HEADER_H));
+            let add_label = "+ Terminal";
+            let add_rect = Rect::from_min_size(pos2(folder_rect.max.x + 6.0, header.min.y), vec2(measure(add_label, &folder_font) + 16.0, HEADER_H));
             let eid = Id::unique(("project", &id));
 
             if self.editing.as_ref().is_some_and(|e| e.id == id) {
@@ -128,6 +179,43 @@ impl Projects {
 
             painter.rect_filled(header, CornerRadius::same(6), color.gamma_multiply(0.85));
             painter.text(header.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, label, font, theme::CARD_BG);
+
+            // Dossier lié, à droite de l'étiquette : clic = changer de dossier.
+            let folder_r = ui.interact(folder_rect, eid.with("folder"), Sense::click()).on_hover_text(match &p.cwd {
+                Some(_) => "Dossier lié : les nouveaux terminaux s'y ouvrent et ses changements sont suivis. Clic : changer",
+                None => "Lier un dossier : les nouveaux terminaux s'y ouvriront et ses changements seront suivis",
+            });
+            let a11y = format!("Dossier du groupe {}", p.name);
+            folder_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
+            let folder_bg = if folder_r.hovered() { color.gamma_multiply(0.5) } else { color.gamma_multiply(0.22) };
+            painter.rect_filled(folder_rect, CornerRadius::same(6), folder_bg);
+            let folder_color = if p.cwd.is_some() { theme::TEXT } else { theme::TEXT_DIM };
+            painter.text(folder_rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, folder, folder_font.clone(), folder_color);
+            if folder_r.clicked() {
+                self.open_picker(world, &id, events);
+            }
+
+            // Nouveau terminal dans ce groupe (dans son dossier lié), posé à côté des autres.
+            let add_r = ui.interact(add_rect, eid.with("add"), Sense::click()).on_hover_text("Ouvrir un terminal dans ce groupe (Ctrl+Maj+N quand le groupe est ouvert)");
+            let a11y = format!("Nouveau terminal dans le groupe {}", p.name);
+            add_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
+            painter.rect_filled(add_rect, CornerRadius::same(6), if add_r.hovered() { color.gamma_multiply(0.5) } else { color.gamma_multiply(0.22) });
+            painter.text(add_rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, add_label, folder_font, theme::TEXT);
+            if add_r.clicked() {
+                events.push(Event::NewCard { at: None, project: Some(id.clone()) });
+            }
+
+            // Groupe vide : l'action évidente, au milieu du cadre.
+            if world.members(&id).next().is_none() && screen.width() > 220.0 && screen.height() > 80.0 {
+                let empty_rect = Rect::from_center_size(screen.center(), vec2(220.0, 44.0));
+                let empty_r = ui.interact(empty_rect, eid.with("empty-add"), Sense::click());
+                empty_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "+ Ouvrir un terminal"));
+                painter.rect_filled(empty_rect, CornerRadius::same(8), if empty_r.hovered() { color.gamma_multiply(0.6) } else { color.gamma_multiply(0.35) });
+                painter.text(empty_rect.center(), Align2::CENTER_CENTER, "+ Ouvrir un terminal", FontId::proportional(16.0), theme::TEXT);
+                if empty_r.clicked() {
+                    events.push(Event::NewCard { at: None, project: Some(id.clone()) });
+                }
+            }
 
             let head = ui.interact(header, eid.with("head"), Sense::click_and_drag()).on_hover_text("Double-clic : renommer · glisser : déplacer avec ses terminaux");
             // Bouton × au bout de l'étiquette, enregistré après : il gagne le clic.
@@ -152,19 +240,30 @@ impl Projects {
             if head.double_clicked() {
                 self.start_rename(&world.projects[i]);
             }
-            head.context_menu(|ui| self.menu(ui, &world.projects[i], events));
+            let mut pick = false;
+            head.context_menu(|ui| pick = self.menu(ui, &world.projects[i], events));
+            if pick {
+                self.open_picker(world, &id, events);
+            }
+        }
+    }
 
-            let grip = Rect::from_min_size(screen.max - Vec2::splat(18.0), Vec2::splat(18.0));
-            let grip_r = ui.interact(grip, eid.with("grip"), Sense::drag());
-            if grip_r.hovered() || grip_r.dragged() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
-            }
-            if grip_r.dragged() {
-                let r = &mut world.projects[i].rect;
-                r.max += grip_r.drag_delta() / cam.zoom;
-                r.max = r.max.max(r.min + MIN_SIZE);
-                world.touch();
-            }
+    /// Pendant qu'on glisse un terminal : le cadre où il atterrira s'illumine ; sortir du groupe
+    /// ouvert est annoncé (pointillés rouges), puisque le terminal quittera alors cet espace.
+    fn drag_feedback(&self, ui: &Ui, world: &World, id: &str, screen: Rect, color: egui::Color32) {
+        let Some(card) = world.dragging.as_deref().and_then(|c| world.card(c)) else { return };
+        let target = world.drop_target(card.rect.center());
+        let painter = ui.painter();
+        let joining = target.as_deref() == Some(id) && card.project.as_deref() != Some(id);
+        let leaving = target.is_none() && card.project.as_deref() == Some(id);
+        if joining {
+            painter.rect_filled(screen, CornerRadius::same(10), color.gamma_multiply(0.12));
+            painter.rect_stroke(screen, CornerRadius::same(10), Stroke::new(3.0, color), StrokeKind::Inside);
+        } else if leaving {
+            let red = egui::Color32::from_rgb(220, 80, 80);
+            let pts = [screen.left_top(), screen.right_top(), screen.right_bottom(), screen.left_bottom(), screen.left_top()];
+            painter.extend(egui::Shape::dashed_line(&pts, Stroke::new(2.0, red), 10.0, 6.0));
+            painter.text(screen.center_top() + vec2(0.0, 16.0), Align2::CENTER_TOP, "Relâcher pour sortir le terminal du groupe", FontId::proportional(14.0), red);
         }
     }
 
@@ -192,7 +291,18 @@ impl Projects {
         }
     }
 
-    fn menu(&mut self, ui: &mut Ui, p: &Project, events: &mut Vec<Event>) {
+    /// Ouvre le sélecteur de dossier du groupe, sur son dossier ou celui d'un de ses terminaux.
+    fn open_picker(&mut self, world: &World, id: &str, events: &mut Vec<Event>) {
+        let Some(p) = world.project(id) else { return };
+        let title = format!("Dossier lié au groupe « {} »", p.name);
+        let (picker, cmd) = FolderPicker::open(id.to_string(), title, p.cwd.is_some(), &suggested_folder(world, id), shortcuts(world, id));
+        self.picker = Some(picker);
+        events.push(Event::ToAgent(cmd));
+    }
+
+    /// Menu du groupe. Renvoie `true` pour ouvrir le sélecteur de dossier.
+    fn menu(&mut self, ui: &mut Ui, p: &Project, events: &mut Vec<Event>) -> bool {
+        let mut pick = false;
         if ui.button("Nouveau terminal ici").clicked() {
             events.push(Event::NewCard { at: Some(p.rect.center()), project: Some(p.id.clone()) });
             ui.close();
@@ -201,8 +311,12 @@ impl Projects {
             self.start_rename(p);
             ui.close();
         }
-        if ui.button("Dossier des nouveaux terminaux…").clicked() {
-            self.cwd_dialog = Some((p.id.clone(), p.cwd.clone().unwrap_or_default()));
+        if ui.button("Dossier lié…").clicked() {
+            pick = true;
+            ui.close();
+        }
+        if p.cwd.is_some() && ui.button("Délier le dossier").clicked() {
+            events.push(Event::SetProjectCwd(p.id.clone(), None));
             ui.close();
         }
         ui.menu_button("Couleur", |ui| {
@@ -224,6 +338,7 @@ impl Projects {
             events.push(Event::RemoveProject(p.id.clone()));
             ui.close();
         }
+        pick
     }
 
     pub fn dialogs(&mut self, ctx: &egui::Context, world: &World, events: &mut Vec<Event>) {
@@ -244,16 +359,53 @@ impl Projects {
             }
             return;
         }
-        let Some((id, text)) = &mut self.cwd_dialog else { return };
-        match text_prompt(ctx, "project-cwd", "Dossier WSL des nouveaux terminaux (ex. ~/code/api)", text) {
-            Some(true) => {
-                let value = Some(text.trim().to_string()).filter(|v| !v.is_empty());
-                events.push(Event::SetProjectCwd(id.clone(), value));
-                self.cwd_dialog = None;
+        let Some(picker) = &mut self.picker else { return };
+        if world.project(&picker.project).is_none() {
+            self.picker = None;
+            return;
+        }
+        match picker.ui(ctx) {
+            Some(Choice::Navigate(path)) => events.push(Event::ToAgent(picker.navigate(&path))),
+            Some(Choice::Link(path)) => {
+                events.push(Event::SetProjectCwd(picker.project.clone(), Some(path)));
+                self.picker = None;
             }
-            Some(false) => self.cwd_dialog = None,
+            Some(Choice::Unlink) => {
+                events.push(Event::SetProjectCwd(picker.project.clone(), None));
+                self.picker = None;
+            }
+            Some(Choice::Cancel) => self.picker = None,
             None => {}
         }
+    }
+
+    fn assign(&mut self, world: &mut World, card: &str, project: Option<ProjectId>, relocate: bool, out: &mut Vec<Event>) {
+        let Some(c) = world.card(card) else { return };
+        if c.project == project {
+            return;
+        }
+        let was_visible = world.shows_card(c);
+        let spot = match (&project, relocate) {
+            (Some(p), true) => arrival_spot(world, p, card),
+            // Sorti du groupe par le menu : posé à l'écart du cadre qu'il quitte.
+            (None, true) => c.project.as_deref().and_then(|p| world.project(p)).map(|p| world.free_spot(pos2(p.rect.max.x + 80.0 + c.rect.width() / 2.0, p.rect.min.y + c.rect.height() / 2.0), c.rect.size())),
+            _ => None,
+        };
+        let name = project.as_deref().and_then(|p| world.project(p)).map(|p| p.name.clone());
+        let c = world.card_mut(card).expect("carte présente");
+        c.project = project;
+        if let Some(r) = spot {
+            c.rect = r;
+        }
+        let hidden_now = !world.shows_card(world.card(card).expect("carte présente"));
+        if relocate {
+            out.push(Event::SettleCard(card.to_string()));
+        }
+        if was_visible && hidden_now {
+            // Le terminal quitte l'espace ouvert : on dit où il est parti (clic sur le toast : y aller).
+            out.push(Event::Notify(card.to_string(), Notice::Moved(name)));
+        }
+        world.touch();
     }
 
     pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
@@ -272,7 +424,7 @@ impl Projects {
                     id: new_id(),
                     name: format!("Projet {}", n + 1),
                     color: PROJECT_COLORS[n % PROJECT_COLORS.len()],
-                    rect: Rect::from_center_size(center, DEFAULT_SIZE),
+                    rect: Rect::from_center_size(center, EMPTY_PROJECT),
                     cwd: None,
                 };
                 self.start_rename(&p);
@@ -301,6 +453,22 @@ impl Projects {
                 }
                 world.touch();
             }
+            Event::Agent(protocol::AgentEvent::DirListing(listing)) => {
+                if let Some(p) = &mut self.picker {
+                    p.on_listing(listing);
+                }
+            }
+            // Dans un groupe : ses voisins s'écartent (puis le cadre, réajusté, écarte les autres
+            // groupes). Hors groupe : il s'écarte lui-même des groupes, et pousse les terminaux libres.
+            Event::SettleCard(id) => match world.card(id).map(|c| c.project.is_some()) {
+                Some(true) => {
+                    world.settle(id);
+                }
+                Some(false) => {
+                    world.separate(&Body::Card(id.clone()));
+                }
+                None => {}
+            },
             Event::RequestCloseProject(id) => {
                 if world.project(id).is_some() {
                     self.confirm_close = Some(id.clone());
@@ -308,7 +476,14 @@ impl Projects {
             }
             Event::RemoveProject(id) => {
                 world.projects.retain(|p| &p.id != id);
+                for card in world.cards.iter_mut().filter(|c| c.project.as_ref() == Some(id)) {
+                    card.project = None;
+                }
                 world.touch();
+            }
+            // Groupe disparu entre-temps : on ne fait rien.
+            Event::AssignCard { card, project, relocate } if project.as_ref().is_none_or(|p| world.project(p).is_some()) => {
+                self.assign(world, card, project.clone(), *relocate, out);
             }
             _ => {}
         }
@@ -324,12 +499,15 @@ mod tests {
     fn moving_a_project_carries_its_cards_only() {
         let mut w = World::default();
         w.projects.push(Project { id: "p".into(), name: "p".into(), color: [0; 3], rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0)), cwd: None });
-        w.add_card(Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::splat(50.0)), None));
-        w.add_card(Card::new(Rect::from_min_size(pos2(2000.0, 100.0), Vec2::splat(50.0)), None));
+        let mut member = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::splat(50.0)), None);
+        member.project = Some("p".into());
+        w.add_card(member);
+        // Sous le cadre mais pas membre : ne bouge pas.
+        w.add_card(Card::new(Rect::from_min_size(pos2(200.0, 100.0), Vec2::splat(50.0)), None));
         move_project(&mut w, "p", vec2(500.0, -20.0));
         assert_eq!(w.projects[0].rect.min, pos2(500.0, -20.0));
         assert_eq!(w.cards[0].rect.min, pos2(600.0, 80.0));
-        assert_eq!(w.cards[1].rect.min, pos2(2000.0, 100.0));
+        assert_eq!(w.cards[1].rect.min, pos2(200.0, 100.0));
     }
 
     #[test]
@@ -338,6 +516,7 @@ mod tests {
         w.projects.push(Project { id: "p".into(), name: "API".into(), color: [0; 3], rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0)), cwd: None });
         let mut a = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::splat(50.0)), None);
         a.name = Some("serveur".into());
+        a.project = Some("p".into());
         a.info = Some(protocol::SessionInfo {
             session: a.session(),
             status: protocol::TermStatus::Running,
@@ -355,6 +534,83 @@ mod tests {
         assert_eq!(title, "Fermer le groupe « API » ?");
         assert!(body.contains("serveur  —  « cargo run » en cours"), "{body}");
         assert!(cards_in(&w, "absent").is_empty());
+    }
+
+    fn two_groups() -> (World, CardId) {
+        let mut w = World::default();
+        for (id, x) in [("api", 0.0), ("web", 5000.0)] {
+            w.projects.push(Project { id: id.into(), name: id.to_uppercase(), color: [0; 3], rect: Rect::from_min_size(pos2(x, 0.0), Vec2::splat(1000.0)), cwd: None });
+        }
+        let mut c = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::new(300.0, 200.0)), None);
+        c.project = Some("api".into());
+        let id = c.id.clone();
+        w.add_card(c);
+        let mut other = Card::new(Rect::from_min_size(pos2(5100.0, 100.0), Vec2::new(300.0, 200.0)), None);
+        other.project = Some("web".into());
+        w.add_card(other);
+        w.refit_projects();
+        (w, id)
+    }
+
+    fn assign(w: &mut World, card: &str, project: Option<&str>, relocate: bool) -> Vec<Event> {
+        let mut out = vec![];
+        Projects::default().handle(&Event::AssignCard { card: card.into(), project: project.map(Into::into), relocate }, w, &mut out);
+        w.refit_projects();
+        out
+    }
+
+    #[test]
+    fn dropping_keeps_position_and_menu_relocates_next_to_members() {
+        let (mut w, id) = two_groups();
+        assert!(assign(&mut w, &id, Some("web"), false).is_empty(), "« Tous » : il reste visible, pas de toast");
+        assert_eq!(w.card(&id).unwrap().project.as_deref(), Some("web"));
+        // WEB a grandi jusqu'à la carte, restée où on l'a lâchée : API, devenu vide, s'est écarté.
+        assert!(!w.projects[0].rect.intersects(w.projects[1].rect), "{:?} / {:?}", w.projects[0].rect, w.projects[1].rect);
+
+        let (mut w, id) = two_groups();
+        assign(&mut w, &id, Some("web"), true);
+        let rect = w.card(&id).unwrap().rect;
+        assert!(rect.min.x >= 5400.0, "posé à droite des membres de WEB : {rect:?}");
+        assert!(w.projects[1].rect.contains_rect(rect), "le cadre de WEB l'englobe");
+        assert_eq!(w.projects[0].rect.size(), crate::shell::world::EMPTY_PROJECT, "API, vide, garde une taille minimale");
+    }
+
+    #[test]
+    fn leaving_the_open_space_says_where_the_terminal_went() {
+        let (mut w, id) = two_groups();
+        w.space = Some("api".into());
+        let notices = |out: &[Event]| out.iter().filter(|e| matches!(e, Event::Notify(..))).cloned().collect::<Vec<_>>();
+        let out = assign(&mut w, &id, Some("web"), true);
+        assert!(matches!(notices(&out).as_slice(), [Event::Notify(c, Notice::Moved(Some(g)))] if *c == id && g == "WEB"), "{out:?}");
+        assert!(out.iter().any(|e| matches!(e, Event::SettleCard(c) if *c == id)), "il fait sa place");
+        let out = assign(&mut w, &id, None, true);
+        assert!(notices(&out).is_empty(), "déjà caché : rien à annoncer");
+        assert_eq!(w.card(&id).unwrap().project, None);
+        assert!(!w.projects[1].rect.intersects(w.card(&id).unwrap().rect), "sorti par le menu : posé hors du cadre");
+        assert!(notices(&assign(&mut w, &id, Some("disparu"), true)).is_empty());
+        assert_eq!(w.card(&id).unwrap().project, None, "groupe inconnu : rien ne change");
+    }
+
+    #[test]
+    fn removing_a_frame_frees_its_terminals() {
+        let (mut w, id) = two_groups();
+        Projects::default().handle(&Event::RemoveProject("api".into()), &mut w, &mut vec![]);
+        assert_eq!(w.card(&id).unwrap().project, None);
+    }
+
+    #[test]
+    fn folder_suggestion_and_label() {
+        let (mut w, id) = two_groups();
+        assert_eq!(suggested_folder(&w, "api"), "");
+        w.card_mut(&id).unwrap().cwd = Some("/home/me/api".into());
+        assert_eq!(suggested_folder(&w, "api"), "/home/me/api", "dossier d'un terminal du groupe");
+        assert_eq!(suggested_folder(&w, "web"), "", "pas celui d'un autre groupe");
+        w.projects[0].cwd = Some("~/api".into());
+        assert_eq!(suggested_folder(&w, "api"), "~/api");
+        assert_eq!(folder_label(None), "📁 Lier un dossier");
+        assert_eq!(folder_label(Some("~/api")), "📁 ~/api");
+        let long = folder_label(Some(&format!("/home/{}/fin", "x".repeat(60))));
+        assert!(long.starts_with("📁 …") && long.ends_with("/fin") && long.chars().count() == 42, "{long}");
     }
 
     #[test]

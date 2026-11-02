@@ -1,5 +1,8 @@
 //! Barre du haut : création, recherche, filtres par statut (dans l'espace ouvert).
 //! Les cartes qui ne correspondent pas sont estompées, jamais cachées : on garde ses repères.
+//! Activer un filtre cadre la vue sur les correspondances ; le retirer ramène la vue d'avant.
+//! Les puces de statut sont toujours toutes là (désactivées à 0) : la barre ne bouge jamais sous
+//! la souris, même quand les statuts changent sans cesse.
 
 use std::collections::BTreeSet;
 
@@ -8,7 +11,7 @@ use protocol::TermStatus;
 
 use crate::shell::event::Event;
 use crate::shell::theme;
-use crate::shell::world::{Card, World};
+use crate::shell::world::{Camera, Card, ProjectId, World};
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum StatusKind {
@@ -53,9 +56,56 @@ pub const SEARCH_ID: &str = "filters-search";
 pub struct Filters {
     pub text: String,
     pub statuses: BTreeSet<StatusKind>,
+    /// Vue (et espace) avant l'activation du filtre, rendue quand on le retire.
+    saved: Option<(Option<ProjectId>, Camera)>,
+}
+
+/// Nombre de terminaux de l'espace ouvert dans chaque statut (ordre de `StatusKind::ALL`).
+pub fn counts(world: &World) -> [usize; 6] {
+    let mut n = [0; 6];
+    for c in world.cards.iter().filter(|c| world.shows_card(c)) {
+        if let Some(k) = StatusKind::of(c.status()) {
+            n[StatusKind::ALL.iter().position(|x| *x == k).expect("statut connu")] += 1;
+        }
+    }
+    n
 }
 
 impl Filters {
+    /// Clic sur une puce : ne garder que ce statut (re-clic : l'enlever). Avec Ctrl : l'ajouter
+    /// ou l'enlever des statuts déjà choisis.
+    pub fn click_status(&mut self, kind: StatusKind, additive: bool) {
+        if additive || self.statuses.contains(&kind) {
+            toggle(&mut self.statuses, kind);
+        } else {
+            self.statuses = BTreeSet::from([kind]);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.statuses.clear();
+    }
+
+    /// Après un changement de filtre : retenir la vue à l'activation, cadrer les correspondances
+    /// (`fit`), et rendre la vue d'avant quand plus rien n'est filtré.
+    pub fn after_change(&mut self, was_active: bool, fit: bool, world: &World, events: &mut Vec<Event>) {
+        let active = self.is_active();
+        if active && !was_active {
+            self.saved = Some((world.space.clone(), world.camera));
+        }
+        if active {
+            let matching = world.cards.iter().filter(|c| world.shows_card(c) && self.matches(world, c)).map(|c| c.rect).reduce(|a, b| a.union(b));
+            if let Some(r) = matching.filter(|_| fit) {
+                events.push(Event::FitRect(r));
+            }
+        } else if let Some((space, cam)) = self.saved.take()
+            && space == world.space
+        {
+            events.push(Event::FlyCamera(cam));
+        }
+    }
+
     pub fn is_active(&self) -> bool {
         !self.text.trim().is_empty() || !self.statuses.is_empty()
     }
@@ -92,33 +142,51 @@ impl Filters {
         }
     }
 
+    /// Boutons de création (première ligne de la barre).
+    pub fn actions_ui(ui: &mut Ui, events: &mut Vec<Event>) {
+        if ui.button("+ Terminal").on_hover_text("Nouveau terminal, dans le projet ouvert · Ctrl+Maj+N · double-clic sur le canevas").clicked() {
+            events.push(Event::NewCard { at: None, project: None });
+        }
+        if ui.button("+ Projet").clicked() {
+            events.push(Event::NewProject { at: None });
+        }
+    }
+
+    /// Recherche, filtres de statut, « Tout voir » (seconde ligne de la barre).
     pub fn ui(&mut self, ui: &mut Ui, world: &World, events: &mut Vec<Event>) {
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("+ Terminal").on_hover_text("Ctrl+Maj+N · double-clic sur le canevas").clicked() {
-                events.push(Event::NewCard { at: None, project: None });
-            }
-            if ui.button("+ Projet").clicked() {
-                events.push(Event::NewProject { at: None });
-            }
-            ui.separator();
+        let was_active = self.is_active();
+        {
+            let search = ui.add(TextEdit::singleline(&mut self.text).id(Id::unique(SEARCH_ID)).hint_text("Filtrer… (Ctrl+Maj+F, Entrée : cadrer)").desired_width(200.0));
+            // Pendant la frappe on estompe seulement ; Entrée cadre les correspondances.
+            let mut fit = search.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let mut changed = search.changed() || fit;
 
-            ui.add(TextEdit::singleline(&mut self.text).id(Id::unique(SEARCH_ID)).hint_text("Filtrer… (Ctrl+Maj+F)").desired_width(200.0));
-
-            for kind in StatusKind::ALL {
-                let count = world.cards.iter().filter(|c| StatusKind::of(c.status()) == Some(kind)).count();
+            let n = counts(world);
+            for (k, kind) in StatusKind::ALL.into_iter().enumerate() {
                 let on = self.statuses.contains(&kind);
-                if count == 0 && !on {
-                    continue;
-                }
                 let status = kind.sample();
-                let text = RichText::new(format!("{} {count}", status.label())).color(theme::status_color(Some(status)));
-                if ui.selectable_label(on, text).clicked() {
-                    toggle(&mut self.statuses, kind);
+                let color = theme::status_color(Some(status));
+                let text = RichText::new(format!("{} {}", status.label(), n[k])).color(if on { theme::CARD_BG } else { color });
+                let chip = egui::Button::selectable(on, text).fill(if on { color } else { egui::Color32::TRANSPARENT });
+                let resp = ui.push_id(("status-chip", k), |ui| ui.add_enabled(on || n[k] > 0, chip)).inner;
+                let resp = resp.on_hover_text("Clic : ne montrer que ce statut · Ctrl+clic : combiner");
+                if resp.clicked() {
+                    self.click_status(kind, ui.input(|i| i.modifiers.command));
+                    changed = true;
+                    fit = true;
                 }
             }
 
-            if self.is_active() && ui.small_button("× filtres").clicked() {
-                *self = Filters::default();
+            // Toujours présent (désactivé sans filtre) : rien ne se décale quand on filtre.
+            let shown = world.cards.iter().filter(|c| world.shows_card(c)).count();
+            let matching = world.cards.iter().filter(|c| world.shows_card(c) && self.matches(world, c)).count();
+            let clear_label = if self.is_active() { format!("× filtre ({matching}/{shown})") } else { "× filtre".into() };
+            if ui.add_enabled(self.is_active(), egui::Button::new(clear_label)).on_hover_text("Retirer le filtre et revenir à la vue d'avant").clicked() {
+                self.clear();
+                changed = true;
+            }
+            if changed {
+                self.after_change(was_active, fit, world, events);
             }
             ui.separator();
 
@@ -133,7 +201,7 @@ impl Filters {
                     events.push(Event::FlyTo(attention[0].id.clone()));
                 }
             }
-        });
+        }
     }
 }
 
@@ -164,6 +232,7 @@ mod tests {
             tail: vec![],
         });
         a.name = Some("serveur".into());
+        a.project = Some("api".into());
         let b = Card::new(Rect::from_min_size(pos2(5000.0, 10.0), Vec2::splat(100.0)), Some("/home/me/blog".into()));
         w.add_card(a);
         w.add_card(b);
@@ -226,6 +295,64 @@ mod tests {
         assert_eq!(Filters::default().fit_target(&w), Some(w.projects[0].rect), "le terminal hors projet est ignoré");
         let f = Filters { text: "blog".into(), ..Default::default() };
         assert_eq!(f.fit_target(&w), Some(w.projects[0].rect), "aucune correspondance visible : tout l'espace");
+    }
+
+    #[test]
+    fn a_click_keeps_only_that_status_and_ctrl_combines() {
+        let mut f = Filters::default();
+        f.click_status(StatusKind::Stalled, false);
+        f.click_status(StatusKind::Running, false);
+        assert_eq!(f.statuses, BTreeSet::from([StatusKind::Running]), "un clic remplace");
+        f.click_status(StatusKind::Idle, true);
+        assert_eq!(f.statuses, BTreeSet::from([StatusKind::Running, StatusKind::Idle]), "Ctrl+clic combine");
+        f.click_status(StatusKind::Idle, false);
+        f.click_status(StatusKind::Running, false);
+        assert!(f.statuses.is_empty(), "re-cliquer enlève");
+    }
+
+    #[test]
+    fn counts_only_what_the_open_space_shows() {
+        let mut w = world();
+        let stalled = StatusKind::ALL.iter().position(|k| *k == StatusKind::Stalled).unwrap();
+        assert_eq!(counts(&w)[stalled], 1);
+        w.projects.push(Project { id: "autre".into(), name: "autre".into(), color: [0; 3], rect: Rect::NOTHING, cwd: None });
+        w.space = Some("autre".into());
+        assert_eq!(counts(&w), [0; 6], "le terminal bloqué est dans un autre espace");
+    }
+
+    #[test]
+    fn filtering_frames_matches_and_clearing_restores_the_view() {
+        let mut w = world();
+        let before = Camera { center: pos2(-777.0, 42.0), zoom: 0.33 };
+        w.camera = before;
+        let mut f = Filters::default();
+        let mut ev = vec![];
+        f.click_status(StatusKind::Stalled, false);
+        f.after_change(false, true, &w, &mut ev);
+        assert!(matches!(ev.as_slice(), [Event::FitRect(r)] if *r == w.cards[0].rect), "{ev:?}");
+        // La vue a bougé pendant le filtre ; le retirer ramène celle d'avant.
+        w.camera = Camera { center: pos2(1.0, 1.0), zoom: 1.0 };
+        let mut ev = vec![];
+        f.clear();
+        f.after_change(true, false, &w, &mut ev);
+        assert!(matches!(ev.as_slice(), [Event::FlyCamera(c)] if *c == before), "{ev:?}");
+        // Plus de vue retenue : un second effacement ne fait rien.
+        let mut ev = vec![];
+        f.after_change(false, false, &w, &mut ev);
+        assert!(ev.is_empty());
+    }
+
+    #[test]
+    fn the_saved_view_is_not_restored_in_another_space() {
+        let mut w = world();
+        let mut f = Filters::default();
+        f.click_status(StatusKind::Stalled, false);
+        f.after_change(false, true, &w, &mut vec![]);
+        w.space = Some("api".into());
+        f.clear();
+        let mut ev = vec![];
+        f.after_change(true, false, &w, &mut ev);
+        assert!(ev.is_empty(), "la vue retenue appartenait à « Tous »");
     }
 
     #[test]

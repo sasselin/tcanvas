@@ -59,12 +59,89 @@ pub struct SessionInfo {
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "kind", content = "from")]
+pub enum ChangeKind {
+    Modified,
+    Added,
+    Deleted,
+    /// Renommé depuis ce chemin.
+    Renamed(String),
+    /// Nouveau fichier pas encore suivi par git.
+    Untracked,
+}
+
+impl ChangeKind {
+    pub fn letter(&self) -> char {
+        match self {
+            ChangeKind::Modified => 'M',
+            ChangeKind::Added => 'A',
+            ChangeKind::Deleted => 'D',
+            ChangeKind::Renamed(_) => 'R',
+            ChangeKind::Untracked => '?',
+        }
+    }
+}
+
+/// Un fichier modifié dans un dossier surveillé (chemin relatif à la racine).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct FileChange {
+    pub path: String,
+    pub kind: ChangeKind,
+    /// Lignes ajoutées / retirées par rapport à HEAD (inconnu hors git ou pour un binaire).
+    pub added: Option<u32>,
+    pub removed: Option<u32>,
+    /// Dernière modification (secondes Unix ; 0 si le fichier n'existe plus).
+    pub mtime: u64,
+    pub binary: bool,
+}
+
+/// État d'un dossier surveillé, renvoyé à chaque changement.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct ChangeSet {
+    /// Clé donnée par l'application (id du projet).
+    pub key: String,
+    /// Chemin absolu résolu (`~` développé), si le dossier existe.
+    pub root: Option<String>,
+    pub git: bool,
+    pub branch: Option<String>,
+    pub error: Option<String>,
+    pub files: Vec<FileChange>,
+    /// La liste a été coupée (trop de fichiers).
+    pub truncated: bool,
+}
+
+/// Un sous-dossier, pour le sélecteur de dossiers.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct DirEntry {
+    pub name: String,
+    /// Contient un dépôt git (`.git`).
+    pub git: bool,
+}
+
+/// Contenu d'un dossier WSL, en réponse à `AgentCmd::ListDir`.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct DirListing {
+    /// Chemin tel que demandé (sert à apparier la réponse).
+    pub request: String,
+    /// Chemin absolu résolu, si le dossier existe.
+    pub path: Option<String>,
+    pub parent: Option<String>,
+    pub git: bool,
+    /// Sous-dossiers visibles (les dossiers cachés sont omis), triés par nom.
+    pub dirs: Vec<DirEntry>,
+    pub error: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(tag = "type")]
 pub enum AgentEvent {
     Hello { version: String, hooks_installed: bool },
     Session(SessionInfo),
     Gone { session: String },
     Error { message: String },
+    Changes(ChangeSet),
+    Diff { key: String, file: String, text: String, truncated: bool },
+    DirListing(DirListing),
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -72,6 +149,13 @@ pub enum AgentEvent {
 pub enum AgentCmd {
     SetStall { session: String, secs: u64 },
     Kill { session: String },
+    /// Surveille les fichiers modifiés de `path` (relancé si déjà surveillé avec un autre chemin).
+    Watch { key: String, path: String },
+    Unwatch { key: String },
+    /// Diff d'un fichier (chemin relatif) d'un dossier surveillé.
+    Diff { key: String, file: String },
+    /// Sous-dossiers de `path` (`~` accepté), pour le sélecteur de dossiers.
+    ListDir { path: String },
 }
 
 pub fn encode<T: Serialize>(msg: &T) -> String {
@@ -102,6 +186,34 @@ mod tests {
         let line = encode(&ev);
         assert!(line.ends_with('\n') && !line[..line.len() - 1].contains('\n'));
         assert_eq!(decode::<AgentEvent>(&line).unwrap(), ev);
+    }
+
+    #[test]
+    fn roundtrip_changes() {
+        let ev = AgentEvent::Changes(ChangeSet {
+            key: "p1".into(),
+            root: Some("/home/me/api".into()),
+            git: true,
+            branch: Some("main".into()),
+            error: None,
+            files: vec![
+                FileChange { path: "src/a.rs".into(), kind: ChangeKind::Modified, added: Some(3), removed: Some(1), mtime: 42, binary: false },
+                FileChange { path: "b.rs".into(), kind: ChangeKind::Renamed("old.rs".into()), added: None, removed: None, mtime: 0, binary: true },
+            ],
+            truncated: false,
+        });
+        assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        let ev = AgentEvent::DirListing(DirListing {
+            request: "~".into(),
+            path: Some("/home/me".into()),
+            parent: Some("/home".into()),
+            git: false,
+            dirs: vec![DirEntry { name: "api".into(), git: true }],
+            error: None,
+        });
+        assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        let cmd = AgentCmd::Diff { key: "p1".into(), file: "src/a.rs".into() };
+        assert_eq!(decode::<AgentCmd>(&encode(&cmd)).unwrap(), cmd);
     }
 
     #[test]
