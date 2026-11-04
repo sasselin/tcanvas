@@ -1,4 +1,4 @@
-//! Canevas infini : fond, déplacement, zoom, vols de caméra et mini-carte.
+//! Infinite canvas: background, panning, zoom, camera flights and minimap.
 
 mod camera;
 mod minimap;
@@ -27,9 +27,9 @@ struct Flight {
 pub struct Canvas {
     viewport: Rect,
     flight: Option<Flight>,
-    /// Le vide est en train d'être glissé (bouton gauche ou milieu).
+    /// Empty space is being dragged (left or middle button).
     bg_panning: bool,
-    /// Un glissement à la main (Maj) est en cours : il continue même si Maj est relâchée.
+    /// A hand drag (Shift) is in progress: it continues even if Shift is released.
     hand_dragging: bool,
 }
 
@@ -44,7 +44,7 @@ impl Canvas {
         self.viewport
     }
 
-    /// Fond et interactions sur le vide. À appeler avant tout autre élément du canevas.
+    /// Background and interactions on empty space. Call before any other canvas element.
     pub fn background(&mut self, ui: &mut Ui, world: &mut World, events: &mut Vec<Event>) {
         let vp = ui.max_rect();
         self.viewport = vp;
@@ -70,9 +70,9 @@ impl Canvas {
         }
     }
 
-    /// Outil main : Maj maintenue affiche la main ouverte, et Maj + glisser déplace la vue
-    /// n'importe où, même au-dessus des terminaux (main fermée pendant le glissement).
-    /// À appeler après les cartes : la zone enregistrée en dernier reçoit le pointeur.
+    /// Hand tool: holding Shift shows the open hand, and Shift + drag pans the view
+    /// anywhere, even over terminals (closed hand while dragging).
+    /// Call after the cards: the last registered area gets the pointer.
     pub fn hand_tool(&mut self, ui: &mut Ui, world: &mut World) {
         let vp = self.viewport;
         let shift = ui.input(|i| i.modifiers.shift);
@@ -95,9 +95,9 @@ impl Canvas {
         }
     }
 
-    /// Molette : déplace la vue ; Ctrl + molette (ou pincement) : zoom autour du curseur.
-    /// Rien si le pointeur est sur autre chose que le canevas : panneau, menu, liste, fenêtre,
-    /// toast… (ils font défiler leur propre contenu) ou un terminal (`wheel_taken`).
+    /// Wheel: pans the view; Ctrl + wheel (or pinch): zooms around the cursor.
+    /// Nothing if the pointer is over something other than the canvas: panel, menu, list, window,
+    /// toast… (they scroll their own content) or a terminal (`wheel_taken`).
     pub fn navigate(&mut self, ui: &mut Ui, world: &mut World, wheel_taken: bool) {
         let vp = self.viewport;
         let Some(pointer) = ui.input(|i| i.pointer.hover_pos()).filter(|p| vp.contains(*p)) else {
@@ -181,7 +181,7 @@ impl Canvas {
                 }
             }
             Event::FlyCamera(to) => self.fly(world.camera, *to, None),
-            // Changer d'espace remplace la caméra : un vol en cours n'a plus de sens.
+            // Switching space replaces the camera: an in-progress flight no longer makes sense.
             Event::EnterSpace(_) => self.flight = None,
             _ => {}
         }
@@ -191,13 +191,13 @@ impl Canvas {
         self.flight = Some(Flight { from, to, start: None, focus });
     }
 
-    /// Centre de la vue en coordonnées monde.
+    /// Center of the view in world coordinates.
     pub fn view_center(&self, world: &World) -> Pos2 {
         world.camera.center
     }
 }
 
-/// Grille de points dont le pas s'adapte au zoom pour rester lisible.
+/// Dot grid whose spacing adapts to the zoom to stay readable.
 fn paint_grid(painter: &egui::Painter, cam: &Camera, vp: Rect) {
     let mut step = GRID_STEP;
     while step * cam.zoom < 18.0 {

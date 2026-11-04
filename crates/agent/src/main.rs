@@ -1,9 +1,9 @@
-//! `tcanvas-agent` : tourne dans WSL et décrit à l'application l'état des terminaux.
+//! `tcanvas-agent`: runs in WSL and reports the state of the terminals to the app.
 //!
-//! - `tcanvas-agent`               : mode serveur (JSON lignes sur stdin/stdout)
-//! - `tcanvas-agent install-hooks` : installe les hooks zsh (codes de sortie, durées)
-//! - `tcanvas-agent hooks`         : affiche les hooks sans rien installer
-//! - `tcanvas-agent kill <session>`: arrête tous les processus de la session, puis la session
+//! - `tcanvas-agent`               : server mode (JSON lines on stdin/stdout)
+//! - `tcanvas-agent install-hooks` : installs the zsh hooks (exit codes, durations)
+//! - `tcanvas-agent hooks`         : prints the hooks without installing anything
+//! - `tcanvas-agent kill <session>`: stops every process of the session, then the session
 
 mod features {
     pub mod changes;

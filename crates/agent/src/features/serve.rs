@@ -1,4 +1,4 @@
-//! Boucle principale : observe les sessions chaque seconde et publie les changements sur stdout.
+//! Main loop: observes the sessions every second and publishes changes on stdout.
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -16,16 +16,16 @@ const TAIL_LINES: usize = 3;
 #[derive(Default)]
 struct Tracked {
     stall_secs: u64,
-    /// `window_activity` lors de la dernière capture d'écran.
+    /// `window_activity` at the last screen capture.
     captured_activity: Option<u64>,
     tail: Vec<String>,
-    /// (pid du premier plan, ticks CPU) à l'observation précédente.
+    /// (foreground pid, CPU ticks) at the previous observation.
     prev_cpu: Option<(u32, u64)>,
     last_sent: Option<SessionInfo>,
 }
 
 pub fn run() -> io::Result<()> {
-    // Le fil des changements écrit aussi sur stdout : un verrou par message garde les lignes entières.
+    // The changes thread also writes to stdout: one lock per message keeps lines whole.
     let watcher = changes::spawn(|ev| {
         if send(ev).is_err() {
             std::process::exit(0);
@@ -42,7 +42,7 @@ pub fn run() -> io::Result<()> {
                 AgentCmd::Kill { session } => {
                     thread::spawn(move || kill::kill_session(&session));
                 }
-                // Relayées directement au fil des changements par le lecteur de stdin.
+                // Forwarded straight to the changes thread by the stdin reader.
                 AgentCmd::Watch { .. } | AgentCmd::Unwatch { .. } | AgentCmd::Diff { .. } | AgentCmd::ShowCommit { .. } | AgentCmd::ListDir { .. } => {}
             }
         }
@@ -125,8 +125,8 @@ fn send(ev: &AgentEvent) -> io::Result<()> {
     out.flush()
 }
 
-/// Lit les commandes de l'application. La fin de stdin (application fermée) arrête l'agent.
-/// Les commandes de suivi des changements partent tout de suite à leur fil (diff sans attente).
+/// Reads the app's commands. End of stdin (app closed) stops the agent.
+/// Change-tracking commands go straight to their thread (no waiting for diffs).
 fn spawn_stdin_reader(watcher: Sender<changes::Cmd>) -> Receiver<AgentCmd> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {

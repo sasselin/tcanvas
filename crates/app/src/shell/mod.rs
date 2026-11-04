@@ -1,4 +1,4 @@
-//! Colle minimale entre les slices : ordre de dessin, routage du clavier, bus d'événements.
+//! Minimal glue between slices: draw order, keyboard routing, event bus.
 
 pub mod event;
 pub mod fonts;
@@ -41,14 +41,14 @@ impl Config {
     }
 }
 
-/// Raccourcis globaux : toujours pour l'application, même quand un terminal a le focus.
+/// Global shortcuts: always for the app, even when a terminal has focus.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shortcut {
     Jump,
     NewCard,
     Search,
     FitAll,
-    /// Projet n° 1 à 9 (ordre de création).
+    /// Project #1 to #9 (creation order).
     Project(usize),
     CloseCard,
 }
@@ -60,7 +60,7 @@ fn shortcut_of(ev: &egui::Event) -> Option<Shortcut> {
     if !(modifiers.ctrl && modifiers.shift && !modifiers.alt) {
         return None;
     }
-    // Chiffres : touche physique, pour que Ctrl+Maj+1 marche aussi en AZERTY (où le 1 est sur « & »).
+    // Digits: physical key, so Ctrl+Shift+1 also works on AZERTY (where 1 is on "&").
     let digit = [physical_key.as_ref(), Some(key)].into_iter().flatten().find_map(|k| DIGITS.iter().position(|d| d == k));
     if let Some(n) = digit {
         return Some(if n == 0 { Shortcut::FitAll } else { Shortcut::Project(n) });
@@ -94,7 +94,7 @@ impl App {
     pub fn new(ctx: &egui::Context, config: Config) -> Self {
         fonts::install(ctx);
         ctx.set_visuals(egui::Visuals::dark());
-        // Ctrl+plus/moins doivent arriver au terminal, pas zoomer l'interface.
+        // Ctrl+plus/minus must reach the terminal, not zoom the UI.
         ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let mut world = World::default();
         let mut persistence = Persistence::new(&config.config_dir);
@@ -116,7 +116,7 @@ impl App {
         }
     }
 
-    /// Zone du canevas à l'écran (après la barre d'outils).
+    /// Canvas area on screen (below the toolbar).
     pub fn viewport(&self) -> egui::Rect {
         self.canvas.viewport()
     }
@@ -133,7 +133,7 @@ impl App {
         self.jump.is_open()
     }
 
-    /// Commandes adressées à l'agent quand il est désactivé (tests).
+    /// Commands addressed to the agent while it is disabled (tests).
     pub fn agent_sent(&self) -> &[protocol::AgentCmd] {
         self.agent.sent()
     }
@@ -146,7 +146,7 @@ impl App {
         ctx.memory(|m| m.focused().is_some()) || self.jump.is_open() || self.cards.has_dialog() || self.projects.has_dialog()
     }
 
-    /// Retire les raccourcis globaux, puis donne le reste du clavier au terminal focalisé.
+    /// Removes global shortcuts, then gives the rest of the keyboard input to the focused terminal.
     fn route_input(&mut self, events: &mut Vec<egui::Event>, typing_elsewhere: bool) {
         events.retain(|ev| match shortcut_of(ev) {
             Some(s) => {
@@ -188,11 +188,11 @@ impl App {
         }
     }
 
-    /// Une frame complète. `eframe::App::ui` et les tests passent par ici.
+    /// One full frame. `eframe::App::ui` and the tests go through here.
     pub fn frame(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
-        // Dans l'application, `raw_input_hook` a déjà fait ce travail ; cet appel couvre les
-        // environnements qui ne l'appellent pas (tests) et ne trouve rien sinon.
+        // In the app, `raw_input_hook` has already done this; this call covers
+        // environments that don't call it (tests) and finds nothing otherwise.
         let typing = self.typing_elsewhere(&ctx);
         let mut pending = ctx.input_mut(|i| std::mem::take(&mut i.events));
         self.route_input(&mut pending, typing);
@@ -206,8 +206,8 @@ impl App {
         self.changes.poll(&self.world, &mut events);
         self.notifications.poll(&ctx, &mut events);
 
-        // Deux lignes fixes : actions et projets, puis recherche et filtres. Pas de mise en page
-        // centrée ni de retour à la ligne automatique : la barre garde sa hauteur quoi qu'il arrive.
+        // Two fixed rows: actions and projects, then search and filters. No centered
+        // layout or automatic wrapping: the bar keeps its height no matter what.
         Panel::top("toolbar").resizable(false).show(ui, |ui| {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
@@ -265,7 +265,7 @@ impl App {
         }
     }
 
-    /// Distribue les événements à toutes les slices, y compris ceux qu'elles émettent en retour.
+    /// Dispatches events to all slices, including the ones they emit in return.
     pub fn dispatch(&mut self, events: Vec<Event>) {
         let mut queue: VecDeque<Event> = events.into();
         let mut budget = 10_000;
@@ -280,7 +280,7 @@ impl App {
             self.cards.handle(&ev, w, &mut out);
             self.projects.handle(&ev, w, &mut out);
             self.changes.handle(&ev, w, &mut out);
-            // Avant la caméra : aller à un terminal caché ouvre d'abord son espace.
+            // Before the camera: going to a hidden terminal opens its space first.
             self.spaces.handle(&ev, w, &mut out);
             self.wires.handle(&ev, w, &mut out);
             self.canvas.handle(&ev, w, &mut out);
@@ -325,7 +325,7 @@ mod tests {
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
         assert_eq!(shortcut_of(&key(Key::K, cs)), Some(Shortcut::Jump));
         assert_eq!(shortcut_of(&key(Key::N, cs)), Some(Shortcut::NewCard));
-        assert_eq!(shortcut_of(&key(Key::K, Modifiers::CTRL)), None, "Ctrl+K reste au shell");
+        assert_eq!(shortcut_of(&key(Key::K, Modifiers::CTRL)), None, "Ctrl+K stays with the shell");
         assert_eq!(shortcut_of(&key(Key::K, cs | Modifiers::ALT)), None);
         assert_eq!(shortcut_of(&egui::Event::Text("K".into())), None);
     }
@@ -335,7 +335,7 @@ mod tests {
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
         assert_eq!(shortcut_of(&key(Key::Num3, cs)), Some(Shortcut::Project(3)));
         assert_eq!(shortcut_of(&key(Key::Num0, cs)), Some(Shortcut::FitAll));
-        // AZERTY : la touche « & » produit une touche logique sans chiffre, mais la physique est 1.
+        // AZERTY: the "&" key produces a logical key with no digit, but the physical key is 1.
         let azerty = egui::Event::Key { key: Key::Exclamationmark, physical_key: Some(Key::Num1), pressed: true, repeat: false, modifiers: cs };
         assert_eq!(shortcut_of(&azerty), Some(Shortcut::Project(1)));
         assert_eq!(shortcut_of(&key(Key::Num1, Modifiers::CTRL)), None);

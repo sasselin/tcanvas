@@ -1,4 +1,4 @@
-//! Dessin de la grille d'un terminal à n'importe quel niveau de zoom.
+//! Draws a terminal's grid at any zoom level.
 
 use alacritty_terminal::term::Term;
 use alacritty_terminal::term::cell::Flags;
@@ -32,7 +32,7 @@ fn c32(rgb: Rgb) -> Color32 {
     Color32::from_rgb(rgb.r, rgb.g, rgb.b)
 }
 
-/// Couleur des 256 index xterm : 16 ANSI, cube 6×6×6, puis 24 gris.
+/// Color of the 256 xterm indices: 16 ANSI, 6×6×6 cube, then 24 grays.
 pub fn indexed(i: u8) -> Color32 {
     match i {
         0..=15 => theme::rgb(ANSI[i as usize]),
@@ -59,7 +59,7 @@ fn named(n: NamedColor) -> Color32 {
             if idx < 16 {
                 indexed(idx as u8)
             } else {
-                // Dim* : la couleur normale assombrie.
+                // Dim*: the normal color, darkened.
                 let base = indexed((idx - NamedColor::DimBlack as usize) as u8);
                 base.gamma_multiply(0.66)
             }
@@ -75,7 +75,7 @@ pub fn resolve(c: AnsiColor, colors: &Colors) -> Color32 {
     }
 }
 
-/// Géométrie d'affichage de la grille à l'écran.
+/// Display geometry of the grid on screen.
 pub struct GridMetrics {
     pub origin: Pos2,
     pub cell: Vec2,
@@ -130,7 +130,7 @@ pub fn paint_grid(painter: &Painter, term: &Term<Proxy>, m: &GridMetrics, focuse
             fg = bg;
         }
 
-        // Fonds : rectangles fusionnés par plage de même couleur.
+        // Backgrounds: rectangles merged per run of the same color.
         let bg = (bg != default_bg).then_some(bg);
         match (&mut bg_run, bg) {
             (Some((l, _, end, color)), Some(b)) if *l == line && *end == col && *color == b => *end = col + width,
@@ -140,8 +140,8 @@ pub fn paint_grid(painter: &Painter, term: &Term<Proxy>, m: &GridMetrics, focuse
             }
         }
 
-        // Texte : une plage par style ; les caractères non ASCII sont isolés car la police
-        // de secours n'a pas la même chasse et décalerait la suite de la ligne.
+        // Text: one run per style; non-ASCII characters are isolated because the fallback
+        // font has a different advance and would shift the rest of the line.
         let c = cell.c;
         let underline = cell.flags.intersects(Flags::ALL_UNDERLINES);
         let strike = cell.flags.contains(Flags::STRIKEOUT);
@@ -156,7 +156,7 @@ pub fn paint_grid(painter: &Painter, term: &Term<Proxy>, m: &GridMetrics, focuse
             _ => runs.push(Run { line, col, fg, underline, strike, text: c.to_string() }),
         }
         if !ascii {
-            // Bloque la fusion avec le caractère suivant.
+            // Prevents merging with the next character.
             runs.push(Run { line, col: usize::MAX, fg, underline: false, strike: false, text: String::new() });
         }
         if let Some(zw) = cell.zerowidth()

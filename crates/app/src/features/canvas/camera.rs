@@ -1,4 +1,4 @@
-//! Transformations monde ↔ écran. Le monde est infini ; la caméra n'est qu'un centre et un zoom.
+//! World ↔ screen transforms. The world is infinite; the camera is just a center and a zoom.
 
 use egui::{Pos2, Rect, Vec2};
 
@@ -24,7 +24,7 @@ impl Camera {
         Rect::from_min_max(self.to_world(vp.min, vp), self.to_world(vp.max, vp))
     }
 
-    /// Zoome en gardant fixe le point du monde sous `anchor` (écran).
+    /// Zooms while keeping the world point under `anchor` (screen) fixed.
     pub fn zoom_around(&mut self, anchor: Pos2, factor: f32, vp: Rect) {
         let before = self.to_world(anchor, vp);
         self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
@@ -32,12 +32,12 @@ impl Camera {
         self.center += before - after;
     }
 
-    /// Déplace la vue d'un glissement écran (le contenu suit la souris).
+    /// Pans the view by a screen drag (the content follows the mouse).
     pub fn pan_screen(&mut self, delta: Vec2) {
         self.center -= delta / self.zoom;
     }
 
-    /// Caméra qui montre `target` en entier avec une marge (pixels écran).
+    /// Camera that shows all of `target` with a margin (screen pixels).
     pub fn fitting(target: Rect, vp: Rect, margin: f32, max_zoom: f32) -> Camera {
         let avail = (vp.size() - Vec2::splat(2.0 * margin)).max(Vec2::splat(1.0));
         let size = target.size().max(Vec2::splat(1.0));
@@ -45,7 +45,7 @@ impl Camera {
         Camera { center: target.center(), zoom }
     }
 
-    /// Interpolation ; le zoom varie en échelle logarithmique pour un vol régulier.
+    /// Interpolation; zoom varies on a log scale for a smooth flight.
     pub fn lerp(a: Camera, b: Camera, t: f32) -> Camera {
         if t <= 0.0 {
             return a;
@@ -60,7 +60,7 @@ impl Camera {
     }
 }
 
-/// Accélère puis ralentit.
+/// Speeds up, then slows down.
 pub fn ease_in_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     if t < 0.5 { 4.0 * t * t * t } else { 1.0 - (-2.0 * t + 2.0).powi(3) / 2.0 }
@@ -120,7 +120,7 @@ mod tests {
         let cam = Camera::fitting(target, vp(), 40.0, 1.0);
         let on_screen = cam.rect_to_screen(target, vp());
         assert!(vp().shrink(39.0).contains_rect(on_screen), "{on_screen:?}");
-        // Une petite cible ne dépasse pas le zoom maximal demandé.
+        // A small target does not exceed the requested max zoom.
         let small = Rect::from_min_size(Pos2::ZERO, Vec2::splat(10.0));
         assert_eq!(Camera::fitting(small, vp(), 40.0, 1.0).zoom, 1.0);
     }

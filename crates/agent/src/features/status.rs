@@ -1,22 +1,22 @@
-//! Calcul du statut d'un terminal à partir de tmux et de /proc.
+//! Computes a terminal's status from tmux and /proc.
 
 use std::fs;
 
 use protocol::TermStatus;
 
-/// Délai sans sortie avant de croire qu'une question attend une réponse.
+/// Quiet time before assuming a question is waiting for an answer.
 const PROMPT_QUIET_SECS: u64 = 2;
 
 #[derive(Clone, Debug, Default)]
 pub struct Observation<'a> {
     pub now: u64,
     pub dead: bool,
-    /// Application plein écran (vim, htop…) : jamais « bloquée ».
+    /// Full-screen app (vim, htop…): never "stalled".
     pub alternate: bool,
-    /// Un processus autre que le shell est au premier plan.
+    /// A process other than the shell is in the foreground.
     pub fg_running: bool,
     pub activity: u64,
-    /// Ticks CPU consommés par le premier plan depuis la dernière observation.
+    /// CPU ticks used by the foreground since the last observation.
     pub cpu_delta: Option<u64>,
     pub last_line: Option<&'a str>,
     pub hook_started: Option<u64>,
@@ -48,7 +48,7 @@ pub fn classify(o: &Observation) -> TermStatus {
     }
 }
 
-/// Code et durée de la dernière commande terminée, d'après les hooks.
+/// Exit code and duration of the last finished command, from the hooks.
 pub fn last_command(o: &Observation) -> (Option<i32>, Option<u64>) {
     match (o.hook_started, o.hook_ended) {
         (Some(s), Some(e)) if e >= s => (o.hook_exit, Some(e - s)),
@@ -64,14 +64,14 @@ pub fn looks_like_question(line: &str) -> bool {
         || (l.ends_with(':') && KEYWORDS.iter().any(|k| l.contains(k)))
 }
 
-/// Processus au premier plan du terminal dont le shell est `shell_pid`.
+/// Foreground process of the terminal whose shell is `shell_pid`.
 pub struct Foreground {
     pub pid: u32,
     pub cpu_ticks: u64,
     pub cmdline: String,
 }
 
-/// `None` si le shell lui-même est au premier plan (ou si /proc est illisible).
+/// `None` if the shell itself is in the foreground (or /proc is unreadable).
 pub fn foreground(shell_pid: u32) -> Option<Foreground> {
     let tpgid = stat_fields(shell_pid)?.get(5)?.parse::<i64>().ok()?;
     if tpgid <= 0 || tpgid as u32 == shell_pid {
@@ -90,7 +90,7 @@ pub fn foreground(shell_pid: u32) -> Option<Foreground> {
     Some(Foreground { pid, cpu_ticks, cmdline })
 }
 
-/// Champs de /proc/<pid>/stat à partir de `state` (le nom entre parenthèses est retiré).
+/// Fields of /proc/<pid>/stat from `state` on (the parenthesized name is stripped).
 fn stat_fields(pid: u32) -> Option<Vec<String>> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let rest = &stat[stat.rfind(')')? + 1..];
@@ -131,9 +131,9 @@ mod tests {
 
     #[test]
     fn question_detected_after_quiet_period() {
-        let o = Observation { last_line: Some("Continuer ? [Y/n]"), ..running(1001, 1000) };
+        let o = Observation { last_line: Some("Continue? [Y/n]"), ..running(1001, 1000) };
         assert_eq!(classify(&o), TermStatus::Running);
-        let o = Observation { last_line: Some("Continuer ? [Y/n]"), ..running(1002, 1000) };
+        let o = Observation { last_line: Some("Continue? [Y/n]"), ..running(1002, 1000) };
         assert_eq!(classify(&o), TermStatus::WaitingInput);
         let o = Observation { last_line: Some("[sudo] password for me:"), ..running(1003, 1000) };
         assert_eq!(classify(&o), TermStatus::WaitingInput);
@@ -146,7 +146,7 @@ mod tests {
         let o = Observation { hook_started: Some(10), hook_ended: Some(45), hook_exit: Some(1), stall_secs: 60, ..Default::default() };
         assert_eq!(classify(&o), TermStatus::Exited(1));
         assert_eq!(last_command(&o), (Some(1), Some(35)));
-        // Nouvelle commande lancée : started > ended.
+        // New command started: started > ended.
         let o = Observation { hook_started: Some(50), ..o };
         assert_eq!(classify(&o), TermStatus::Idle);
         assert_eq!(last_command(&o), (None, None));

@@ -1,14 +1,14 @@
-//! Traduction clavier/souris → octets envoyés au terminal (séquences xterm).
+//! Keyboard/mouse → bytes sent to the terminal (xterm sequences).
 
 use egui::{Key, Modifiers};
 
-/// Paramètre de modificateurs xterm : 1 + shift + 2·alt + 4·ctrl.
+/// xterm modifier parameter: 1 + shift + 2·alt + 4·ctrl.
 fn xterm_mod(m: Modifiers) -> u8 {
     1 + m.shift as u8 + 2 * m.alt as u8 + 4 * m.ctrl as u8
 }
 
-/// Octets pour une touche spéciale ou une combinaison Ctrl. `None` : la touche produit du
-/// texte (géré par `Event::Text`) ou n'a pas de sens pour un terminal.
+/// Bytes for a special key or a Ctrl combination. `None`: the key produces
+/// text (handled by `Event::Text`) or means nothing to a terminal.
 pub fn key_bytes(key: Key, m: Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
     let modded = m.shift || m.alt || m.ctrl;
     let csi_letter = |c: char, ss3_in_app: bool| -> Vec<u8> {
@@ -66,7 +66,7 @@ fn csi_or_ss3(c: char, m: Modifiers) -> Vec<u8> {
     if m.shift || m.alt || m.ctrl { format!("\x1b[1;{}{c}", xterm_mod(m)).into_bytes() } else { format!("\x1bO{c}").into_bytes() }
 }
 
-/// Ctrl+lettre → 0x01..0x1a, et les combinaisons de ponctuation classiques.
+/// Ctrl+letter → 0x01..0x1a, plus the classic punctuation combinations.
 fn ctrl_byte(key: Key) -> Option<u8> {
     let name = key.name();
     if name.len() == 1 {
@@ -87,19 +87,19 @@ fn ctrl_byte(key: Key) -> Option<u8> {
     })
 }
 
-/// Texte tapé ; Alt (gauche) préfixe ESC, comme dans xterm avec `metaSendsEscape`.
+/// Typed text; (left) Alt prefixes ESC, as in xterm with `metaSendsEscape`.
 pub fn text_bytes(text: &str, m: Modifiers) -> Vec<u8> {
     if m.alt && !m.ctrl { [b"\x1b".as_slice(), text.as_bytes()].concat() } else { text.as_bytes().to_vec() }
 }
 
-/// Raccourcis de presse-papiers propres aux terminaux (comme Windows Terminal) : egui ne connaît
-/// que Ctrl+C/V seuls, qu'un terminal doit garder pour ^C et le collage habituel.
+/// Terminal-specific clipboard shortcuts (like Windows Terminal): egui only knows
+/// plain Ctrl+C/V, which a terminal must keep for ^C and the usual paste.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClipAction {
-    /// Ctrl+Maj+V : coller.
+    /// Ctrl+Shift+V: paste.
     Paste,
-    /// Ctrl+Maj+C : la sélection tmux est déjà copiée au relâchement de la souris ; surtout ne
-    /// pas envoyer ^C (qui interromprait la commande en cours).
+    /// Ctrl+Shift+C: the tmux selection is already copied on mouse release; above all, do
+    /// not send ^C (which would interrupt the running command).
     Copy,
 }
 
@@ -117,7 +117,7 @@ pub fn clip_action(key: Key, m: Modifiers) -> Option<ClipAction> {
 pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     let text = text.replace("\r\n", "\r").replace('\n', "\r");
     if bracketed {
-        // On retire les marqueurs éventuels pour qu'un collage ne puisse pas sortir du mode.
+        // Strip any markers so a paste cannot escape the mode.
         let clean = text.replace("\x1b[201~", "");
         format!("\x1b[200~{clean}\x1b[201~").into_bytes()
     } else {
@@ -134,7 +134,7 @@ pub enum MouseButton {
     WheelDown = 65,
 }
 
-/// Rapport souris xterm. `col`/`line` commencent à 0. `drag` : mouvement bouton enfoncé.
+/// xterm mouse report. `col`/`line` start at 0. `drag`: motion with a button held.
 pub fn mouse_report(button: MouseButton, m: Modifiers, col: usize, line: usize, pressed: bool, drag: bool, sgr: bool) -> Vec<u8> {
     let mut code = button as u8 + 4 * m.shift as u8 + 8 * m.alt as u8 + 16 * m.ctrl as u8;
     if drag {
@@ -181,7 +181,7 @@ mod tests {
         assert_eq!(k(Key::A, CTRL), [0x01]);
         assert_eq!(k(Key::OpenBracket, CTRL), [0x1b]);
         assert_eq!(k(Key::Space, CTRL), [0x00]);
-        // Une lettre seule ou avec AltGr (Ctrl+Alt) passe par Event::Text.
+        // A lone letter, or one with AltGr (Ctrl+Alt), goes through Event::Text.
         assert_eq!(key_bytes(Key::A, NONE, false), None);
         assert_eq!(key_bytes(Key::Num0, CTRL | ALT, false), None);
     }
@@ -222,8 +222,8 @@ mod tests {
         let cs = CTRL | SHIFT;
         assert_eq!(clip_action(Key::V, cs), Some(ClipAction::Paste));
         assert_eq!(clip_action(Key::C, cs), Some(ClipAction::Copy));
-        assert_eq!(clip_action(Key::V, CTRL), None, "Ctrl+V : collage d'egui (Event::Paste)");
-        assert_eq!(clip_action(Key::C, CTRL), None, "Ctrl+C reste ^C");
+        assert_eq!(clip_action(Key::V, CTRL), None, "Ctrl+V: egui's paste (Event::Paste)");
+        assert_eq!(clip_action(Key::C, CTRL), None, "Ctrl+C stays ^C");
         assert_eq!(clip_action(Key::V, cs | ALT), None);
         assert_eq!(clip_action(Key::X, cs), None);
     }

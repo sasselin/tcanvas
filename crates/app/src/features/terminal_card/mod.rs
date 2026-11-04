@@ -1,4 +1,4 @@
-//! Cartes-terminaux : PTY, rendu, clavier/souris, déplacement, redimensionnement.
+//! Terminal cards: PTY, rendering, keyboard/mouse, moving, resizing.
 
 mod clipboard;
 mod input;
@@ -27,21 +27,21 @@ use input::{ClipAction, MouseButton};
 use pty::{GridSize, TermRuntime};
 pub use pty::{Launch, attach_command};
 
-/// Dimensions en unités monde (1 unité = 1 point à zoom 1).
+/// Dimensions in world units (1 unit = 1 point at zoom 1).
 pub const TITLE_H: f32 = 28.0;
 pub const PAD: f32 = 6.0;
 pub const BASE_FONT: f32 = 14.0;
 const GRIP: f32 = 16.0;
-/// En dessous, le bouton × est trop petit pour être visé : on passe par le menu ou Ctrl+Maj+W.
+/// Below this, the × button is too small to aim at: use the menu or Ctrl+Shift+W.
 const CLOSE_MIN_ZOOM: f32 = 0.35;
 const MIN_COLS: u16 = 20;
 const MIN_ROWS: u16 = 4;
 const DEFAULT_COLS: f32 = 120.0;
 const DEFAULT_ROWS: f32 = 34.0;
-/// En dessous de cette taille de police (pixels), on dessine un aperçu au lieu de la grille.
+/// Below this font size (pixels), draw a preview instead of the grid.
 const LOD_FONT_PX: f32 = 5.5;
 
-/// Lancer de vrais terminaux, ou rien (tests d'interface sans PTY).
+/// Launch real terminals, or nothing (UI tests without a PTY).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Launcher {
     Tmux,
@@ -53,7 +53,7 @@ pub fn base_cell(ctx: &egui::Context) -> Vec2 {
     ctx.fonts_mut(|f| vec2(f.glyph_width(&font, 'M'), f.row_height(&font)))
 }
 
-/// Nombre de colonnes et de lignes qui tiennent dans une carte (unités monde).
+/// Number of columns and rows that fit in a card (world units).
 pub fn grid_for(rect: Rect, cell: Vec2) -> GridSize {
     let cols = ((rect.width() - 2.0 * PAD) / cell.x).floor().max(MIN_COLS as f32) as u16;
     let rows = ((rect.height() - TITLE_H - 2.0 * PAD) / cell.y).floor().max(MIN_ROWS as f32) as u16;
@@ -71,21 +71,21 @@ pub struct TerminalCards {
     spawn_errors: HashMap<CardId, String>,
     tx: Sender<(CardId, TermEvent)>,
     rx: Receiver<(CardId, TermEvent)>,
-    /// Clavier capturé pour la carte focalisée, avec les modificateurs de la frame.
+    /// Keyboard captured for the focused card, with the frame's modifiers.
     keys: Vec<(egui::Event, Modifiers)>,
     mods: Modifiers,
     rename: Option<(CardId, String)>,
-    /// Fermeture demandée, en attente de confirmation.
+    /// Close requested, awaiting confirmation.
     confirm_close: Option<CardId>,
     stall: Option<(CardId, String)>,
-    /// Glissé Alt en cours pour tirer un fil depuis cette carte.
+    /// Alt drag in progress to pull a wire from this card.
     wire_from: Option<CardId>,
-    /// Sessions tuées volontairement : ni notification, ni réadoption.
+    /// Sessions killed on purpose: no notification, no re-adoption.
     killed: HashSet<String>,
     viewport: Rect,
-    /// Presse-papiers lu pour Ctrl+Maj+V et le clic droit.
+    /// Clipboard read for Ctrl+Shift+V and right-click.
     clipboard: Box<dyn ClipboardSource>,
-    /// Sans vrai terminal (tests) : ce qui aurait été envoyé à chaque carte.
+    /// Without a real terminal (tests): what would have been sent to each card.
     written: Vec<(CardId, Vec<u8>)>,
 }
 
@@ -115,17 +115,17 @@ impl TerminalCards {
         }
     }
 
-    /// Remplace le presse-papiers (tests).
+    /// Replaces the clipboard (tests).
     pub fn set_clipboard(&mut self, clipboard: Box<dyn ClipboardSource>) {
         self.clipboard = clipboard;
     }
 
-    /// Octets envoyés à une carte sans vrai terminal (tests, `Launcher::Disabled`).
+    /// Bytes sent to a card without a real terminal (tests, `Launcher::Disabled`).
     pub fn written(&self, id: &str) -> Vec<u8> {
         self.written.iter().filter(|(c, _)| c == id).flat_map(|(_, b)| b.clone()).collect()
     }
 
-    /// Envoie des octets au terminal d'une carte (ou les note, sans vrai terminal).
+    /// Sends bytes to a card's terminal (or records them, without a real terminal).
     fn send_to(&mut self, id: &str, bytes: Vec<u8>) {
         if bytes.is_empty() {
             return;
@@ -138,12 +138,12 @@ impl TerminalCards {
         }
     }
 
-    /// Mode du terminal d'une carte (mode par défaut sans vrai terminal).
+    /// Terminal mode of a card (default mode without a real terminal).
     fn mode_of(&self, id: &str) -> TermMode {
         self.runtimes.get(id).map(|rt| *rt.term.lock().mode()).unwrap_or_default()
     }
 
-    /// Colle le presse-papiers du système dans la carte.
+    /// Pastes the system clipboard into the card.
     fn paste_clipboard(&mut self, id: &str) {
         if let Some(text) = self.clipboard.text() {
             let bracketed = self.mode_of(id).contains(TermMode::BRACKETED_PASTE);
@@ -155,9 +155,9 @@ impl TerminalCards {
         self.rename.is_some() || self.stall.is_some() || self.confirm_close.is_some()
     }
 
-    /// Retire de `events` tout ce qui relève du clavier pour l'envoyer au terminal focalisé.
-    /// Les raccourcis de l'application doivent avoir été retirés avant. Les modificateurs
-    /// sont suivis dans l'ordre des événements (le texte, lui, n'en porte pas).
+    /// Removes everything keyboard-related from `events` and sends it to the focused terminal.
+    /// App shortcuts must have been removed beforehand. Modifiers
+    /// are tracked in event order (text events carry none).
     pub fn capture_keyboard(&mut self, events: &mut Vec<egui::Event>) {
         events.retain(|ev| {
             match ev {
@@ -176,7 +176,7 @@ impl TerminalCards {
         });
     }
 
-    /// Texte visible d'une carte (tests).
+    /// Visible text of a card (tests).
     pub fn screen_text(&self, id: &str) -> Option<String> {
         self.runtimes.get(id).map(|rt| rt.screen_text())
     }
@@ -185,7 +185,7 @@ impl TerminalCards {
         self.runtimes.contains_key(id)
     }
 
-    /// Événements des PTY : réponses au terminal, presse-papiers, fin de processus.
+    /// PTY events: replies to the terminal, clipboard, process exit.
     pub fn poll(&mut self, world: &mut World, events: &mut Vec<Event>) {
         while let Ok((id, ev)) = self.rx.try_recv() {
             let Some(rt) = self.runtimes.get(&id) else { continue };
@@ -218,7 +218,7 @@ impl TerminalCards {
         }
     }
 
-    /// Envoie le clavier capturé à la carte focalisée.
+    /// Sends the captured keyboard input to the focused card.
     fn write_keys(&mut self, focused: Option<&str>) {
         let keys = std::mem::take(&mut self.keys);
         let Some(id) = focused else { return };
@@ -270,7 +270,7 @@ impl TerminalCards {
         }
     }
 
-    /// Dessine toutes les cartes. Renvoie `true` si la molette a servi à un terminal.
+    /// Draws all cards. Returns `true` if the wheel was used by a terminal.
     pub fn ui(&mut self, ui: &mut Ui, world: &mut World, dimmed: &dyn Fn(&World, &Card) -> bool, events: &mut Vec<Event>) -> bool {
         let vp = ui.max_rect();
         self.viewport = vp;
@@ -287,7 +287,7 @@ impl TerminalCards {
             let dim = dimmed(world, &world.cards[i]);
             wheel_taken |= self.card_ui(ui, world, i, cell, dim, events);
         }
-        // Glissement interrompu (carte fermée, cachée…) : ne pas laisser un cadre gelé.
+        // Drag interrupted (card closed, hidden…): don't leave a frame frozen.
         if world.dragging.is_some() && !ui.input(|i| i.pointer.primary_down()) {
             world.dragging = None;
         }
@@ -317,7 +317,7 @@ impl TerminalCards {
 
         let eid = Id::unique(("card", &id));
         let title_r = ui.interact(title_rect, eid.with("title"), Sense::click_and_drag());
-        // Bouton de fermeture, au-dessus de la barre de titre (enregistré après : il gagne le clic).
+        // Close button, above the title bar (registered after: it wins the click).
         let close_rect = Rect::from_min_size(pos2(title_rect.max.x - title_rect.height(), title_rect.min.y), Vec2::splat(title_rect.height()));
         let close_r = (zoom >= CLOSE_MIN_ZOOM).then(|| {
             let r = ui.interact(close_rect, eid.with("close"), Sense::click()).on_hover_text(t().close_terminal_hint);
@@ -339,7 +339,7 @@ impl TerminalCards {
             world.touch();
         }
         if title_r.drag_stopped() && world.dragging.as_ref() == Some(&id) {
-            // Lâchée dans un cadre visible : elle en devient membre ; ailleurs : hors groupe.
+            // Dropped in a visible frame: it becomes a member; elsewhere: outside any group.
             world.dragging = None;
             let target = world.drop_target(world.cards[i].rect.center());
             if target != world.cards[i].project {
@@ -369,12 +369,12 @@ impl TerminalCards {
         }
 
         let alt = ui.input(|inp| inp.modifiers.alt);
-        // Clic droit = coller, comme dans Windows Terminal (Alt+clic droit : menu de tmux).
+        // Right-click = paste, as in Windows Terminal (Alt+right-click: tmux menu).
         let paste_click = body_r.secondary_clicked() && !alt && !is_preview(zoom);
         if body_r.drag_started_by(PointerButton::Primary) && alt {
             self.wire_from = Some(id.clone());
         } else if body_r.clicked() && is_preview(zoom) {
-            // Un aperçu n'est pas utilisable : on zoome dessus pour pouvoir taper.
+            // A preview isn't usable: zoom in on it so the user can type.
             events.push(Event::FlyTo(id.clone()));
         } else if !focused && (body_r.clicked() || body_r.drag_started() || paste_click) {
             events.push(Event::FocusCard(id.clone()));
@@ -383,7 +383,7 @@ impl TerminalCards {
             self.paste_clipboard(&id);
         }
 
-        // --- Dessin -------------------------------------------------------------------
+        // --- Drawing ------------------------------------------------------------------
         let painter = ui.painter_at(vp);
         let radius = CornerRadius::same((6.0 * zoom).clamp(1.0, 8.0) as u8);
         painter.rect_filled(screen.translate(vec2(0.0, 4.0 * zoom)).expand(2.0 * zoom), radius, Color32::from_black_alpha(90));
@@ -432,17 +432,17 @@ impl TerminalCards {
             let cell_screen = ui.ctx().fonts_mut(|f| vec2(f.glyph_width(&font, 'M'), f.row_height(&font)));
             let metrics = render::GridMetrics { origin: body_inner.min, cell: cell_screen, font, clip: body_inner.intersect(vp) };
             render::paint_grid(&painter, &rt.term.lock(), &metrics, focused);
-            // La molette fait défiler le terminal survolé, même sans le clavier ; un clic va au
-            // terminal focalisé, ou à celui qu'il vise (le premier glissé sélectionne déjà).
+            // The wheel scrolls the hovered terminal, even without keyboard focus; a click goes to the
+            // focused terminal, or to the one it targets (the first drag already selects).
             self.forward_mouse(ui, &id, &body_r, body_inner.min, cell_screen, focused);
         }
-        // Un terminal lisible sous le pointeur garde toute la molette, y compris la queue du
-        // défilement lissé des frames suivantes : le canevas ne bouge pas derrière lui.
+        // A readable terminal under the pointer keeps the whole wheel, including the tail of
+        // smoothed scrolling in later frames: the canvas doesn't move behind it.
         if !is_preview(zoom) && body_r.contains_pointer() {
             wheel_taken = true;
         }
 
-        // Bordure : focus, ou statut qui réclame l'attention (pulsation).
+        // Border: focus, or a status calling for attention (pulsing).
         let card = &world.cards[i];
         if card.attention {
             let t = ui.input(|inp| inp.time) as f32;
@@ -522,7 +522,7 @@ impl TerminalCards {
         }
     }
 
-    /// Souris → terminal (rapports xterm si l'application les demande, sinon défilement).
+    /// Mouse → terminal (xterm reports if the application requests them, otherwise scrolling).
     fn forward_mouse(&mut self, ui: &Ui, id: &str, body: &egui::Response, origin: Pos2, cell: Vec2, focused: bool) {
         let Some(rt) = self.runtimes.get_mut(id) else { return };
         let mode = *rt.term.lock().mode();
@@ -543,8 +543,8 @@ impl TerminalCards {
                         PointerButton::Secondary => MouseButton::Right,
                         _ => continue,
                     };
-                    // Alt + glissé tire un fil ; clic droit seul = coller (Alt + clic droit va à
-                    // tmux : son menu). Le relâchement, lui, suit toujours l'appui transmis.
+                    // Alt + drag pulls a wire; plain right-click = paste (Alt + right-click goes to
+                    // tmux: its menu). The release always follows the forwarded press.
                     let ours = match b {
                         MouseButton::Left => modifiers.alt,
                         MouseButton::Right => !modifiers.alt,
@@ -553,7 +553,7 @@ impl TerminalCards {
                     if pressed && ours {
                         continue;
                     }
-                    // Maj + clic appartient à l'outil main (déplacer la vue), pas au terminal.
+                    // Shift + click belongs to the hand tool (panning the view), not to the terminal.
                     let aimed = focused || body.hovered();
                     if pressed && aimed && body.rect.contains(pos) && !modifiers.shift {
                         let (col, line) = cell_at(pos);
@@ -673,10 +673,10 @@ impl TerminalCards {
             Event::NewCard { at, project } => {
                 let cell = base_cell(&self.ctx);
                 let size = card_size(cell, DEFAULT_COLS, DEFAULT_ROWS);
-                // Sans projet précisé, le terminal naît dans l'espace ouvert.
+                // With no project given, the terminal is born in the open space.
                 let project = project.as_deref().or(world.space.as_deref());
                 let project = project.and_then(|p| world.project(p));
-                // Sans position : à droite des terminaux du groupe (ou au centre d'un groupe vide).
+                // With no position: right of the group's terminals (or in the center of an empty group).
                 let beside = project.map(|p| match world.members(&p.id).map(|c| c.rect).reduce(|a, b| a.union(b)) {
                     Some(r) => pos2(r.max.x + crate::shell::world::CARD_GAP + size.x / 2.0, r.min.y + size.y / 2.0),
                     None => p.rect.center(),
@@ -687,8 +687,8 @@ impl TerminalCards {
                 card.project = project.map(|p| p.id.clone());
                 let id = card.id.clone();
                 world.add_card(card);
-                // Toujours voler jusqu'au nouveau terminal : visible et assez grand pour taper.
-                // D'abord faire sa place (rien ne se chevauche), puis y voler.
+                // Always fly to the new terminal: visible and large enough to type in.
+                // First make room (nothing overlaps), then fly there.
                 out.push(Event::SettleCard(id.clone()));
                 out.push(Event::FlyTo(id));
             }
@@ -747,7 +747,7 @@ impl TerminalCards {
                     }
                     card.info = Some(info.clone());
                 } else if let Some(id) = info.session.strip_prefix(SESSION_PREFIX).filter(|_| !self.killed.contains(&info.session)) {
-                    // Session tmux sans carte (layout perdu, créée à la main…) : on l'adopte.
+                    // tmux session without a card (lost layout, created by hand…): adopt it.
                     let cell = base_cell(&self.ctx);
                     let rect = world.free_spot(world.camera.center, card_size(cell, DEFAULT_COLS, DEFAULT_ROWS));
                     let mut card = Card::with_id(id.to_string(), rect, info.cwd.clone());
@@ -765,7 +765,7 @@ impl TerminalCards {
     }
 }
 
-/// Texte de la confirmation : on cite la commande en cours, c'est elle qu'on risque de perdre.
+/// Confirmation text: quote the running command, since that is what would be lost.
 pub fn close_message(card: &Card) -> (String, String) {
     let title = (t().close_card_title)(&card.title());
     let running = card.info.as_ref().and_then(|i| i.command.as_deref());
@@ -780,17 +780,17 @@ fn cell_px(cell: Vec2) -> (u16, u16) {
     (cell.x.round().max(1.0) as u16, cell.y.round().max(1.0) as u16)
 }
 
-/// À ce zoom, la carte est dessinée en aperçu (titre + statut) au lieu du terminal.
+/// At this zoom, the card is drawn as a preview (title + status) instead of the terminal.
 pub fn is_preview(zoom: f32) -> bool {
     quantize(BASE_FONT * zoom) < LOD_FONT_PX
 }
 
-/// Tailles de police par quarts de point : limite le nombre de variantes dans l'atlas de glyphes.
+/// Font sizes in quarter points: limits the number of variants in the glyph atlas.
 fn quantize(px: f32) -> f32 {
     (px * 4.0).round() / 4.0
 }
 
-/// Vue dézoomée : gros titre, statut et dernières lignes.
+/// Zoomed-out view: large title, status and last lines.
 fn paint_preview(painter: &egui::Painter, card: &Card, body: Rect, zoom: f32) {
     let painter = painter.with_clip_rect(body);
     let status = card.status();

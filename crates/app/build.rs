@@ -1,7 +1,7 @@
-//! Embarque l'icône (`assets/icon.ico`) dans les ressources de l'exécutable Windows,
-//! pour qu'elle apparaisse dans l'Explorateur et la barre des tâches. Sans effet sur
-//! les autres cibles. En compilation croisée depuis WSL, `embed-resource` utilise
-//! `x86_64-w64-mingw32-windres` (paquet mingw-w64).
+//! Embeds the icon (`assets/icon.ico`) in the Windows executable's resources,
+//! so it shows up in Explorer and the taskbar. No effect on
+//! other targets. When cross-compiling from WSL, `embed-resource` uses
+//! `x86_64-w64-mingw32-windres` (mingw-w64 package).
 
 use std::{env, fs, path::PathBuf};
 

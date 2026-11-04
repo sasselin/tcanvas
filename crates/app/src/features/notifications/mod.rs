@@ -1,5 +1,5 @@
-//! Notifications : quand un terminal se bloque, attend une réponse, échoue, finit une longue
-//! commande ou s'arrête. Badge sur la carte, toast dans l'application, toast Windows.
+//! Notifications: when a terminal stalls, waits for an answer, fails, finishes a long
+//! command or stops. Badge on the card, in-app toast, Windows toast.
 
 mod os;
 
@@ -14,17 +14,17 @@ use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::world::{Card, CardId, World};
 
-/// Une commande qui réussit n'est signalée que si elle a duré au moins ça.
+/// A successful command is only reported if it lasted at least this long.
 pub const LONG_COMMAND_SECS: u64 = 30;
 const TOAST_SECS: f64 = 15.0;
-/// La confirmation d'une copie n'a pas besoin de rester.
+/// A copy confirmation doesn't need to linger.
 const COPIED_SECS: f64 = 2.0;
 const MAX_TOASTS: usize = 5;
-/// Code de sortie d'un Ctrl+C : pas un échec à signaler.
+/// Exit code of a Ctrl+C: not a failure worth reporting.
 const SIGINT_EXIT: i32 = 130;
 
-/// Transition de statut → notification éventuelle. `prev == None` : première observation
-/// (démarrage, reconnexion), on ne signale rien.
+/// Status transition → possible notification. `prev == None`: first observation
+/// (startup, reconnection), nothing is reported.
 pub fn decide(prev: Option<TermStatus>, info: &SessionInfo) -> Option<Notice> {
     let prev = prev?;
     if prev == info.status {
@@ -89,7 +89,7 @@ impl Notifications {
         Self { prev: HashMap::new(), toasts: Vec::new(), os: os::OsToaster::new(ctx, tx, os_toasts), clicked }
     }
 
-    /// Clics sur les toasts Windows : on revient dans l'application, sur le bon terminal.
+    /// Clicks on Windows toasts: go back to the app, on the right terminal.
     pub fn poll(&mut self, ctx: &egui::Context, events: &mut Vec<Event>) {
         while let Ok(id) = self.clicked.try_recv() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
@@ -129,7 +129,7 @@ impl Notifications {
         let window_focused = world.window_focused;
         let watching = window_focused && world.focused.as_ref() == Some(id);
         let Some(card) = world.card_mut(id) else { return };
-        // Un déplacement ou une copie : simple information, ni bordure d'alerte, ni toast Windows.
+        // A move or a copy: plain information, no alert border, no Windows toast.
         let info_only = matches!(notice, Notice::Moved(_) | Notice::Copied);
         if watching && !info_only {
             return;
@@ -192,7 +192,7 @@ mod tests {
     use egui::{Pos2, Rect, Vec2};
 
     fn info(status: TermStatus, exit: Option<i32>, secs: Option<u64>) -> SessionInfo {
-        SessionInfo { session: "tc_a".into(), status, command: None, cwd: None, last_exit: exit, last_duration_secs: secs, tail: vec!["Continuer ? [y/N]".into()] }
+        SessionInfo { session: "tc_a".into(), status, command: None, cwd: None, last_exit: exit, last_duration_secs: secs, tail: vec!["Continue? [y/N]".into()] }
     }
 
     #[test]
@@ -256,7 +256,7 @@ mod tests {
         n.handle(&ev(TermStatus::Running), &mut w, &mut out);
         n.handle(&ev(TermStatus::Stalled), &mut w, &mut out);
         assert!(matches!(out.as_slice(), [Event::Notify(c, Notice::Stalled)] if *c == id));
-        // L'arrêt du PTY après un statut Dead déjà signalé ne notifie pas deux fois.
+        // The PTY stopping after an already reported Dead status does not notify twice.
         out.clear();
         n.handle(&ev(TermStatus::Dead), &mut w, &mut out);
         n.handle(&Event::PtyExited(id), &mut w, &mut out);

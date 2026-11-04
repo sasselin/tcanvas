@@ -1,4 +1,4 @@
-//! tcanvas : tous les terminaux WSL sur un canevas infini.
+//! tcanvas: all your WSL terminals on an infinite canvas.
 
 pub mod features {
     pub mod agent_link;

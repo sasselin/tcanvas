@@ -1,14 +1,14 @@
-//! Arrêt complet d'une session : tous les processus des terminaux, même ceux qui ignorent
-//! SIGHUP (`nohup`, `setsid`, `trap '' HUP TERM`…), puis la session tmux elle-même.
+//! Full shutdown of a session: every process of its terminals, even those that ignore
+//! SIGHUP (`nohup`, `setsid`, `trap '' HUP TERM`…), then the tmux session itself.
 //!
-//! Cibles, trois filets complémentaires :
-//! - la descendance des shells des panes ;
-//! - tout processus de la même session Unix (`nohup … &` réparenté à init) ;
-//! - tout processus qui a hérité de `TMUX_PANE` d'un de ces panes (`setsid … &`, démons
-//!   à double fork : ils quittent l'arbre et la session, mais gardent leur environnement).
+//! Targets, three complementary nets:
+//! - the descendants of the panes' shells;
+//! - any process in the same Unix session (`nohup … &` reparented to init);
+//! - any process that inherited `TMUX_PANE` from one of these panes (`setsid … &`,
+//!   double-fork daemons: they leave the tree and the session but keep their environment).
 //!
-//! Arrêt en deux temps : SIGHUP + SIGTERM pour laisser les programmes se fermer proprement,
-//! puis SIGKILL pour les récalcitrants.
+//! Two-step shutdown: SIGHUP + SIGTERM to let programs exit cleanly,
+//! then SIGKILL for the stubborn ones.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -28,8 +28,8 @@ pub struct ProcInfo {
     pub sid: u32,
 }
 
-/// Processus à arrêter : descendants des `roots`, membres de leurs sessions Unix, et `extra`
-/// (repérés par leur environnement).
+/// Processes to stop: descendants of `roots`, members of their Unix sessions, and `extra`
+/// (found through their environment).
 pub fn targets(procs: &[ProcInfo], roots: &[u32], extra: &[u32], exclude: u32) -> Vec<u32> {
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
     for p in procs {
@@ -44,14 +44,14 @@ pub fn targets(procs: &[ProcInfo], roots: &[u32], extra: &[u32], exclude: u32) -
         }
     }
     found.extend(procs.iter().filter(|p| sids.contains(&p.sid)).map(|p| p.pid));
-    // Les processus repérés par l'environnement emmènent aussi leurs propres descendants.
+    // Processes found through the environment also take their own descendants with them.
     let mut stack: Vec<u32> = extra.to_vec();
     while let Some(pid) = stack.pop() {
         if found.insert(pid) || extra.contains(&pid) {
             stack.extend(children.get(&pid).into_iter().flatten().filter(|c| !found.contains(c)));
         }
     }
-    // Le serveur tmux lui-même n'est jamais une cible : il sert les autres sessions.
+    // The tmux server itself is never a target: it serves the other sessions.
     found.remove(&exclude);
     found.remove(&0);
     found.remove(&1);
@@ -60,15 +60,15 @@ pub fn targets(procs: &[ProcInfo], roots: &[u32], extra: &[u32], exclude: u32) -
     list
 }
 
-/// `pid ppid sid` de /proc/<pid>/stat (le nom entre parenthèses peut contenir des espaces).
+/// `pid ppid sid` from /proc/<pid>/stat (the parenthesized name may contain spaces).
 pub fn parse_stat(pid: u32, stat: &str) -> Option<ProcInfo> {
     let rest = stat.get(stat.rfind(')')? + 1..)?;
     let f: Vec<&str> = rest.split_whitespace().collect();
     Some(ProcInfo { pid, ppid: f.get(1)?.parse().ok()?, sid: f.get(3)?.parse().ok()? })
 }
 
-/// Le processus a-t-il hérité de l'un de ces panes, sur ce serveur tmux ?
-/// `environ` : contenu brut de /proc/<pid>/environ (variables séparées par des zéros).
+/// Did the process inherit from one of these panes, on this tmux server?
+/// `environ`: raw contents of /proc/<pid>/environ (NUL-separated variables).
 pub fn env_belongs_to(environ: &[u8], socket_path: &str, panes: &[String]) -> bool {
     let mut on_server = false;
     let mut in_pane = false;
@@ -102,7 +102,7 @@ fn all_procs() -> Vec<ProcInfo> {
         .collect()
 }
 
-/// Vivant = existe et n'est pas un zombie (un zombie est mort, il attend juste son parent).
+/// Alive = exists and is not a zombie (a zombie is dead, it is just waiting for its parent).
 fn alive(pid: u32) -> bool {
     fs::read_to_string(format!("/proc/{pid}/stat"))
         .ok()
@@ -112,7 +112,7 @@ fn alive(pid: u32) -> bool {
 
 fn signal(pids: &[u32], sig: i32) {
     for &pid in pids {
-        // SAFETY : kill(2) n'a pas d'invariant mémoire ; une erreur (processus déjà parti) est ignorée.
+        // SAFETY: kill(2) has no memory invariants; an error (process already gone) is ignored.
         unsafe {
             libc::kill(pid as i32, sig);
         }
@@ -135,7 +135,7 @@ fn tmux_lines(args: &[&str]) -> Vec<String> {
     out.map(|o| String::from_utf8_lossy(&o.stdout).lines().map(|l| l.trim().to_string()).collect()).unwrap_or_default()
 }
 
-/// (pid du shell, identifiant `%N`) de chaque pane de la session.
+/// (shell pid, `%N` id) of each pane of the session.
 fn panes(session: &str) -> Vec<(u32, String)> {
     tmux_lines(&["list-panes", "-s", "-t", session, "-F", "#{pane_pid} #{pane_id}"])
         .iter()
@@ -146,7 +146,7 @@ fn panes(session: &str) -> Vec<(u32, String)> {
         .collect()
 }
 
-/// (pid du serveur, chemin du socket).
+/// (server pid, socket path).
 fn server() -> (u32, String) {
     let line = tmux_lines(&["display-message", "-p", "#{pid} #{socket_path}"]).into_iter().next().unwrap_or_default();
     let (pid, path) = line.split_once(' ').unwrap_or(("0", ""));
@@ -160,7 +160,7 @@ pub struct KillReport {
     pub survivors: Vec<u32>,
 }
 
-/// Arrête tous les processus de la session puis la session. Bloque au plus ~2,5 s.
+/// Stops every process of the session, then the session. Blocks for at most ~2.5 s.
 pub fn kill_session(session: &str) -> KillReport {
     let panes = panes(session);
     let roots: Vec<u32> = panes.iter().map(|p| p.0).collect();
@@ -190,12 +190,12 @@ mod tests {
     fn descendants_and_session_members_but_not_the_server() {
         let procs = [
             p(1, 0, 1),
-            p(100, 1, 100),   // serveur tmux
-            p(200, 100, 200), // shell du pane (session 200)
-            p(201, 200, 200), // commande
-            p(202, 201, 202), // setsid : autre session, mais descendant
-            p(203, 1, 200),   // nohup réparenté à init, même session
-            p(300, 100, 300), // shell d'une autre session tmux : intouchable
+            p(100, 1, 100),   // tmux server
+            p(200, 100, 200), // pane shell (session 200)
+            p(201, 200, 200), // command
+            p(202, 201, 202), // setsid: other session, but a descendant
+            p(203, 1, 200),   // nohup reparented to init, same session
+            p(300, 100, 300), // shell of another tmux session: off limits
             p(301, 300, 300),
         ];
         assert_eq!(targets(&procs, &[200], &[], 100), vec![200, 201, 202, 203]);
@@ -217,8 +217,8 @@ mod tests {
         let panes = vec!["%3".to_string()];
         let env = |s: &str| s.replace(';', "\0").into_bytes();
         assert!(env_belongs_to(&env("A=1;TMUX=/tmp/tmux-1000/tcanvas,99,2;TMUX_PANE=%3"), "/tmp/tmux-1000/tcanvas", &panes));
-        assert!(!env_belongs_to(&env("TMUX=/tmp/tmux-1000/tcanvas,99,2;TMUX_PANE=%4"), "/tmp/tmux-1000/tcanvas", &panes), "autre pane");
-        assert!(!env_belongs_to(&env("TMUX=/tmp/tmux-1000/default,7,0;TMUX_PANE=%3"), "/tmp/tmux-1000/tcanvas", &panes), "autre serveur");
+        assert!(!env_belongs_to(&env("TMUX=/tmp/tmux-1000/tcanvas,99,2;TMUX_PANE=%4"), "/tmp/tmux-1000/tcanvas", &panes), "other pane");
+        assert!(!env_belongs_to(&env("TMUX=/tmp/tmux-1000/default,7,0;TMUX_PANE=%3"), "/tmp/tmux-1000/tcanvas", &panes), "other server");
         assert!(!env_belongs_to(&env("PATH=/bin"), "/tmp/tmux-1000/tcanvas", &panes));
     }
 

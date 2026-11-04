@@ -1,11 +1,11 @@
-//! Lecture du presse-papiers du système, pour coller ailleurs que par Ctrl+V (que egui gère seul) :
-//! Ctrl+Maj+V et le clic droit. Remplaçable dans les tests.
+//! Reads the system clipboard, for pasting other than via Ctrl+V (which egui handles itself):
+//! Ctrl+Shift+V and right-click. Replaceable in tests.
 
 pub trait ClipboardSource {
     fn text(&mut self) -> Option<String>;
 }
 
-/// Presse-papiers du système (Windows, X11…). Ouvert à chaque lecture : rien à garder entre deux.
+/// System clipboard (Windows, X11…). Opened on each read: nothing to keep in between.
 pub struct System;
 
 impl ClipboardSource for System {
@@ -14,7 +14,7 @@ impl ClipboardSource for System {
     }
 }
 
-/// Contenu fixe (tests, ou pas de vrai terminal).
+/// Fixed content (tests, or no real terminal).
 pub struct Fixed(pub Option<String>);
 
 impl ClipboardSource for Fixed {

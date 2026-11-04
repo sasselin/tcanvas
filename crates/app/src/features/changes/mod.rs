@@ -1,6 +1,6 @@
-//! Changements : fichiers modifiés dans le dossier lié au groupe ouvert, et leurs diffs, en direct.
-//! L'agent fait le travail (git dans WSL) ; cette slice tient la liste des dossiers à surveiller
-//! à jour, affiche le panneau latéral et demande les diffs.
+//! Changes: modified files in the folder linked to the open group, and their diffs, live.
+//! The agent does the work (git in WSL); this slice keeps the list of watched folders
+//! up to date, shows the side panel and requests diffs.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -12,7 +12,7 @@ use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::world::{Project, ProjectId, World, unix_now};
 
-/// Un fichier touché depuis moins longtemps est surligné : on voit l'IA travailler.
+/// A file touched more recently than this is highlighted: you see the AI at work.
 const RECENT_SECS: u64 = 10;
 const ADD: Color32 = Color32::from_rgb(90, 200, 120);
 const DEL: Color32 = Color32::from_rgb(235, 95, 95);
@@ -41,14 +41,14 @@ pub fn classify(line: &str) -> LineKind {
     }
 }
 
-/// Ce qui, s'il change, rend le diff affiché périmé.
+/// What, if it changes, makes the displayed diff stale.
 type Fingerprint = (u64, Option<u32>, Option<u32>, ChangeKind);
 
 fn fingerprint(f: &FileChange) -> Fingerprint {
     (f.mtime, f.added, f.removed, f.kind.clone())
 }
 
-/// Ce que montre la zone du diff : un fichier non commité, ou un commit récent.
+/// What the diff area shows: an uncommitted file, or a recent commit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     File(String),
@@ -56,7 +56,7 @@ pub enum Target {
 }
 
 impl Target {
-    /// Valeur de `file` dans la réponse `AgentEvent::Diff` de l'agent.
+    /// Value of `file` in the agent's `AgentEvent::Diff` response.
     fn reply_key(&self) -> &str {
         match self {
             Target::File(f) | Target::Commit(f) => f,
@@ -64,12 +64,12 @@ impl Target {
     }
 }
 
-/// Le plus récent entre le dernier fichier touché et le dernier commit : ce que « Suivre » affiche.
+/// The newer of the last touched file and the last commit: what "Follow" shows.
 pub fn newest(set: &ChangeSet) -> Option<Target> {
     let file = set.files.iter().max_by_key(|f| f.mtime).map(|f| (f.mtime, Target::File(f.path.clone())));
     let commit = set.commits.first().map(|c| (c.time, Target::Commit(c.sha.clone())));
     match (file, commit) {
-        // À égalité (fichier touché puis commité dans la même seconde), le fichier en cours gagne.
+        // On a tie (file touched then committed in the same second), the working file wins.
         (Some(f), Some(c)) => Some(if c.0 > f.0 { c.1 } else { f.1 }),
         (f, c) => f.or(c).map(|x| x.1),
     }
@@ -78,7 +78,7 @@ pub fn newest(set: &ChangeSet) -> Option<Target> {
 fn target_fingerprint(set: &ChangeSet, t: &Target) -> Option<Fingerprint> {
     match t {
         Target::File(path) => set.files.iter().find(|f| &f.path == path).map(fingerprint),
-        // Un commit ne change pas.
+        // A commit never changes.
         Target::Commit(_) => None,
     }
 }
@@ -90,7 +90,7 @@ fn exists(set: &ChangeSet, t: &Target) -> bool {
     }
 }
 
-/// Commandes à envoyer pour que l'agent surveille exactement les dossiers liés.
+/// Commands to send so the agent watches exactly the linked folders.
 pub fn reconcile(watched: &mut BTreeMap<ProjectId, String>, projects: &[Project]) -> Vec<AgentCmd> {
     let wanted: BTreeMap<&str, &str> = projects.iter().filter_map(|p| p.cwd.as_deref().map(|c| (p.id.as_str(), c))).collect();
     let mut cmds = Vec::new();
@@ -110,7 +110,7 @@ pub fn reconcile(watched: &mut BTreeMap<ProjectId, String>, projects: &[Project]
     cmds
 }
 
-/// « à l'instant », « il y a 12 s », « il y a 3 min »…
+/// "just now", "12 s ago", "3 min ago"…
 pub fn age_label(now: u64, mtime: u64) -> String {
     if mtime == 0 {
         return String::new();
@@ -135,26 +135,26 @@ pub fn split_path(path: &str) -> (&str, &str) {
 struct DiffView {
     key: ProjectId,
     target: Target,
-    /// `None` tant que l'agent n'a pas répondu.
+    /// `None` until the agent has answered.
     lines: Option<Vec<(LineKind, String)>>,
     truncated: bool,
-    /// Raison donnée par l'agent quand il n'y a pas de diff.
+    /// Reason given by the agent when there is no diff.
     problem: Option<Problem>,
     fingerprint: Option<Fingerprint>,
 }
 
 pub struct Changes {
-    /// Dossiers dont la surveillance a été demandée à l'agent (clé : id du projet).
+    /// Folders the agent has been asked to watch (key: project id).
     watched: BTreeMap<ProjectId, String>,
     sets: HashMap<ProjectId, ChangeSet>,
-    /// Fichier ou commit sélectionné par groupe.
+    /// Selected file or commit, per group.
     selected: HashMap<ProjectId, Target>,
     diff: Option<DiffView>,
-    /// Sélectionner automatiquement le dernier fichier modifié (ou le dernier commit).
+    /// Automatically select the latest modified file (or the latest commit).
     pub follow: bool,
-    /// Groupe affiché en vue « Tous » : celui du dernier terminal focalisé, ou de la pastille Δ cliquée.
+    /// Group shown in the "All" view: that of the last focused terminal, or of the clicked Δ badge.
     shown: Option<ProjectId>,
-    /// Groupe du panneau à la frame précédente : en changer redemande son diff.
+    /// Panel group in the previous frame: switching group re-requests its diff.
     last_panel: Option<ProjectId>,
 }
 
@@ -169,7 +169,7 @@ impl Changes {
         self.sets.get(project)
     }
 
-    /// Fichier sélectionné du groupe (pas un commit).
+    /// Selected file of the group (not a commit).
     pub fn selected(&self, project: &str) -> Option<&str> {
         match self.selected.get(project) {
             Some(Target::File(f)) => Some(f),
@@ -181,19 +181,19 @@ impl Changes {
         self.selected.get(project)
     }
 
-    /// Lignes du diff affiché, s'il est arrivé (tests).
+    /// Lines of the displayed diff, if it has arrived (tests).
     pub fn diff_lines(&self) -> Option<Vec<(LineKind, String)>> {
         self.diff.as_ref().and_then(|d| d.lines.clone())
     }
 
-    /// Groupe dont le panneau montre les changements : le groupe ouvert, sinon (vue « Tous »)
-    /// celui du dernier terminal focalisé ou de la pastille Δ cliquée. Il doit avoir un dossier lié.
+    /// Group whose changes the panel shows: the open group, otherwise ("All" view)
+    /// that of the last focused terminal or clicked Δ badge. It must have a linked folder.
     pub fn panel_project<'a>(&self, world: &'a World) -> Option<&'a Project> {
         world.space.as_deref().or(self.shown.as_deref()).and_then(|id| world.project(id)).filter(|p| p.cwd.is_some())
     }
 
-    /// À chaque frame : aligne les surveillances de l'agent sur les dossiers liés, et redemande le
-    /// diff quand le panneau passe à un autre groupe.
+    /// Every frame: syncs the agent's watches with the linked folders, and re-requests the
+    /// diff when the panel switches to another group.
     pub fn poll(&mut self, world: &World, events: &mut Vec<Event>) {
         events.extend(reconcile(&mut self.watched, &world.projects).into_iter().map(Event::ToAgent));
         let panel = self.panel_project(world).map(|p| p.id.clone());
@@ -219,7 +219,7 @@ impl Changes {
         out.push(Event::ToAgent(cmd));
     }
 
-    /// Nouvel état d'un dossier : suivre le dernier fichier touché (ou commit), rafraîchir le diff affiché.
+    /// New state of a folder: follow the last touched file (or commit), refresh the displayed diff.
     fn on_changes(&mut self, set: ChangeSet, world: &mut World, out: &mut Vec<Event>) {
         let key = set.key.clone();
         if let Some(t) = set.files.iter().map(|f| f.mtime).max() {
@@ -244,7 +244,7 @@ impl Changes {
         };
         let fp = target_fingerprint(set, &target);
         let shown = self.diff.as_ref().is_some_and(|d| d.key == key && d.target == target && d.fingerprint == fp);
-        // Seul le groupe du panneau affiche un diff : inutile de le demander pour les autres.
+        // Only the panel's group shows a diff: no need to request it for the others.
         if !shown && self.panel_project(world).is_some_and(|p| p.id == key) {
             self.select(&key, target, out);
         } else {
@@ -254,7 +254,7 @@ impl Changes {
 
     pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
         match ev {
-            // Agent (re)lancé : il ne surveille plus rien, on renvoie tout à la prochaine frame.
+            // Agent (re)started: it watches nothing anymore, so resend everything next frame.
             Event::Agent(AgentEvent::Hello { .. }) => self.watched.clear(),
             Event::ToggleChanges => {
                 world.changes_open = !world.changes_open;
@@ -267,7 +267,7 @@ impl Changes {
                     world.touch();
                 }
             }
-            // En vue « Tous », le panneau suit le groupe du terminal sur lequel on travaille.
+            // In the "All" view, the panel follows the group of the terminal being worked in.
             Event::FocusCard(id) => {
                 if let Some(p) = world.card(id).and_then(|c| c.project.clone()) {
                     self.shown = Some(p);
@@ -298,7 +298,7 @@ impl Changes {
         }
     }
 
-    /// Bouton de la barre du haut : ouvre ou ferme le panneau.
+    /// Top bar button: opens or closes the panel.
     pub fn toolbar_ui(&mut self, ui: &mut Ui, world: &World, events: &mut Vec<Event>) {
         let Some(p) = self.panel_project(world) else { return };
         let n = self.sets.get(&p.id).map(|s| s.files.len()).unwrap_or(0);
@@ -310,7 +310,7 @@ impl Changes {
         }
     }
 
-    /// Panneau latéral. À appeler avant le canevas (il lui prend sa place).
+    /// Side panel. Call before the canvas (it takes space from it).
     pub fn panel_ui(&mut self, ui: &mut Ui, world: &World, events: &mut Vec<Event>) {
         if !world.changes_open {
             return;
@@ -404,7 +404,7 @@ impl Changes {
         }
     }
 
-    /// Une ligne de la liste. Renvoie `true` si on a cliqué dessus.
+    /// One list row. Returns `true` if it was clicked.
     fn file_row(&self, ui: &mut Ui, f: &FileChange, now: u64, selected: bool) -> bool {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
         let resp = resp.on_hover_text(match &f.kind {
@@ -417,7 +417,7 @@ impl Changes {
         if selected {
             painter.rect_filled(rect, CornerRadius::same(4), theme::FOCUS.gamma_multiply(0.25));
         } else if f.mtime > 0 && age < RECENT_SECS {
-            // Surlignage qui s'éteint en quelques secondes.
+            // Highlight that fades out within a few seconds.
             let fade = 1.0 - age as f32 / RECENT_SECS as f32;
             painter.rect_filled(rect, CornerRadius::same(4), ADD.gamma_multiply(0.25 * fade));
         } else if resp.hovered() {
@@ -432,7 +432,7 @@ impl Changes {
         let mono = FontId::monospace(12.0);
         let y = rect.center().y;
         painter.text(egui::pos2(rect.min.x + 6.0, y), Align2::LEFT_CENTER, f.kind.letter(), mono.clone(), color);
-        // À droite : âge puis +/−, mesurés pour laisser la place au nom.
+        // On the right: age then +/−, measured to leave room for the name.
         let mut right = rect.max.x - 6.0;
         let age_text = age_label(now, f.mtime);
         let small = FontId::proportional(11.0);
@@ -459,7 +459,7 @@ impl Changes {
         resp.clicked()
     }
 
-    /// Une ligne de commit. Renvoie `true` si on a cliqué dessus.
+    /// A commit row. Returns `true` if it was clicked.
     fn commit_row(&self, ui: &mut Ui, c: &CommitInfo, now: u64, selected: bool) -> bool {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
         let resp = resp.on_hover_text(format!("{}\n{} · {}", c.summary, c.author, &c.sha[..c.sha.len().min(12)]));
@@ -567,7 +567,7 @@ mod tests {
         let mut watched = BTreeMap::new();
         let mut projects = vec![project("a", Some("~/a")), project("b", None)];
         assert_eq!(reconcile(&mut watched, &projects), vec![AgentCmd::Watch { key: "a".into(), path: "~/a".into() }]);
-        assert!(reconcile(&mut watched, &projects).is_empty(), "déjà surveillé");
+        assert!(reconcile(&mut watched, &projects).is_empty(), "already watched");
         projects[0].cwd = Some("~/a2".into());
         projects[1].cwd = Some("~/b".into());
         let mut cmds = reconcile(&mut watched, &projects);
@@ -598,11 +598,11 @@ mod tests {
         c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("a.rs", 10, 1), file("b.rs", 20, 1)]))), &mut w, &mut out);
         assert_eq!(diff_requests(&out), vec!["b.rs"]);
         assert_eq!(w.file_activity.get("api"), Some(&20));
-        // Même état : rien à redemander.
+        // Same state: nothing to re-request.
         let mut out = vec![];
         c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("a.rs", 10, 1), file("b.rs", 20, 1)]))), &mut w, &mut out);
         assert!(diff_requests(&out).is_empty());
-        // a.rs vient d'être touché : on le suit.
+        // a.rs was just touched: follow it.
         let mut out = vec![];
         c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("a.rs", 30, 2), file("b.rs", 20, 1)]))), &mut w, &mut out);
         assert_eq!(diff_requests(&out), vec!["a.rs"]);
@@ -615,15 +615,15 @@ mod tests {
         let mut c = Changes { follow: false, ..Default::default() };
         let mut w = world();
         c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("a.rs", 10, 1), file("b.rs", 20, 1)]))), &mut w, &mut vec![]);
-        assert_eq!(c.selected("api"), None, "rien d'imposé sans « Suivre »");
+        assert_eq!(c.selected("api"), None, "nothing forced without Follow");
         let mut out = vec![];
         c.select("api", Target::File("a.rs".into()), &mut out);
         let mut out = vec![];
         c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("a.rs", 10, 1), file("b.rs", 40, 3)]))), &mut w, &mut out);
-        assert!(diff_requests(&out).is_empty(), "b.rs a changé, pas a.rs");
+        assert!(diff_requests(&out).is_empty(), "b.rs changed, not a.rs");
         c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("a.rs", 50, 4), file("b.rs", 40, 3)]))), &mut w, &mut out);
         assert_eq!(diff_requests(&out), vec!["a.rs"]);
-        // a.rs commité : il disparaît de la liste, la sélection aussi.
+        // a.rs committed: it leaves the list, and so does the selection.
         c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("b.rs", 40, 3)]))), &mut w, &mut vec![]);
         assert_eq!(c.selected("api"), None);
         assert!(c.diff_lines().is_none());
@@ -653,7 +653,7 @@ mod tests {
         let sha = "b".repeat(40);
         c.handle(&Event::Agent(AgentEvent::Diff { key: "api".into(), file: sha, text: "commit x\n+a\n".into(), truncated: false, problem: None }), &mut w, &mut vec![]);
         assert_eq!(c.diff_lines().unwrap()[1], (LineKind::Add, "+a".into()));
-        // Un fichier modifié après le dernier commit passe devant.
+        // A file modified after the last commit takes precedence.
         s.files = vec![file("x.rs", 60, 1)];
         let mut out = vec![];
         c.handle(&Event::Agent(AgentEvent::Changes(s)), &mut w, &mut out);
@@ -667,8 +667,8 @@ mod tests {
         let mut w = world();
         w.projects.push(project("web", Some("~/web")));
         w.space = None;
-        assert!(c.panel_project(&w).is_none(), "vue « Tous », rien de choisi");
-        // Les deux groupes ont des changements ; aucun diff demandé tant qu'aucun n'est affiché.
+        assert!(c.panel_project(&w).is_none(), "'All' view, nothing chosen");
+        // Both groups have changes; no diff is requested while none is shown.
         let mut out = vec![];
         c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("a.rs", 10, 1)]))), &mut w, &mut out);
         c.handle(&Event::Agent(AgentEvent::Changes(set("web", vec![file("w.rs", 10, 1)]))), &mut w, &mut out);
@@ -682,16 +682,16 @@ mod tests {
         assert_eq!(c.panel_project(&w).map(|p| p.id.as_str()), Some("web"));
         let mut out = vec![];
         c.poll(&w, &mut out);
-        assert_eq!(diff_requests(&out), vec!["w.rs"], "le diff du groupe affiché est demandé");
+        assert_eq!(diff_requests(&out), vec!["w.rs"], "the shown group's diff is requested");
 
         c.handle(&Event::ShowChanges("api".into()), &mut w, &mut vec![]);
-        assert!(w.changes_open, "la pastille ouvre le panneau");
+        assert!(w.changes_open, "the badge opens the panel");
         let mut out = vec![];
         c.poll(&w, &mut out);
         assert_eq!(diff_requests(&out), vec!["a.rs"]);
         let mut out = vec![];
         c.poll(&w, &mut out);
-        assert!(diff_requests(&out).is_empty(), "une seule fois");
+        assert!(diff_requests(&out).is_empty(), "only once");
     }
 
     #[test]
@@ -709,12 +709,12 @@ mod tests {
     fn stale_answers_are_ignored() {
         let mut c = Changes::default();
         let mut w = world();
-        c.handle(&Event::Agent(AgentEvent::Changes(set("inconnu", vec![file("a.rs", 1, 1)]))), &mut w, &mut vec![]);
-        assert!(c.set("inconnu").is_none());
+        c.handle(&Event::Agent(AgentEvent::Changes(set("unknown", vec![file("a.rs", 1, 1)]))), &mut w, &mut vec![]);
+        assert!(c.set("unknown").is_none());
         c.handle(&Event::Agent(AgentEvent::Diff { key: "api".into(), file: "z.rs".into(), text: "+x".into(), truncated: false, problem: None }), &mut w, &mut vec![]);
         assert!(c.diff_lines().is_none());
         c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("a.rs", 1, 1)]))), &mut w, &mut vec![]);
-        c.handle(&Event::SetProjectCwd("api".into(), Some("~/autre".into())), &mut w, &mut vec![]);
+        c.handle(&Event::SetProjectCwd("api".into(), Some("~/other".into())), &mut w, &mut vec![]);
         assert!(c.set("api").is_none() && c.selected("api").is_none() && !w.file_activity.contains_key("api"));
     }
 

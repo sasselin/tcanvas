@@ -1,4 +1,4 @@
-//! Lien avec `tcanvas-agent` dans WSL : lancement, lecture des événements, relance automatique.
+//! Link to `tcanvas-agent` in WSL: launch, event reading, automatic restart.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Stdio};
@@ -45,7 +45,7 @@ pub struct AgentLink {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
     retry_at: Option<Instant>,
-    /// Agent désactivé (tests) : les commandes sont gardées ici au lieu d'être envoyées.
+    /// Agent disabled (tests): commands are kept here instead of being sent.
     sent: Vec<AgentCmd>,
 }
 

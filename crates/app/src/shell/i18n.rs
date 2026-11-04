@@ -1,7 +1,7 @@
-//! Textes de l'interface, en français ou en anglais selon la langue de Windows.
+//! UI texts, in French or English depending on the Windows language.
 //!
-//! Chaque texte est un champ de [`Texts`] : en oublier un dans une langue ne compile pas.
-//! Les textes paramétrés sont des `fn` (closures sans capture).
+//! Each text is a field of [`Texts`]: forgetting one in a language doesn't compile.
+//! Parameterized texts are `fn`s (non-capturing closures).
 
 use std::cell::Cell;
 
@@ -13,20 +13,20 @@ pub enum Lang {
     Fr,
 }
 
-/// `fr`, `fr-CA`, `fr_FR.UTF-8` → français ; toute autre langue → anglais.
+/// `fr`, `fr-CA`, `fr_FR.UTF-8` → French; any other language → English.
 pub fn from_locale(tag: &str) -> Lang {
     let primary = tag.trim().split(['-', '_', '.', '@']).next().unwrap_or_default();
     if primary.eq_ignore_ascii_case("fr") { Lang::Fr } else { Lang::En }
 }
 
-/// `TCANVAS_LANG` (`fr` / `en`) l'emporte ; sinon la langue de l'utilisateur Windows (ou `LANG` sous Linux).
+/// `TCANVAS_LANG` (`fr` / `en`) wins; otherwise the Windows user's language (or `LANG` on Linux).
 pub fn detect() -> Lang {
     let forced = std::env::var("TCANVAS_LANG").ok().filter(|v| !v.trim().is_empty());
     from_locale(&forced.or_else(sys_locale::get_locale).unwrap_or_default())
 }
 
 thread_local! {
-    // Par thread : l'interface tourne sur un seul thread, et chaque test peut choisir sa langue.
+    // Per thread: the UI runs on a single thread, and each test can pick its language.
     static LANG: Cell<Option<Lang>> = const { Cell::new(None) };
 }
 
@@ -83,7 +83,7 @@ impl Texts {
 }
 
 pub struct Texts {
-    // Statuts des terminaux.
+    // Terminal statuses.
     pub status_idle: &'static str,
     pub status_running: &'static str,
     pub status_stalled: &'static str,
@@ -91,7 +91,7 @@ pub struct Texts {
     pub status_failed: &'static str,
     pub status_dead: &'static str,
 
-    // Problèmes signalés par l'agent.
+    // Problems reported by the agent.
     pub not_a_dir: fn(&str) -> String,
     pub dir_not_found: fn(&str) -> String,
     pub unreadable: fn(&str) -> String,
@@ -102,7 +102,7 @@ pub struct Texts {
     pub no_diff: &'static str,
     pub tmux_missing: fn(&str) -> String,
 
-    // Lien avec l'agent.
+    // Agent link.
     pub agent_starting: &'static str,
     pub agent_connected: &'static str,
     pub agent_connected_hint: &'static str,
@@ -114,7 +114,7 @@ pub struct Texts {
     pub agent_launch_failed: fn(&str) -> String,
     pub agent_stopped: &'static str,
 
-    // Panneau des changements.
+    // Changes panel.
     pub just_now: &'static str,
     pub secs_ago: fn(u64) -> String,
     pub mins_ago: fn(u64) -> String,
@@ -139,7 +139,7 @@ pub struct Texts {
     pub loading_diff: &'static str,
     pub diff_truncated: &'static str,
 
-    // Barre d'outils et filtres.
+    // Toolbar and filters.
     pub new_terminal_button: &'static str,
     pub new_terminal_hint: &'static str,
     pub new_project_button: &'static str,
@@ -154,7 +154,7 @@ pub struct Texts {
     pub empty_canvas: &'static str,
     pub layout_warning: &'static str,
 
-    // Palette de saut.
+    // Jump palette.
     pub jump_hint: &'static str,
     pub no_results: &'static str,
     pub project_shortcut: fn(usize) -> String,
@@ -177,12 +177,12 @@ pub struct Texts {
     pub duration_mins: fn(u64, u64) -> String,
     pub duration_hours: fn(u64, u64) -> String,
 
-    // Sauvegarde du layout.
+    // Layout saving.
     pub layout_read_failed: fn(&str, &str) -> String,
     pub layout_corrupt: fn(&str, &str) -> String,
     pub layout_save_failed: fn(&str) -> String,
 
-    // Sélecteur de dossier.
+    // Folder picker.
     pub home_folder: &'static str,
     pub parent_folder: &'static str,
     pub wsl_path_hint: &'static str,
@@ -197,7 +197,7 @@ pub struct Texts {
     pub unlink: &'static str,
     pub unlink_hint: &'static str,
 
-    // Groupes (projets).
+    // Groups (projects).
     pub default_project_name: fn(usize) -> String,
     pub close_group_title: fn(&str) -> String,
     pub close_empty_group: &'static str,
@@ -228,13 +228,13 @@ pub struct Texts {
     pub remove_frame: &'static str,
     pub close_all: &'static str,
 
-    // Espaces.
+    // Spaces.
     pub all_spaces: &'static str,
     pub all_spaces_hint: &'static str,
     pub open_project: &'static str,
     pub open_project_shortcut: fn(usize) -> String,
 
-    // Cartes de terminal.
+    // Terminal cards.
     pub spawn_failed: fn(&str, &str) -> String,
     pub close_terminal_hint: &'static str,
     pub close_terminal_a11y: fn(&str) -> String,
@@ -255,7 +255,7 @@ pub struct Texts {
     pub close_card_body: &'static str,
     pub ok: &'static str,
 
-    // Liens entre terminaux.
+    // Links between terminals.
     pub wire_hint: fn(&str, &str) -> String,
 }
 
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!((t().follow, t().status(TermStatus::Stalled)), ("Suivre", "bloqué"));
         set(Lang::En);
         assert_eq!((t().follow, t().status(TermStatus::Stalled)), ("Follow", "stalled"));
-        // Un autre thread garde sa propre langue.
+        // Another thread keeps its own language.
         std::thread::spawn(|| {
             set(Lang::Fr);
             assert_eq!(t().follow, "Suivre");

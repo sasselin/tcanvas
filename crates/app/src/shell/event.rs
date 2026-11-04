@@ -1,4 +1,4 @@
-//! Bus d'événements : seul moyen pour une slice d'agir sur une autre.
+//! Event bus: the only way for one slice to act on another.
 
 use egui::{Pos2, Rect};
 use protocol::{AgentCmd, AgentEvent};
@@ -12,61 +12,61 @@ pub enum Notice {
     Failed(i32),
     Finished { secs: u64 },
     Stopped,
-    /// Le terminal a été déplacé vers ce groupe (`None` : hors groupe). Simple information.
+    /// The terminal was moved to this group (`None`: outside any group). Information only.
     Moved(Option<String>),
-    /// Texte copié dans le presse-papiers depuis ce terminal (sélection tmux).
+    /// Text copied to the clipboard from this terminal (tmux selection).
     Copied,
 }
 
 #[derive(Clone, Debug)]
 pub enum Event {
-    /// Nouveau terminal ; `at` en coordonnées monde (sinon au centre de la vue).
+    /// New terminal; `at` in world coordinates (otherwise at the view center).
     NewCard { at: Option<Pos2>, project: Option<ProjectId> },
     FocusCard(CardId),
     Unfocus,
-    /// Déplace la caméra en douceur jusqu'à la carte puis lui donne le focus.
+    /// Smoothly moves the camera to the card, then focuses it.
     FlyTo(CardId),
-    /// Ouvre l'espace d'un projet (seul visible), ou « Tous » avec `None`.
+    /// Opens a project's space (the only one visible), or "All" with `None`.
     EnterSpace(Option<ProjectId>),
-    /// Cadre la caméra sur une zone du monde.
+    /// Frames the camera on a world area.
     FitRect(Rect),
-    /// Comme `FitRect`, mais seulement si la zone n'est pas déjà entièrement visible.
+    /// Like `FitRect`, but only if the area isn't already fully visible.
     RevealRect(Rect),
-    /// Ramène la caméra (en vol) à une vue précise, par exemple celle d'avant un filtre.
+    /// Flies the camera back to a given view, e.g. the one from before a filter.
     FlyCamera(Camera),
     RenameCard(CardId, Option<String>),
     SetStall(CardId, u64),
-    /// Demande confirmation avant de fermer le terminal.
+    /// Asks for confirmation before closing the terminal.
     RequestClose(CardId),
-    /// Tue la session tmux (le shell et tous ses processus) et retire la carte.
+    /// Kills the tmux session (the shell and all its processes) and removes the card.
     KillCard(CardId),
-    /// Rattache (ou recrée) la session d'une carte dont le client tmux s'est arrêté.
+    /// Reattaches (or recreates) the session of a card whose tmux client stopped.
     RespawnCard(CardId),
-    /// Retire la carte sans toucher à la session tmux.
+    /// Removes the card without touching the tmux session.
     RemoveCard(CardId),
     NewProject { at: Option<Pos2> },
     RenameProject(ProjectId, String),
     SetProjectCwd(ProjectId, Option<String>),
     SetProjectColor(ProjectId, [u8; 3]),
-    /// Supprime le cadre ; les terminaux restent.
+    /// Deletes the frame; the terminals remain.
     RemoveProject(ProjectId),
-    /// Demande confirmation avant de fermer le groupe et tous ses terminaux.
+    /// Asks for confirmation before closing the group and all its terminals.
     RequestCloseProject(ProjectId),
-    /// Change le groupe d'un terminal (`None` : hors groupe). `relocate` : le poser à côté des
-    /// membres du groupe cible (menu « Déplacer vers »), sinon il reste où on l'a lâché.
+    /// Changes a terminal's group (`None`: outside any group). `relocate`: place it next to the
+    /// target group's members ("Move to" menu), otherwise it stays where it was dropped.
     AssignCard { card: CardId, project: Option<ProjectId>, relocate: bool },
-    /// Le terminal vient d'être posé ou redimensionné : il garde sa place, ses voisins du groupe s'écartent.
+    /// The terminal was just placed or resized: it keeps its spot, its group neighbors move aside.
     SettleCard(CardId),
     AddWire(CardId, CardId),
     RemoveWire(CardId, CardId),
     Agent(AgentEvent),
-    /// Ouvre ou ferme le panneau « Changements ».
+    /// Opens or closes the "Changes" panel.
     ToggleChanges,
-    /// Ouvre le panneau « Changements » sur ce groupe.
+    /// Opens the "Changes" panel on this group.
     ShowChanges(ProjectId),
-    /// Commande à transmettre à l'agent.
+    /// Command to forward to the agent.
     ToAgent(AgentCmd),
-    /// Le client tmux d'une carte s'est arrêté sans qu'on l'ait demandé.
+    /// A card's tmux client stopped without being asked to.
     PtyExited(CardId),
     Notify(CardId, Notice),
 }

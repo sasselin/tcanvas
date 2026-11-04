@@ -1,4 +1,4 @@
-//! Tests d'interface sans écran (egui_kittest) : vraie application, sans PTY ni agent.
+//! Headless UI tests (egui_kittest): the real app, without PTYs or agent.
 
 use std::path::PathBuf;
 
@@ -19,7 +19,7 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// Les tests vérifient l'interface en français, quelle que soit la langue de la machine.
+/// Tests check the French UI, whatever the machine's language.
 fn harness(dir: &std::path::Path) -> Harness<'static, App> {
     harness_in(dir, Lang::Fr)
 }
@@ -47,7 +47,7 @@ fn add_card(h: &mut Harness<'_, App>, name: &str, at: Pos2) -> String {
     let world: &mut World = &mut h.state_mut().world;
     let mut card = Card::new(Rect::from_min_size(at, Vec2::new(500.0, 300.0)), Some(format!("/home/me/{name}")));
     card.name = Some(name.into());
-    // Posée dans un cadre : membre de ce groupe (comme si on l'y avait lâchée).
+    // Placed inside a frame: member of that group (as if dropped there).
     card.project = tcanvas::shell::world::project_at(&world.projects, card.rect.center()).map(|p| p.id.clone());
     let id = card.id.clone();
     world.add_card(card);
@@ -88,7 +88,7 @@ fn double_click_on_empty_canvas_opens_a_terminal_there() {
     let app = h.state();
     assert_eq!(app.world.cards.len(), 1);
     let world_point = app.world.camera.to_world(p, vp);
-    assert!(app.world.cards[0].rect.expand(200.0).contains(world_point), "carte créée près du double-clic");
+    assert!(app.world.cards[0].rect.expand(200.0).contains(world_point), "card created near the double-click");
 }
 
 #[test]
@@ -100,10 +100,10 @@ fn keyboard_goes_to_focused_terminal_but_shortcuts_stay_global() {
     steps(&mut h, 2);
     h.event(egui::Event::Text("abc".into()));
     steps(&mut h, 2);
-    assert_eq!(h.state().filters.text, "", "le texte tapé ne fuit pas dans la recherche");
+    assert_eq!(h.state().filters.text, "", "typed text does not leak into the search");
     ctrl_shift(&h, Key::N);
     steps(&mut h, 3);
-    assert_eq!(h.state().world.cards.len(), 2, "Ctrl+Maj+N fonctionne même terminal focalisé");
+    assert_eq!(h.state().world.cards.len(), 2, "Ctrl+Shift+N works even with a focused terminal");
 }
 
 #[test]
@@ -128,20 +128,20 @@ fn jump_palette_flies_to_the_chosen_terminal() {
     let dir = temp_dir("jump");
     let mut h = harness(&dir);
     add_card(&mut h, "api", Pos2::ZERO);
-    let far = add_card(&mut h, "base-de-donnees", pos2(20_000.0, 9_000.0));
+    let far = add_card(&mut h, "database", pos2(20_000.0, 9_000.0));
     steps(&mut h, 2);
     ctrl_shift(&h, Key::K);
     steps(&mut h, 2);
     assert!(h.state().jump_open());
-    h.event(egui::Event::Text("donnees".into()));
+    h.event(egui::Event::Text("data".into()));
     steps(&mut h, 2);
     h.key_press(Key::Enter);
     steps(&mut h, 45);
     let app = h.state();
     assert!(!app.jump_open());
-    assert_eq!(app.world.focused.as_deref(), Some(far.as_str()), "focus après le vol");
+    assert_eq!(app.world.focused.as_deref(), Some(far.as_str()), "focus after the flight");
     let card = app.world.card(&far).unwrap();
-    assert!(app.viewport().contains_rect(screen_of(&h, card.rect).shrink(1.0)), "la carte est entièrement à l'écran");
+    assert!(app.viewport().contains_rect(screen_of(&h, card.rect).shrink(1.0)), "the card is fully on screen");
 }
 
 #[test]
@@ -163,7 +163,7 @@ fn dragging_the_title_bar_moves_the_card() {
     let after = h.state().world.card(&id).unwrap().rect;
     let moved = after.min - before.min;
     let zoom = h.state().world.camera.zoom;
-    assert!((moved - Vec2::new(200.0, 100.0) / zoom).length() < 25.0, "déplacement {moved:?}");
+    assert!((moved - Vec2::new(200.0, 100.0) / zoom).length() < 25.0, "moved {moved:?}");
     assert_eq!(after.size(), before.size());
 }
 
@@ -176,7 +176,7 @@ fn clicking_a_wire_flies_to_its_far_end() {
     h.state_mut().world.camera.zoom = 0.6;
     h.state_mut().dispatch(vec![Event::AddWire(a.clone(), b.clone())]);
     steps(&mut h, 2);
-    // Point du fil tout près de la carte A : le bout le plus éloigné est B.
+    // Point on the wire right next to card A: the far end is B.
     let app = h.state();
     let ra = screen_of(&h, app.world.card(&a).unwrap().rect);
     let near_a = ra.right_center() + Vec2::new(12.0, 0.0);
@@ -228,7 +228,7 @@ fn agent_status_changes_raise_a_clickable_toast() {
     steps(&mut h, 45);
     let app = h.state();
     assert_eq!(app.world.focused.as_deref(), Some(id.as_str()));
-    assert!(!app.world.card(&id).unwrap().attention, "regarder le terminal efface l'alerte");
+    assert!(!app.world.card(&id).unwrap().attention, "looking at the terminal clears the alert");
     assert_eq!(app.pending_toasts(), 0);
 }
 
@@ -251,7 +251,7 @@ fn layout_survives_a_restart() {
     let id;
     {
         let mut h = harness(&dir);
-        id = add_card(&mut h, "persistant", pos2(123.0, 456.0));
+        id = add_card(&mut h, "persistent", pos2(123.0, 456.0));
         h.state_mut().dispatch(vec![Event::NewProject { at: Some(Pos2::ZERO) }]);
         h.state_mut().world.camera.zoom = 0.5;
         steps(&mut h, 2);
@@ -260,8 +260,8 @@ fn layout_survives_a_restart() {
     let mut h = harness(&dir);
     steps(&mut h, 2);
     let app = h.state();
-    let card = app.world.card(&id).expect("carte restaurée");
-    assert_eq!(card.name.as_deref(), Some("persistant"));
+    let card = app.world.card(&id).expect("card restored");
+    assert_eq!(card.name.as_deref(), Some("persistent"));
     assert_eq!(card.rect.min, pos2(123.0, 456.0));
     assert_eq!(app.world.projects.len(), 1);
     assert_eq!(app.world.camera.zoom, 0.5);
@@ -270,7 +270,7 @@ fn layout_survives_a_restart() {
 
 #[test]
 fn new_terminal_when_zoomed_out_flies_in_to_a_usable_size() {
-    // Cas réel : vue dézoomée à 0,37 → la nouvelle carte restait un aperçu « sass · inactif ».
+    // Real case: view zoomed out to 0.37 → the new card stayed a "sass · idle" preview.
     let dir = temp_dir("zoomed-out-new");
     let mut h = harness(&dir);
     h.state_mut().world.camera.zoom = 0.37;
@@ -287,7 +287,7 @@ fn new_terminal_when_zoomed_out_flies_in_to_a_usable_size() {
 fn clicking_a_preview_zooms_in_on_it() {
     let dir = temp_dir("preview-click");
     let mut h = harness(&dir);
-    let id = add_card(&mut h, "loin", Pos2::ZERO);
+    let id = add_card(&mut h, "far", Pos2::ZERO);
     h.state_mut().world.camera = tcanvas::shell::world::Camera { center: pos2(250.0, 150.0), zoom: 0.3 };
     steps(&mut h, 2);
     let body = screen_of(&h, h.state().world.card(&id).unwrap().rect).center();
@@ -306,7 +306,7 @@ fn add_project(h: &mut Harness<'_, App>, name: &str, rect: Rect) -> String {
     id
 }
 
-/// Cadre actuel du groupe (ajusté à ses membres).
+/// Current frame of the group (fitted to its members).
 fn project_rect(h: &Harness<'_, App>, id: &str) -> Rect {
     h.state().world.project(id).unwrap().rect
 }
@@ -320,17 +320,17 @@ fn ctrl_shift_digit_flies_to_that_project_even_from_a_terminal() {
     let dir = temp_dir("project-digit");
     let mut h = harness(&dir);
     let far = Rect::from_min_size(pos2(30_000.0, -8_000.0), Vec2::new(2000.0, 1200.0));
-    add_project(&mut h, "un", Rect::from_min_size(Pos2::ZERO, Vec2::splat(800.0)));
-    let deux = add_project(&mut h, "deux", far);
-    let id = add_card(&mut h, "dans-un", pos2(100.0, 100.0));
+    add_project(&mut h, "one", Rect::from_min_size(Pos2::ZERO, Vec2::splat(800.0)));
+    let two = add_project(&mut h, "two", far);
+    let id = add_card(&mut h, "in-one", pos2(100.0, 100.0));
     h.state_mut().dispatch(vec![Event::FocusCard(id)]);
     steps(&mut h, 2);
-    let far = project_rect(&h, &deux);
+    let far = project_rect(&h, &two);
     assert!(!sees_whole(&h, far));
-    // Touche physique « 2 » (en AZERTY la touche logique est « é »).
+    // Physical key "2" (on AZERTY the logical key is U+00E9).
     h.event(egui::Event::Key { key: Key::Quote, physical_key: Some(Key::Num2), pressed: true, repeat: false, modifiers: Modifiers::CTRL | Modifiers::SHIFT });
     steps(&mut h, 45);
-    assert!(sees_whole(&h, far), "le projet 2 est cadré");
+    assert!(sees_whole(&h, far), "project 2 is framed");
 }
 
 #[test]
@@ -338,13 +338,13 @@ fn palette_finds_projects() {
     let dir = temp_dir("project-palette");
     let mut h = harness(&dir);
     let far = Rect::from_min_size(pos2(-25_000.0, 12_000.0), Vec2::new(1500.0, 900.0));
-    let facturation = add_project(&mut h, "facturation", far);
+    let billing = add_project(&mut h, "billing", far);
     add_card(&mut h, "api", Pos2::ZERO);
     steps(&mut h, 2);
-    let far = project_rect(&h, &facturation);
+    let far = project_rect(&h, &billing);
     ctrl_shift(&h, Key::K);
     steps(&mut h, 2);
-    h.event(egui::Event::Text("factu".into()));
+    h.event(egui::Event::Text("bill".into()));
     steps(&mut h, 2);
     h.key_press(Key::Enter);
     steps(&mut h, 45);
@@ -358,26 +358,26 @@ fn clicking_a_project_chip_opens_that_project_alone() {
     let infra = Rect::from_min_size(pos2(9_000.0, 9_000.0), Vec2::new(1200.0, 800.0));
     add_project(&mut h, "api", Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0)));
     add_project(&mut h, "infra", infra);
-    add_card(&mut h, "serveur", pos2(100.0, 100.0));
-    add_card(&mut h, "deploiement", pos2(9_100.0, 9_100.0));
-    add_card(&mut h, "orphelin", pos2(-20_000.0, 0.0));
+    add_card(&mut h, "server", pos2(100.0, 100.0));
+    add_card(&mut h, "deploy", pos2(9_100.0, 9_100.0));
+    add_card(&mut h, "orphan", pos2(-20_000.0, 0.0));
     steps(&mut h, 2);
-    let shown = |h: &Harness<'_, App>| ["serveur", "deploiement", "orphelin"].map(|n| h.query_by_label(&format!("Fermer le terminal {n}")).is_some());
+    let shown = |h: &Harness<'_, App>| ["server", "deploy", "orphan"].map(|n| h.query_by_label(&format!("Fermer le terminal {n}")).is_some());
 
     h.get_by_label("● infra").click();
     steps(&mut h, 3);
     assert_eq!(h.state().world.space.as_deref(), Some("p-infra"));
-    assert!(sees_whole(&h, project_rect(&h, "p-infra")), "le projet est cadré dès l'ouverture");
-    assert_eq!(shown(&h), [false, true, false], "un seul projet à la fois");
-    assert!(h.query_by_label("Fermer le groupe api").is_none(), "le cadre des autres projets est caché");
-    // Même en regardant exactement là où sont les autres, rien n'apparaît ni ne se clique.
+    assert!(sees_whole(&h, project_rect(&h, "p-infra")), "the project is framed as soon as it opens");
+    assert_eq!(shown(&h), [false, true, false], "one project at a time");
+    assert!(h.query_by_label("Fermer le groupe api").is_none(), "the other projects' frames are hidden");
+    // Even looking exactly where the others are, nothing shows up or can be clicked.
     for at in [pos2(600.0, 400.0), pos2(-19_750.0, 150.0)] {
         h.state_mut().world.camera = tcanvas::shell::world::Camera { center: at, zoom: 1.0 };
         steps(&mut h, 2);
-        assert_eq!(shown(&h), [false, false, false], "vue sur {at:?}");
+        assert_eq!(shown(&h), [false, false, false], "view on {at:?}");
         assert!(h.query_by_label("Fermer le groupe api").is_none());
     }
-    // Contrôle : dans « Tous », la même vue montre bien le terminal.
+    // Control: in "All", the same view does show the terminal.
     h.get_by_label("Tous").click();
     steps(&mut h, 2);
     h.state_mut().world.camera = tcanvas::shell::world::Camera { center: pos2(600.0, 400.0), zoom: 1.0 };
@@ -396,7 +396,7 @@ fn clicking_a_project_chip_opens_that_project_alone() {
     assert_eq!(h.state().world.space, None);
     h.state_mut().dispatch(vec![Event::FitRect(Rect::from_min_max(pos2(-20_000.0, 0.0), pos2(10_200.0, 9_800.0)))]);
     steps(&mut h, 45);
-    assert!(h.query_by_label("Fermer le groupe api").is_some() && h.query_by_label("Fermer le groupe infra").is_some(), "« Tous » montre l'ensemble");
+    assert!(h.query_by_label("Fermer le groupe api").is_some() && h.query_by_label("Fermer le groupe infra").is_some(), "\"All\" shows everything");
 }
 
 #[test]
@@ -408,13 +408,13 @@ fn a_new_terminal_opens_in_the_open_project() {
     steps(&mut h, 2);
     h.get_by_label("● api").click();
     steps(&mut h, 3);
-    // Pousser la vue loin du cadre : le terminal créé là doit quand même rester dans le projet.
+    // Push the view far from the frame: a terminal created there must still stay in the project.
     h.state_mut().world.camera.center = pos2(4_000.0, 3_000.0);
     ctrl_shift(&h, Key::N);
     steps(&mut h, 45);
     let app = h.state();
-    let card = app.world.cards.last().expect("terminal créé");
-    assert!(app.world.shows_card(card), "visible dans l'espace ouvert");
+    let card = app.world.cards.last().expect("terminal created");
+    assert!(app.world.shows_card(card), "visible in the open space");
     assert_eq!(app.world.project_of(card).map(|p| p.id.as_str()), Some("p-api"));
 }
 
@@ -424,13 +424,13 @@ fn going_to_a_hidden_terminal_opens_its_project() {
     let mut h = harness(&dir);
     add_project(&mut h, "api", Rect::from_min_size(Pos2::ZERO, Vec2::new(1200.0, 800.0)));
     add_project(&mut h, "infra", Rect::from_min_size(pos2(9_000.0, 9_000.0), Vec2::new(1200.0, 800.0)));
-    let target = add_card(&mut h, "deploiement", pos2(9_100.0, 9_100.0));
+    let target = add_card(&mut h, "deploy", pos2(9_100.0, 9_100.0));
     steps(&mut h, 2);
     h.get_by_label("● api").click();
     steps(&mut h, 3);
     ctrl_shift(&h, Key::K);
     steps(&mut h, 2);
-    h.event(egui::Event::Text("deploiement".into()));
+    h.event(egui::Event::Text("deploy".into()));
     steps(&mut h, 2);
     h.key_press(Key::Enter);
     steps(&mut h, 45);
@@ -481,16 +481,16 @@ fn double_click_on_project_title_renames_it_in_place() {
     let dir = temp_dir("rename-project");
     let mut h = harness(&dir);
     let rect = Rect::from_min_size(pos2(-400.0, -200.0), Vec2::new(900.0, 500.0));
-    let id = add_project(&mut h, "Projet 1", rect);
+    let id = add_project(&mut h, "Project 1", rect);
     steps(&mut h, 2);
     double_click_project_title(&mut h, &id);
-    // Le nom est tout sélectionné : taper le remplace.
+    // The whole name is selected: typing replaces it.
     h.event(egui::Event::Text("Backend".into()));
     steps(&mut h, 2);
     h.key_press(Key::Enter);
     steps(&mut h, 3);
     assert_eq!(project_name(&h, &id), "Backend");
-    assert!(h.state().world.cards.is_empty(), "le double-clic ne crée pas de terminal");
+    assert!(h.state().world.cards.is_empty(), "the double-click does not create a terminal");
 }
 
 #[test]
@@ -502,23 +502,23 @@ fn escape_cancels_and_clicking_elsewhere_keeps_the_new_name() {
     steps(&mut h, 2);
 
     double_click_project_title(&mut h, &id);
-    h.event(egui::Event::Text("Abandonné".into()));
+    h.event(egui::Event::Text("Discarded".into()));
     steps(&mut h, 2);
     h.key_press(Key::Escape);
     steps(&mut h, 3);
     assert_eq!(project_name(&h, &id), "Original");
 
-    steps(&mut h, 30); // sinon les deux doubles-clics forment un triple-clic
+    steps(&mut h, 30); // otherwise the two double-clicks make a triple-click
     double_click_project_title(&mut h, &id);
-    assert!(h.state().projects_editing(), "le second double-clic ouvre l'édition");
-    h.event(egui::Event::Text("Gardé".into()));
+    assert!(h.state().projects_editing(), "the second double-click starts editing");
+    h.event(egui::Event::Text("Kept".into()));
     steps(&mut h, 2);
     let elsewhere = h.state().viewport().max - Vec2::new(400.0, 300.0);
     h.drag_at(elsewhere);
     h.step();
     h.drop_at(elsewhere);
     steps(&mut h, 3);
-    assert_eq!(project_name(&h, &id), "Gardé");
+    assert_eq!(project_name(&h, &id), "Kept");
 }
 
 #[test]
@@ -531,11 +531,11 @@ fn typing_a_project_name_never_reaches_the_focused_terminal() {
     h.state_mut().dispatch(vec![Event::FocusCard(card)]);
     steps(&mut h, 2);
     double_click_project_title(&mut h, &id);
-    h.event(egui::Event::Text("Nom".into()));
+    h.event(egui::Event::Text("Name".into()));
     steps(&mut h, 2);
     h.key_press(Key::Enter);
     steps(&mut h, 3);
-    assert_eq!(project_name(&h, &id), "Nom");
+    assert_eq!(project_name(&h, &id), "Name");
 }
 
 fn click_at(h: &mut Harness<'_, App>, p: Pos2) {
@@ -547,7 +547,7 @@ fn click_at(h: &mut Harness<'_, App>, p: Pos2) {
     steps(h, 3);
 }
 
-/// Centre du bouton × de la carte (carré à droite de la barre de titre).
+/// Center of the card's × button (square at the right of the title bar).
 fn close_button(h: &Harness<'_, App>, id: &str) -> Pos2 {
     let r = screen_of(h, h.state().world.card(id).unwrap().rect);
     let side = tcanvas::features::terminal_card::TITLE_H * h.state().world.camera.zoom;
@@ -563,40 +563,40 @@ fn close_button_asks_before_closing() {
 
     let at = close_button(&h, &id);
     click_at(&mut h, at);
-    assert!(h.query_by_label("Fermer « api » ?").is_some(), "confirmation affichée");
+    assert!(h.query_by_label("Fermer « api » ?").is_some(), "confirmation shown");
     h.get_by_label("Annuler").click();
     steps(&mut h, 3);
-    assert!(h.state().world.card(&id).is_some(), "Annuler garde le terminal");
+    assert!(h.state().world.card(&id).is_some(), "Cancel keeps the terminal");
 
     let at = close_button(&h, &id);
     click_at(&mut h, at);
     h.get_by_label("Fermer").click();
     steps(&mut h, 3);
-    assert!(h.state().world.card(&id).is_none(), "Fermer retire le terminal");
+    assert!(h.state().world.card(&id).is_none(), "Close removes the terminal");
 }
 
 #[test]
 fn ctrl_shift_w_closes_the_focused_terminal_after_confirmation() {
     let dir = temp_dir("close-shortcut");
     let mut h = harness(&dir);
-    let keep = add_card(&mut h, "garde", pos2(-900.0, 0.0));
-    let id = add_card(&mut h, "jetable", pos2(200.0, 0.0));
+    let keep = add_card(&mut h, "kept", pos2(-900.0, 0.0));
+    let id = add_card(&mut h, "disposable", pos2(200.0, 0.0));
     h.state_mut().dispatch(vec![Event::FocusCard(id.clone())]);
     steps(&mut h, 2);
 
     ctrl_shift(&h, Key::W);
     steps(&mut h, 3);
-    assert!(h.query_by_label("Fermer « jetable » ?").is_some());
+    assert!(h.query_by_label("Fermer « disposable » ?").is_some());
     h.key_press(Key::Escape);
     steps(&mut h, 3);
-    assert!(h.state().world.card(&id).is_some(), "Échap annule");
+    assert!(h.state().world.card(&id).is_some(), "Escape cancels");
 
     ctrl_shift(&h, Key::W);
     steps(&mut h, 3);
     h.key_press(Key::Enter);
     steps(&mut h, 3);
-    assert!(h.state().world.card(&id).is_none(), "Entrée confirme");
-    assert!(h.state().world.card(&keep).is_some(), "seul le terminal focalisé est fermé");
+    assert!(h.state().world.card(&id).is_none(), "Enter confirms");
+    assert!(h.state().world.card(&keep).is_some(), "only the focused terminal is closed");
 }
 
 #[test]
@@ -616,29 +616,29 @@ fn closing_a_group_closes_its_terminals_after_confirmation() {
     let dir = temp_dir("close-group");
     let mut h = harness(&dir);
     let rect = Rect::from_min_size(pos2(-600.0, -300.0), Vec2::new(1300.0, 500.0));
-    let group = add_project(&mut h, "jetable", rect);
+    let group = add_project(&mut h, "disposable", rect);
     let inside_a = add_card(&mut h, "a", pos2(-550.0, -250.0));
     let inside_b = add_card(&mut h, "b", pos2(100.0, -250.0));
-    let outside = add_card(&mut h, "dehors", pos2(-550.0, 400.0));
+    let outside = add_card(&mut h, "outside", pos2(-550.0, 400.0));
     h.state_mut().dispatch(vec![Event::AddWire(inside_a.clone(), outside.clone())]);
     steps(&mut h, 2);
 
-    h.get_by_label("Fermer le groupe jetable").click();
+    h.get_by_label("Fermer le groupe disposable").click();
     steps(&mut h, 3);
-    assert!(h.query_by_label("Fermer le groupe « jetable » ?").is_some(), "confirmation affichée");
+    assert!(h.query_by_label("Fermer le groupe « disposable » ?").is_some(), "confirmation shown");
     h.get_by_label("Annuler").click();
     steps(&mut h, 3);
     assert_eq!(h.state().world.cards.len(), 3);
 
-    h.get_by_label("Fermer le groupe jetable").click();
+    h.get_by_label("Fermer le groupe disposable").click();
     steps(&mut h, 3);
     h.get_by_label("Tout fermer").click();
     steps(&mut h, 3);
     let app = h.state();
-    assert!(app.world.project(&group).is_none(), "cadre supprimé");
-    assert!(app.world.card(&inside_a).is_none() && app.world.card(&inside_b).is_none(), "terminaux du groupe fermés");
-    assert!(app.world.card(&outside).is_some(), "le terminal hors du groupe reste");
-    assert!(app.world.wires.is_empty(), "les fils vers les terminaux fermés disparaissent");
+    assert!(app.world.project(&group).is_none(), "frame removed");
+    assert!(app.world.card(&inside_a).is_none() && app.world.card(&inside_b).is_none(), "group terminals closed");
+    assert!(app.world.card(&outside).is_some(), "the terminal outside the group remains");
+    assert!(app.world.wires.is_empty(), "wires to closed terminals disappear");
 }
 
 fn cursor(h: &Harness<'_, App>) -> egui::CursorIcon {
@@ -658,11 +658,11 @@ fn holding_shift_shows_the_hand_and_drags_the_view_even_over_a_terminal() {
     let over_card = screen_of(&h, h.state().world.card(&id).unwrap().rect).center();
     h.hover_at(over_card);
     steps(&mut h, 2);
-    assert_ne!(cursor(&h), egui::CursorIcon::Grab, "pas de main sans Maj");
+    assert_ne!(cursor(&h), egui::CursorIcon::Grab, "no hand without Shift");
 
     hold_shift(&h, true);
     steps(&mut h, 2);
-    assert_eq!(cursor(&h), egui::CursorIcon::Grab, "main ouverte avec Maj");
+    assert_eq!(cursor(&h), egui::CursorIcon::Grab, "open hand with Shift");
 
     let cam_before = h.state().world.camera.center;
     let card_before = h.state().world.card(&id).unwrap().rect;
@@ -672,17 +672,17 @@ fn holding_shift_shows_the_hand_and_drags_the_view_even_over_a_terminal() {
         h.hover_at(over_card + Vec2::new(15.0 * k as f32, 8.0 * k as f32));
         h.step();
     }
-    assert_eq!(cursor(&h), egui::CursorIcon::Grabbing, "main fermée pendant le glissement");
+    assert_eq!(cursor(&h), egui::CursorIcon::Grabbing, "closed hand while dragging");
     h.event(egui::Event::PointerButton { pos: over_card + Vec2::new(150.0, 80.0), button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::SHIFT });
     hold_shift(&h, false);
     steps(&mut h, 2);
 
     let app = h.state();
     let moved = (app.world.camera.center - cam_before) * app.world.camera.zoom;
-    assert!((moved + Vec2::new(150.0, 80.0)).length() < 20.0, "la vue suit la main : {moved:?}");
-    assert_eq!(app.world.card(&id).unwrap().rect, card_before, "la carte ne bouge pas");
-    assert_ne!(app.world.focused.as_deref(), Some(id.as_str()), "Maj + glisser ne sélectionne pas le terminal");
-    assert_ne!(cursor(&h), egui::CursorIcon::Grab, "plus de main une fois Maj relâchée");
+    assert!((moved + Vec2::new(150.0, 80.0)).length() < 20.0, "the view follows the hand: {moved:?}");
+    assert_eq!(app.world.card(&id).unwrap().rect, card_before, "the card does not move");
+    assert_ne!(app.world.focused.as_deref(), Some(id.as_str()), "Shift + drag does not select the terminal");
+    assert_ne!(cursor(&h), egui::CursorIcon::Grab, "no hand once Shift is released");
 }
 
 #[test]
@@ -702,9 +702,9 @@ fn dragging_empty_canvas_shows_the_closed_hand() {
     steps(&mut h, 2);
 }
 
-// --- Groupes ajustés au contenu, terminaux qui changent de groupe ----------------------------
+// --- Groups fitted to their content, terminals changing groups ------------------------------
 
-/// Glisse la barre de titre de la carte de `delta` (pixels écran), par petits pas, puis la lâche.
+/// Drags the card's title bar by `delta` (screen pixels), in small steps, then drops it.
 fn drag_card_by(h: &mut Harness<'_, App>, id: &str, delta: Vec2) {
     let title = screen_of(h, h.state().world.card(id).unwrap().rect).min + Vec2::new(150.0, 8.0);
     h.drag_at(title);
@@ -721,7 +721,7 @@ fn group_of(h: &Harness<'_, App>, card: &str) -> Option<String> {
     h.state().world.card(card).unwrap().project.clone()
 }
 
-/// Union des membres + marge : ce que doit être le cadre.
+/// Union of the members + padding: what the frame must be.
 fn members_fit(h: &Harness<'_, App>, project: &str) -> Rect {
     let w = &h.state().world;
     w.members(project).map(|c| c.rect).reduce(|a, b| a.union(b)).unwrap().expand(tcanvas::shell::world::PROJECT_PAD)
@@ -747,17 +747,17 @@ fn nudging_a_card_against_the_edge_never_grows_the_group_beyond_its_content() {
     steps(&mut h, 2);
     h.get_by_label("● api").click();
     steps(&mut h, 45);
-    // Vingt petits coups vers le bord droit : le cadre suit la carte, sans jamais la dépasser.
+    // Twenty small nudges toward the right edge: the frame follows the card, never beyond it.
     for _ in 0..20 {
         drag_card_by(&mut h, &b, Vec2::new(30.0, 0.0));
-        assert_eq!(group_of(&h, &b).as_deref(), Some("p-api"), "reste dans le groupe");
+        assert_eq!(group_of(&h, &b).as_deref(), Some("p-api"), "stays in the group");
         assert_eq!(project_rect(&h, "p-api"), members_fit(&h, "p-api"));
     }
     let wide = project_rect(&h, "p-api");
-    // Elle a fini par sortir de la vue : on la recentre avant de la ramener.
+    // It ended up out of view: recenter on it before bringing it back.
     h.state_mut().world.camera.center = h.state().world.card(&b).unwrap().rect.center();
     steps(&mut h, 2);
-    // Et en la ramenant, le cadre rétrécit.
+    // And bringing it back shrinks the frame.
     drag_card_by(&mut h, &b, Vec2::new(-200.0, 0.0));
     assert!(project_rect(&h, "p-api").width() < wide.width());
     assert_eq!(project_rect(&h, "p-api"), members_fit(&h, "p-api"));
@@ -776,13 +776,13 @@ fn dragging_a_card_out_of_its_group_frees_it_and_onto_another_group_joins_it() {
     steps(&mut h, 3);
     let before = project_rect(&h, "p-api");
 
-    // Vers le vide (« Tous ») : hors groupe, et le cadre d'api rétrécit autour de « a ».
+    // Onto empty space ("All"): out of the group, and api's frame shrinks around "a".
     drag_card_by(&mut h, &b, Vec2::new(0.0, 230.0));
     assert_eq!(group_of(&h, &b), None);
     assert!(project_rect(&h, "p-api").width() < before.width());
     assert!(!project_rect(&h, "p-api").intersects(h.state().world.card(&b).unwrap().rect));
 
-    // Sur le cadre de web : il en devient membre et le cadre l'englobe.
+    // Onto web's frame: it becomes a member and the frame encloses it.
     let target = screen_of(&h, project_rect(&h, "p-web")).center();
     let from = screen_of(&h, h.state().world.card(&b).unwrap().rect).center();
     drag_card_by(&mut h, &b, target - from);
@@ -809,16 +809,16 @@ fn move_to_menu_sends_a_terminal_to_another_group_from_its_space() {
     h.get_by_label("web").click();
     steps(&mut h, 3);
     assert_eq!(group_of(&h, &a).as_deref(), Some("p-web"));
-    assert!(project_rect(&h, "p-web").contains_rect(h.state().world.card(&a).unwrap().rect), "posé dans le cadre de web");
-    assert!(h.query_by_label("Fermer le terminal a").is_none(), "il a quitté l'espace ouvert");
-    // Le toast dit où il est parti ; un clic y emmène.
+    assert!(project_rect(&h, "p-web").contains_rect(h.state().world.card(&a).unwrap().rect), "placed inside web's frame");
+    assert!(h.query_by_label("Fermer le terminal a").is_none(), "it left the open space");
+    // The toast says where it went; a click takes you there.
     h.get_by_label("➜ Déplacé vers « web »").click();
     steps(&mut h, 45);
     assert_eq!(h.state().world.space.as_deref(), Some("p-web"));
     assert_eq!(h.state().world.focused.as_deref(), Some(a.as_str()));
 }
 
-// --- Dossier lié et panneau « Changements » --------------------------------------------------
+// --- Linked folder and "Changes" panel -------------------------------------------------------
 
 fn changes(key: &str, files: &[(&str, u64)]) -> AgentEvent {
     AgentEvent::Changes(protocol::ChangeSet {
@@ -857,7 +857,7 @@ fn linking_a_folder_from_the_label_opens_new_terminals_there_and_watches_it() {
     h.state_mut().world.card_mut(&a).unwrap().cwd = Some("/home/me/code/api".into());
     steps(&mut h, 3);
 
-    // Le sélecteur s'ouvre sur le dossier du terminal du groupe et le demande à l'agent.
+    // The picker opens on the group terminal's folder and asks the agent for it.
     h.get_by_label("Dossier du groupe api").click();
     steps(&mut h, 2);
     assert_eq!(h.state().agent_sent().last(), Some(&protocol::AgentCmd::ListDir { path: "/home/me/code/api".into() }));
@@ -873,10 +873,10 @@ fn linking_a_folder_from_the_label_opens_new_terminals_there_and_watches_it() {
     };
     h.state_mut().dispatch(vec![listing("/home/me/code/api", &[("docs", false), ("web", true)])]);
     steps(&mut h, 2);
-    assert!(h.query_by_label("📁 docs").is_some(), "sous-dossiers listés");
-    assert!(h.query_by_label("Récents :").is_some(), "raccourcis vers les dossiers récents");
+    assert!(h.query_by_label("📁 docs").is_some(), "subfolders listed");
+    assert!(h.query_by_label("Récents :").is_some(), "shortcuts to recent folders");
 
-    // Entrer dans « web » (dépôt git), puis le lier.
+    // Enter "web" (git repo), then link it.
     h.get_by_label("📁 web").click();
     steps(&mut h, 2);
     assert_eq!(h.state().agent_sent().last(), Some(&protocol::AgentCmd::ListDir { path: "/home/me/code/api/web".into() }));
@@ -885,14 +885,14 @@ fn linking_a_folder_from_the_label_opens_new_terminals_there_and_watches_it() {
     assert!(h.query_by_label("⎇ dépôt git").is_some());
     h.get_by_label("Lier ce dossier").click();
     steps(&mut h, 3);
-    assert!(!h.state().projects_editing(), "sélecteur fermé");
+    assert!(!h.state().projects_editing(), "picker closed");
     let linked = "/home/me/code/api/web";
     assert_eq!(h.state().world.project("p-api").unwrap().cwd.as_deref(), Some(linked));
-    assert!(h.state().agent_sent().contains(&protocol::AgentCmd::Watch { key: "p-api".into(), path: linked.into() }), "l'agent surveille le dossier");
+    assert!(h.state().agent_sent().contains(&protocol::AgentCmd::Watch { key: "p-api".into(), path: linked.into() }), "the agent watches the folder");
 
-    // Un terminal créé dans le groupe démarre dans ce dossier.
-    steps(&mut h, 30); // sinon le clic sur l'étiquette et le double-clic forment un triple-clic
-    // Dans la marge du cadre, coin bas-gauche (le bas-droit de l'écran est à la mini-carte).
+    // A terminal created in the group starts in that folder.
+    steps(&mut h, 30); // otherwise the label click and the double-click make a triple-click
+    // In the frame's padding, bottom-left corner (the screen's bottom-right is the minimap's).
     let inside = screen_of(&h, project_rect(&h, "p-api")).left_bottom() + Vec2::new(10.0, -10.0);
     h.drag_at(inside);
     h.step();
@@ -903,7 +903,7 @@ fn linking_a_folder_from_the_label_opens_new_terminals_there_and_watches_it() {
     h.drop_at(inside);
     steps(&mut h, 3);
     let card = h.state().world.cards.last().unwrap().clone();
-    assert_ne!(card.id, a, "terminal créé");
+    assert_ne!(card.id, a, "terminal created");
     assert_eq!((card.cwd.as_deref(), card.project.as_deref()), (Some(linked), Some("p-api")));
 }
 
@@ -925,25 +925,25 @@ fn changes_panel_follows_the_ai_and_shows_diffs() {
     steps(&mut h, 3);
     assert!(h.query_by_label("Fichier modifié src/main.rs").is_some() && h.query_by_label("Fichier modifié src/old.rs").is_some());
     assert!(h.query_by_label("⎇ main").is_some());
-    // « Suivre » : le dernier fichier touché est affiché d'office.
+    // "Follow": the last touched file is shown automatically.
     assert_eq!(diff_requests(&h), vec!["src/main.rs"]);
-    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Diff { key: "p-api".into(), file: "src/main.rs".into(), text: "@@ -1 +1 @@\n-ancien\n+nouveau\n".into(), truncated: false, problem: None })]);
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Diff { key: "p-api".into(), file: "src/main.rs".into(), text: "@@ -1 +1 @@\n-old\n+new\n".into(), truncated: false, problem: None })]);
     steps(&mut h, 3);
-    assert!(h.query_by_label("+nouveau").is_some() && h.query_by_label("-ancien").is_some(), "diff affiché");
+    assert!(h.query_by_label("+new").is_some() && h.query_by_label("-old").is_some(), "diff shown");
 
-    // Choisir un fichier à la main arrête de suivre.
+    // Picking a file by hand stops following.
     h.get_by_label("Fichier modifié src/old.rs").click();
     steps(&mut h, 3);
     assert_eq!(diff_requests(&h).last().map(String::as_str), Some("src/old.rs"));
     assert!(!h.state().changes.follow);
     assert_eq!(h.state().changes.selected("p-api"), Some("src/old.rs"));
 
-    // L'état du panneau est sauvegardé ; le canevas lui laisse la place.
+    // The panel state is saved; the canvas makes room for it.
     assert!(h.state().world.changes_open);
-    assert!(h.state().viewport().max.x < 1400.0 - 200.0, "le canevas laisse la place au panneau");
+    assert!(h.state().viewport().max.x < 1400.0 - 200.0, "the canvas makes room for the panel");
     h.get_by_label("Δ Changements (2)").click();
     steps(&mut h, 3);
-    assert!(h.query_by_label("Fichier modifié src/main.rs").is_none(), "panneau fermé");
+    assert!(h.query_by_label("Fichier modifié src/main.rs").is_none(), "panel closed");
 }
 
 #[test]
@@ -965,7 +965,7 @@ fn the_interface_follows_the_system_language() {
     steps(&mut h, 3);
     assert!(h.query_by_label("Follow").is_some() && h.query_by_label("Modified file src/main.rs").is_some());
     assert!(h.query_by_label("Suivre").is_none(), "no French left in the panel");
-    // Un problème signalé par l'agent est traduit côté application.
+    // A problem reported by the agent is translated on the app side.
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Diff { key: "p-api".into(), file: "src/main.rs".into(), text: String::new(), truncated: false, problem: Some(protocol::Problem::NoDiff) })]);
     steps(&mut h, 3);
     assert!(h.query_by_label("No difference from HEAD.").is_some());
@@ -979,24 +979,24 @@ fn a_terminal_dropped_onto_another_takes_its_place_and_the_group_rearranges() {
     let dir = temp_dir("group-settle");
     let mut h = harness(&dir);
     add_project(&mut h, "api", Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 500.0)));
-    let big = add_card(&mut h, "gros", pos2(40.0, 40.0));
+    let big = add_card(&mut h, "big", pos2(40.0, 40.0));
     h.state_mut().world.card_mut(&big).unwrap().rect = Rect::from_min_size(pos2(40.0, 40.0), Vec2::new(900.0, 500.0));
-    let new = add_card(&mut h, "nouveau", pos2(1200.0, 40.0));
+    let new = add_card(&mut h, "new", pos2(1200.0, 40.0));
     h.state_mut().world.camera = tcanvas::shell::world::Camera { center: pos2(800.0, 300.0), zoom: 0.6 };
     steps(&mut h, 3);
 
-    // Comme sur la capture : le nouveau terminal lâché en plein sur l'autre.
+    // As in the screenshot: the new terminal dropped right on top of the other.
     let target = screen_of(&h, h.state().world.card(&big).unwrap().rect).center();
     let from = screen_of(&h, h.state().world.card(&new).unwrap().rect).center();
     drag_card_by(&mut h, &new, target - from);
     let w = &h.state().world;
     let (a, b) = (w.card(&big).unwrap().rect, w.card(&new).unwrap().rect);
-    assert!(a.center().distance(b.center()) > 10.0 && !a.intersects(b), "aucun chevauchement : {a:?} / {b:?}");
-    assert!((b.center() - w.camera.to_world(target, h.state().viewport())).length() < 40.0, "le terminal posé reste où on l'a lâché");
-    assert_eq!(project_rect(&h, "p-api"), members_fit(&h, "p-api"), "le cadre se réajuste");
+    assert!(a.center().distance(b.center()) > 10.0 && !a.intersects(b), "no overlap: {a:?} / {b:?}");
+    assert!((b.center() - w.camera.to_world(target, h.state().viewport())).length() < 40.0, "the dropped terminal stays where it was dropped");
+    assert_eq!(project_rect(&h, "p-api"), members_fit(&h, "p-api"), "the frame refits");
 }
 
-// --- Filtre de la barre du haut --------------------------------------------------------------
+// --- Top bar filter ---------------------------------------------------------------------------
 
 fn set_status(h: &mut Harness<'_, App>, id: &str, status: TermStatus) {
     let session = h.state().world.card(id).unwrap().session();
@@ -1004,7 +1004,7 @@ fn set_status(h: &mut Harness<'_, App>, id: &str, status: TermStatus) {
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
 }
 
-/// Clic souris réel au centre d'un widget, pendant que `tick` change l'état à chaque frame.
+/// Real mouse click at a widget's center, while `tick` changes the state every frame.
 fn click_label_while(h: &mut Harness<'_, App>, label: &str, mut tick: impl FnMut(&mut Harness<'_, App>, usize)) {
     let p = h.get_by_label_contains(label).rect().center();
     for (k, pressed) in [None, Some(true), Some(false)].into_iter().enumerate() {
@@ -1021,9 +1021,9 @@ fn click_label_while(h: &mut Harness<'_, App>, label: &str, mut tick: impl FnMut
 fn status_filter_frames_its_terminals_and_clearing_it_brings_the_view_back() {
     let dir = temp_dir("filter-status");
     let mut h = harness(&dir);
-    let stuck = add_card(&mut h, "bloque", pos2(6000.0, 4000.0));
-    let busy = add_card(&mut h, "occupe", pos2(0.0, 0.0));
-    let idle = add_card(&mut h, "calme", pos2(700.0, 0.0));
+    let stuck = add_card(&mut h, "stuck", pos2(6000.0, 4000.0));
+    let busy = add_card(&mut h, "busy", pos2(0.0, 0.0));
+    let idle = add_card(&mut h, "calm", pos2(700.0, 0.0));
     set_status(&mut h, &stuck, TermStatus::Running);
     set_status(&mut h, &stuck, TermStatus::Stalled);
     set_status(&mut h, &idle, TermStatus::Idle);
@@ -1031,20 +1031,20 @@ fn status_filter_frames_its_terminals_and_clearing_it_brings_the_view_back() {
     h.state_mut().world.camera = before;
     steps(&mut h, 3);
 
-    // Pendant le clic, « occupe » alterne actif / inactif (Claude au travail) : la barre ne bouge pas.
+    // During the click, "busy" flips between running / idle (Claude at work): the bar does not move.
     let flip = |h: &mut Harness<'_, App>, k: usize| set_status(h, &busy, if k.is_multiple_of(2) { TermStatus::Running } else { TermStatus::Idle });
     click_label_while(&mut h, "bloqué 1", flip);
     steps(&mut h, 45);
     let stuck_rect = h.state().world.card(&stuck).unwrap().rect;
     assert!(h.state().filters.is_active());
-    assert!(sees_whole(&h, stuck_rect), "la vue est cadrée sur le terminal bloqué");
-    assert!(h.query_by_label_contains("× filtre (1/3)").is_some(), "compte des correspondances");
+    assert!(sees_whole(&h, stuck_rect), "the view frames the stalled terminal");
+    assert!(h.query_by_label_contains("× filtre (1/3)").is_some(), "match count");
 
-    // Re-cliquer la puce retire le filtre : tout réapparaît, et la vue d'avant revient.
+    // Clicking the chip again clears the filter: everything reappears and the previous view returns.
     click_label_while(&mut h, "bloqué 1", flip);
     steps(&mut h, 45);
-    assert!(!h.state().filters.is_active(), "filtre retiré");
-    assert_eq!(h.state().world.camera, before, "retour à la vue d'avant le filtre");
+    assert!(!h.state().filters.is_active(), "filter cleared");
+    assert_eq!(h.state().world.camera, before, "back to the view from before the filter");
 }
 
 #[test]
@@ -1061,17 +1061,17 @@ fn clear_button_removes_the_text_filter_too() {
     steps(&mut h, 2);
     h.key_press(Key::Enter);
     steps(&mut h, 45);
-    assert!(sees_whole(&h, h.state().world.cards[1].rect), "Entrée cadre les correspondances");
+    assert!(sees_whole(&h, h.state().world.cards[1].rect), "Enter frames the matches");
     h.get_by_label_contains("× filtre (1/2)").click();
     steps(&mut h, 45);
     assert!(!h.state().filters.is_active() && h.state().filters.text.is_empty());
     assert_eq!(h.state().world.camera, before);
 }
 
-// --- Ouvrir un terminal dans le groupe ouvert ------------------------------------------------
+// --- Opening a terminal in the open group ----------------------------------------------------
 
 fn linked_groups(h: &mut Harness<'_, App>) {
-    for (i, name) in ["api", "ai-screen-console", "facturation", "site-web"].iter().enumerate() {
+    for (i, name) in ["api", "ai-screen-console", "billing", "site-web"].iter().enumerate() {
         let id = add_project(h, name, Rect::from_min_size(pos2(i as f32 * 5000.0, 0.0), Vec2::new(1400.0, 500.0)));
         h.state_mut().world.projects.iter_mut().find(|p| p.id == id).unwrap().cwd = Some(format!("/home/me/{name}"));
     }
@@ -1082,18 +1082,18 @@ fn the_toolbar_stays_two_rows_high_in_an_open_project() {
     let dir = temp_dir("toolbar-height");
     let mut h = harness(&dir);
     linked_groups(&mut h);
-    // Un autre projet « en train d'écrire » : sa puce porte un ✎ (le glyphe doit exister).
+    // Another project "writing": its chip shows a ✎ (the glyph must exist).
     let now = tcanvas::shell::world::unix_now();
     h.state_mut().world.file_activity.insert("p-site-web".into(), now);
     steps(&mut h, 2);
     h.get_by_label("● api").click();
     for _ in 0..30 {
         h.step();
-        assert!(h.state().viewport().min.y < 70.0, "barre trop haute : {:?}", h.state().viewport());
+        assert!(h.state().viewport().min.y < 70.0, "bar too tall: {:?}", h.state().viewport());
     }
     assert!(h.query_by_label("● site-web ✎").is_some());
     let button = h.get_by_label("+ Terminal").rect();
-    assert!(button.max.y < 70.0, "« + Terminal » visible en haut : {button:?}");
+    assert!(button.max.y < 70.0, "\"+ Terminal\" visible at the top: {button:?}");
 }
 
 #[test]
@@ -1101,23 +1101,23 @@ fn every_way_to_open_a_terminal_works_inside_an_open_group() {
     let dir = temp_dir("group-new-terminal");
     let mut h = harness(&dir);
     linked_groups(&mut h);
-    let first = add_card(&mut h, "premier", pos2(40.0, 40.0));
+    let first = add_card(&mut h, "first", pos2(40.0, 40.0));
     steps(&mut h, 2);
     h.get_by_label("● api").click();
     steps(&mut h, 45);
     let count = |h: &Harness<'_, App>| h.state().world.members("p-api").count();
     let newest = |h: &Harness<'_, App>| h.state().world.cards.last().unwrap().clone();
 
-    // 1. Le bouton de l'étiquette du groupe.
+    // 1. The group label's button.
     h.get_by_label("Nouveau terminal dans le groupe api").click();
     steps(&mut h, 45);
     assert_eq!(count(&h), 2);
     let card = newest(&h);
-    assert_eq!(card.cwd.as_deref(), Some("/home/me/api"), "dans le dossier lié");
+    assert_eq!(card.cwd.as_deref(), Some("/home/me/api"), "in the linked folder");
     let first_rect = h.state().world.card(&first).unwrap().rect;
-    assert!(card.rect.min.x > first_rect.max.x && !card.rect.intersects(first_rect), "posé à côté, sans chevauchement");
+    assert!(card.rect.min.x > first_rect.max.x && !card.rect.intersects(first_rect), "placed next to it, without overlap");
 
-    // 2. « + Terminal » de la barre du haut, et 3. Ctrl+Maj+N : dans le groupe ouvert.
+    // 2. "+ Terminal" in the top bar, and 3. Ctrl+Shift+N: in the open group.
     h.get_by_label("+ Terminal").click();
     steps(&mut h, 45);
     ctrl_shift(&h, Key::N);
@@ -1126,10 +1126,10 @@ fn every_way_to_open_a_terminal_works_inside_an_open_group() {
     let rects: Vec<Rect> = h.state().world.members("p-api").map(|c| c.rect).collect();
     for i in 0..rects.len() {
         for j in i + 1..rects.len() {
-            assert!(!rects[i].intersects(rects[j]), "chevauchement {i}/{j}");
+            assert!(!rects[i].intersects(rects[j]), "overlap {i}/{j}");
         }
     }
-    assert!(h.state().world.members("p-api").all(|c| h.state().world.shows_card(c)), "tous visibles dans l'espace");
+    assert!(h.state().world.members("p-api").all(|c| h.state().world.shows_card(c)), "all visible in the space");
 }
 
 #[test]
@@ -1138,19 +1138,19 @@ fn an_empty_group_offers_to_open_a_terminal() {
     let mut h = harness(&dir);
     linked_groups(&mut h);
     steps(&mut h, 2);
-    h.get_by_label("● facturation").click();
+    h.get_by_label("● billing").click();
     steps(&mut h, 45);
     h.get_by_label("+ Ouvrir un terminal").click();
     steps(&mut h, 45);
-    let card = h.state().world.cards.last().expect("terminal créé").clone();
-    assert_eq!((card.project.as_deref(), card.cwd.as_deref()), (Some("p-facturation"), Some("/home/me/facturation")));
-    assert!(h.query_by_label("+ Ouvrir un terminal").is_none(), "plus vide : le gros bouton disparaît");
-    assert_eq!(h.state().world.focused.as_deref(), Some(card.id.as_str()), "le clavier va au nouveau terminal");
+    let card = h.state().world.cards.last().expect("terminal created").clone();
+    assert_eq!((card.project.as_deref(), card.cwd.as_deref()), (Some("p-billing"), Some("/home/me/billing")));
+    assert!(h.query_by_label("+ Ouvrir un terminal").is_none(), "no longer empty: the big button disappears");
+    assert_eq!(h.state().world.focused.as_deref(), Some(card.id.as_str()), "the keyboard goes to the new terminal");
 }
 
-// --- Molette : seul ce qui est sous le pointeur défile ---------------------------------------
+// --- Mouse wheel: only what is under the pointer scrolls --------------------------------------
 
-/// Un cran de molette à `p`, puis assez de frames pour écouler le défilement lissé.
+/// One wheel notch at `p`, then enough frames for the smooth scroll to finish.
 fn wheel_at(h: &mut Harness<'_, App>, p: Pos2, dy: f32) {
     h.event(egui::Event::PointerMoved(p));
     h.step();
@@ -1162,8 +1162,8 @@ fn wheel_at(h: &mut Harness<'_, App>, p: Pos2, dy: f32) {
 fn scrolling_over_a_terminal_or_a_window_never_moves_the_canvas() {
     let dir = temp_dir("wheel");
     let mut h = harness(&dir);
-    let focused = add_card(&mut h, "focalise", pos2(-600.0, -200.0));
-    let other = add_card(&mut h, "autre", pos2(100.0, -200.0));
+    let focused = add_card(&mut h, "focused", pos2(-600.0, -200.0));
+    let other = add_card(&mut h, "other", pos2(100.0, -200.0));
     h.state_mut().dispatch(vec![Event::FocusCard(focused.clone())]);
     h.state_mut().world.camera = tcanvas::shell::world::Camera { center: pos2(0.0, 0.0), zoom: 1.0 };
     steps(&mut h, 3);
@@ -1173,22 +1173,22 @@ fn scrolling_over_a_terminal_or_a_window_never_moves_the_canvas() {
     for id in [&focused, &other] {
         let p = center_of(&h, id);
         wheel_at(&mut h, p, -120.0);
-        assert_eq!(h.state().world.camera, cam, "molette sur le terminal {id} : la vue ne bouge pas");
+        assert_eq!(h.state().world.camera, cam, "wheel over terminal {id}: the view does not move");
     }
 
-    // Une fenêtre par-dessus le canevas (palette « aller à ») : elle garde la molette.
+    // A window over the canvas ("go to" palette): it keeps the wheel.
     ctrl_shift(&h, Key::K);
     steps(&mut h, 2);
     let p = h.state().viewport().center();
     wheel_at(&mut h, p, -120.0);
-    assert_eq!(h.state().world.camera, cam, "molette sur la palette");
+    assert_eq!(h.state().world.camera, cam, "wheel over the palette");
     h.key_press(Key::Escape);
     steps(&mut h, 3);
 
-    // Témoin : sur le vide, la molette déplace bien la vue.
+    // Control: over empty space, the wheel does move the view.
     let empty = h.state().viewport().center() + Vec2::new(0.0, 330.0);
     wheel_at(&mut h, empty, -120.0);
-    assert_ne!(h.state().world.camera, cam, "sur le vide, la vue défile");
+    assert_ne!(h.state().world.camera, cam, "over empty space, the view scrolls");
 }
 
 #[test]
@@ -1214,23 +1214,23 @@ fn scrolling_the_changes_panel_never_moves_the_canvas() {
     assert_eq!(h.state().world.camera, cam);
 }
 
-// --- Rien ne se chevauche jamais --------------------------------------------------------------
+// --- Nothing ever overlaps -------------------------------------------------------------------
 
-/// Groupes (avec leur étiquette) et terminaux hors groupe : aucun chevauchement.
+/// Groups (with their label) and terminals outside groups: no overlap.
 fn assert_nothing_overlaps(h: &Harness<'_, App>) {
     let w = &h.state().world;
     let mut bodies: Vec<(String, Rect)> = w.projects.iter().map(|p| (p.name.clone(), Rect::from_min_max(p.rect.min - Vec2::new(0.0, 40.0), p.rect.max))).collect();
     bodies.extend(w.cards.iter().filter(|c| c.project.is_none()).map(|c| (c.title(), c.rect)));
     for i in 0..bodies.len() {
         for j in i + 1..bodies.len() {
-            assert!(!bodies[i].1.intersects(bodies[j].1), "{} chevauche {}", bodies[i].0, bodies[j].0);
+            assert!(!bodies[i].1.intersects(bodies[j].1), "{} overlaps {}", bodies[i].0, bodies[j].0);
         }
     }
     for p in &w.projects {
         let members: Vec<Rect> = w.members(&p.id).map(|c| c.rect).collect();
         for i in 0..members.len() {
             for j in i + 1..members.len() {
-                assert!(!members[i].intersects(members[j]), "deux terminaux de {} se chevauchent", p.name);
+                assert!(!members[i].intersects(members[j]), "two terminals of {} overlap", p.name);
             }
         }
     }
@@ -1240,17 +1240,17 @@ fn assert_nothing_overlaps(h: &Harness<'_, App>) {
 fn opening_terminals_in_a_group_pushes_neighbouring_groups_instead_of_overlapping_them() {
     let dir = temp_dir("no-overlap");
     let mut h = harness(&dir);
-    // Deux groupes serrés côte à côte, et un terminal libre juste en dessous.
+    // Two groups packed side by side, and a free terminal just below.
     add_project(&mut h, "api", Rect::from_min_size(Pos2::ZERO, Vec2::new(600.0, 400.0)));
     add_project(&mut h, "web", Rect::from_min_size(pos2(700.0, 0.0), Vec2::new(600.0, 400.0)));
     add_card(&mut h, "a", pos2(40.0, 40.0));
     add_card(&mut h, "w", pos2(740.0, 40.0));
-    add_card(&mut h, "libre", pos2(0.0, 900.0));
+    add_card(&mut h, "free", pos2(0.0, 900.0));
     steps(&mut h, 3);
     h.get_by_label("● api").click();
     steps(&mut h, 45);
     for _ in 0..3 {
-        // Re-cliquer la puce du groupe ouvert le recadre en entier (étiquette visible).
+        // Clicking the open group's chip again reframes all of it (label visible).
         h.get_by_label("● api").click();
         steps(&mut h, 45);
         h.get_by_label("Nouveau terminal dans le groupe api").click();
@@ -1259,15 +1259,15 @@ fn opening_terminals_in_a_group_pushes_neighbouring_groups_instead_of_overlappin
     }
     assert_eq!(h.state().world.members("p-api").count(), 4);
 
-    // Dans « Tous » : un nouveau terminal libre double-cliqué contre un cadre s'écarte aussi.
+    // In "All": a new free terminal double-clicked against a frame moves aside too.
     h.get_by_label("Tous").click();
     steps(&mut h, 3);
     ctrl_shift(&h, Key::Num0);
     steps(&mut h, 45);
     let api = screen_of(&h, project_rect(&h, "p-api"));
-    // Juste sous le cadre d'api : un terminal centré là déborderait sur le groupe.
+    // Just below api's frame: a terminal centered there would spill over the group.
     let p = pos2(api.left_bottom().x + 30.0, api.max.y + 12.0);
-    assert!(h.state().world.drop_target(h.state().world.camera.to_world(p, h.state().viewport())).is_none(), "point hors de tout cadre");
+    assert!(h.state().world.drop_target(h.state().world.camera.to_world(p, h.state().viewport())).is_none(), "point outside every frame");
     h.drag_at(p);
     h.step();
     h.drop_at(p);
@@ -1276,18 +1276,18 @@ fn opening_terminals_in_a_group_pushes_neighbouring_groups_instead_of_overlappin
     h.step();
     h.drop_at(p);
     steps(&mut h, 45);
-    assert_eq!(h.state().world.cards.len(), 7, "terminal créé");
+    assert_eq!(h.state().world.cards.len(), 7, "terminal created");
     assert_nothing_overlaps(&h);
 }
 
-/// Comme l'application réelle : on ne redessine que si quelque chose l'a demandé. Un clic qui
-/// lance un vol de caméra doit suffire, sans autre mouvement de souris.
+/// Like the real app: repaint only when something asked for it. A click that starts
+/// a camera flight must be enough, with no further mouse movement.
 #[test]
 fn one_click_on_a_filter_is_enough_to_frame_its_terminals() {
     let dir = temp_dir("filter-one-click");
     let mut h = harness(&dir);
-    let stuck = add_card(&mut h, "bloque", pos2(6000.0, 4000.0));
-    add_card(&mut h, "calme", pos2(0.0, 0.0));
+    let stuck = add_card(&mut h, "stuck", pos2(6000.0, 4000.0));
+    add_card(&mut h, "calm", pos2(0.0, 0.0));
     set_status(&mut h, &stuck, TermStatus::Running);
     set_status(&mut h, &stuck, TermStatus::Stalled);
     steps(&mut h, 3);
@@ -1298,10 +1298,10 @@ fn one_click_on_a_filter_is_enough_to_frame_its_terminals() {
         h.event(egui::Event::PointerButton { pos: p, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
         h.step();
     }
-    // Plus aucun événement : seules les frames demandées par l'application s'exécutent.
+    // No more events: only the frames the app requested run.
     let _ = h.try_run();
     let stuck_rect = h.state().world.card(&stuck).unwrap().rect;
-    assert!(sees_whole(&h, stuck_rect), "un seul clic cadre le terminal bloqué");
+    assert!(sees_whole(&h, stuck_rect), "a single click frames the stalled terminal");
 }
 
 #[test]
@@ -1321,7 +1321,7 @@ fn one_click_on_a_filter_frames_its_terminals_inside_an_open_group() {
     }
     set_status(&mut h, &c, TermStatus::Running);
     h.state_mut().dispatch(vec![Event::FocusCard(a.clone())]);
-    // On regarde ailleurs dans le groupe, zoomé sur « a ».
+    // Looking elsewhere in the group, zoomed in on "a".
     h.state_mut().world.camera = tcanvas::shell::world::Camera { center: h.state().world.card(&a).unwrap().rect.center(), zoom: 1.0 };
     let _ = h.try_run();
     let p = h.get_by_label_contains("actif 1").rect().center();
@@ -1334,7 +1334,7 @@ fn one_click_on_a_filter_frames_its_terminals_inside_an_open_group() {
     let _ = h.try_run();
     let rect = h.state().world.card(&c).unwrap().rect;
     let cam = h.state().world.camera;
-    assert!(sees_whole(&h, rect), "un seul clic cadre le terminal actif : cam={cam:?} rect={rect:?}");
+    assert!(sees_whole(&h, rect), "a single click frames the running terminal: cam={cam:?} rect={rect:?}");
 }
 
 #[test]
@@ -1348,7 +1348,7 @@ fn one_click_on_a_project_chip_opens_it_centered_even_after_wandering_off() {
     steps(&mut h, 2);
     h.get_by_label("● api").click();
     steps(&mut h, 3);
-    // On se promène loin dans api, on passe à web, puis un seul clic pour revenir à api.
+    // Wander far off in api, switch to web, then a single click to go back to api.
     h.state_mut().world.camera = tcanvas::shell::world::Camera { center: pos2(-40_000.0, 30_000.0), zoom: 3.0 };
     steps(&mut h, 2);
     h.get_by_label("● web").click();
@@ -1356,28 +1356,28 @@ fn one_click_on_a_project_chip_opens_it_centered_even_after_wandering_off() {
     assert!(sees_whole(&h, project_rect(&h, "p-web")));
     h.get_by_label("● api").click();
     steps(&mut h, 3);
-    assert!(sees_whole(&h, project_rect(&h, "p-api")), "un seul clic : api centré et entier");
+    assert!(sees_whole(&h, project_rect(&h, "p-api")), "a single click: api centered and whole");
 }
 
-// --- Copier / coller et diffs en vue « Tous » --------------------------------------------------
+// --- Copy / paste and diffs in the "All" view ---------------------------------------------------
 
 #[test]
 fn terminal_clipboard_shortcuts_and_right_click_paste() {
     let dir = temp_dir("clipboard");
     let mut h = harness(&dir);
-    h.state_mut().cards.set_clipboard(Box::new(tcanvas::features::terminal_card::FixedClipboard(Some("echo un\necho deux".into()))));
+    h.state_mut().cards.set_clipboard(Box::new(tcanvas::features::terminal_card::FixedClipboard(Some("echo one\necho two".into()))));
     let id = add_card(&mut h, "api", Pos2::ZERO);
     h.state_mut().world.camera = tcanvas::shell::world::Camera { center: pos2(250.0, 150.0), zoom: 1.0 };
     h.state_mut().dispatch(vec![Event::FocusCard(id.clone())]);
     steps(&mut h, 2);
 
-    // Ctrl+Maj+V colle (et n'envoie pas ^V) ; Ctrl+Maj+C n'envoie pas ^C.
+    // Ctrl+Shift+V pastes (and does not send ^V); Ctrl+Shift+C does not send ^C.
     ctrl_shift(&h, Key::V);
     ctrl_shift(&h, Key::C);
     steps(&mut h, 2);
-    assert_eq!(h.state().cards.written(&id), b"echo un\recho deux");
+    assert_eq!(h.state().cards.written(&id), b"echo one\recho two");
 
-    // Clic droit dans le terminal : colle aussi, sans menu.
+    // Right-click in the terminal: pastes too, without a menu.
     let body = screen_of(&h, h.state().world.card(&id).unwrap().rect).center();
     h.hover_at(body);
     h.step();
@@ -1385,7 +1385,7 @@ fn terminal_clipboard_shortcuts_and_right_click_paste() {
     h.step();
     h.event(egui::Event::PointerButton { pos: body, button: egui::PointerButton::Secondary, pressed: false, modifiers: Modifiers::NONE });
     steps(&mut h, 2);
-    assert_eq!(h.state().cards.written(&id), b"echo un\recho deuxecho un\recho deux");
+    assert_eq!(h.state().cards.written(&id), b"echo one\recho twoecho one\recho two");
 }
 
 
@@ -1398,13 +1398,13 @@ fn the_changes_badge_shows_diffs_and_commits_from_the_overview() {
     add_card(&mut h, "a", pos2(40.0, 40.0));
     h.state_mut().world.camera = tcanvas::shell::world::Camera { center: pos2(500.0, 250.0), zoom: 0.8 };
     steps(&mut h, 2);
-    assert!(h.state().world.space.is_none(), "vue « Tous »");
+    assert!(h.state().world.space.is_none(), "\"All\" view");
 
-    // Dépôt propre : le travail est dans les commits.
+    // Clean repo: the work is in the commits.
     let now = tcanvas::shell::world::unix_now();
     let AgentEvent::Changes(mut set) = changes("p-api", &[]) else { unreachable!() };
     let sha = "c".repeat(40);
-    set.commits = vec![protocol::CommitInfo { sha: sha.clone(), summary: "feat: connexion".into(), author: "Claude".into(), time: now - 120 }];
+    set.commits = vec![protocol::CommitInfo { sha: sha.clone(), summary: "feat: login".into(), author: "Claude".into(), time: now - 120 }];
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Changes(set))]);
     steps(&mut h, 2);
 
@@ -1412,11 +1412,11 @@ fn the_changes_badge_shows_diffs_and_commits_from_the_overview() {
     steps(&mut h, 3);
     assert!(h.state().world.changes_open);
     assert!(h.query_by_label("Rien en cours : tout est commité.").is_some());
-    assert!(h.query_by_label("Commit feat: connexion").is_some());
-    assert!(h.state().agent_sent().contains(&protocol::AgentCmd::ShowCommit { key: "p-api".into(), sha: sha.clone() }), "« Suivre » affiche le dernier commit");
-    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Diff { key: "p-api".into(), file: sha, text: "commit ccc\n+nouveau\n".into(), truncated: false, problem: None })]);
+    assert!(h.query_by_label("Commit feat: login").is_some());
+    assert!(h.state().agent_sent().contains(&protocol::AgentCmd::ShowCommit { key: "p-api".into(), sha: sha.clone() }), "\"Follow\" shows the latest commit");
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Diff { key: "p-api".into(), file: sha, text: "commit ccc\n+new\n".into(), truncated: false, problem: None })]);
     steps(&mut h, 3);
-    assert!(h.query_by_label("+nouveau").is_some(), "diff du commit affiché");
+    assert!(h.query_by_label("+new").is_some(), "commit diff shown");
 }
 
 #[test]
@@ -1432,5 +1432,5 @@ fn a_new_group_from_the_overview_never_covers_an_existing_one() {
     let w = &h.state().world;
     let (a, b) = (w.projects[0].rect, w.projects[1].rect);
     assert!(!a.expand(20.0).intersects(b), "{a:?} / {b:?}");
-    assert!(sees_whole(&h, b), "le nouveau cadre est à l'écran pour le nommer");
+    assert!(sees_whole(&h, b), "the new frame is on screen to name it");
 }

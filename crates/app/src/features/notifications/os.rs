@@ -1,5 +1,5 @@
-//! Toasts du système. Windows : centre de notifications, clic → retour sur le terminal.
-//! Ailleurs (développement sous Linux) : rien, les toasts de l'application suffisent.
+//! System toasts. Windows: notification center, click → back to the terminal.
+//! Elsewhere (development on Linux): nothing, the in-app toasts are enough.
 
 use std::sync::mpsc::Sender;
 

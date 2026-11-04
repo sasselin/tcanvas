@@ -1,11 +1,11 @@
 #!/bin/sh
-# Compile et installe tout, puis relance l'application :
-#   - l'agent dans ~/.local/bin (WSL)
-#   - tcanvas.exe dans %USERPROFILE%\tcanvas (Windows)
-# Les terminaux tmux survivent au redémarrage de l'application.
+# Build and install everything, then restart the app:
+#   - the agent into ~/.local/bin (WSL)
+#   - tcanvas.exe into %USERPROFILE%\tcanvas (Windows)
+# The tmux terminals survive the app restart.
 #
-#   ./scripts/deploy.sh            # compile, installe, relance
-#   ./scripts/deploy.sh --no-start # sans relancer
+#   ./scripts/deploy.sh            # build, install, restart
+#   ./scripts/deploy.sh --no-start # without restarting
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -17,22 +17,22 @@ profile_win=$(cmd.exe /c 'echo %USERPROFILE%' 2>/dev/null </dev/null | tr -d '\r
 exe_win="$profile_win\\tcanvas\\tcanvas.exe"
 dest=$(wslpath "$profile_win")/tcanvas
 
-# Compile d'abord : si ça échoue, l'application ouverte n'est pas touchée.
-echo "→ compilation"
+# Build first: if it fails, the running app is left untouched.
+echo "→ build"
 cargo build -q --release -p tcanvas-agent
 cargo build -q --release --target x86_64-pc-windows-gnu -p tcanvas
 
 echo "→ agent"
 install -D target/release/tcanvas-agent "$HOME/.local/bin/tcanvas-agent"
 
-# Windows verrouille un .exe en cours d'exécution : on ferme l'instance ouverte.
+# Windows locks a running .exe: stop the running instance first.
 "$ps" -NoProfile -Command "Get-Process tcanvas -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Milliseconds 300" </dev/null
 
 mkdir -p "$dest"
 cp target/x86_64-pc-windows-gnu/release/tcanvas.exe "$dest/tcanvas.exe"
-printf '→ installé : %s\n' "$exe_win"
+printf '→ installed: %s\n' "$exe_win"
 
 if [ "$start" = 1 ]; then
     "$ps" -NoProfile -Command "Start-Process -FilePath '$exe_win' -WorkingDirectory '$profile_win\\tcanvas'" </dev/null >/dev/null 2>&1
-    echo "→ lancé"
+    echo "→ started"
 fi

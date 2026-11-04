@@ -13,7 +13,7 @@ alacritty_terminal = "0.26"
 uuid = { version = "1", features = ["v4"] }
 directories = "6"
 nucleo-matcher = "0.3"
-# Lecture du presse-papiers pour Ctrl+Maj+V et le clic droit (egui ne lit que pour Ctrl+V).
+# Clipboard reading for Ctrl+Shift+V and right-click paste (egui only reads it for Ctrl+V).
 arboard = { version = "3.6", default-features = false }
 sys-locale = "0.3"
 

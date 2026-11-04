@@ -1,4 +1,4 @@
-//! Correspondance entre la mini-carte (coin de l'écran) et le monde.
+//! Mapping between the minimap (screen corner) and the world.
 
 use egui::{Pos2, Rect, Vec2};
 
@@ -9,7 +9,7 @@ pub struct MiniMap {
 }
 
 impl MiniMap {
-    /// `world` est agrandi pour garder les proportions ; il est centré dans `screen`.
+    /// `world` is enlarged to keep its aspect ratio; it is centered in `screen`.
     pub fn new(screen: Rect, world: Rect) -> Self {
         let size = world.size().max(Vec2::splat(1.0));
         let scale = (screen.width() / size.x).min(screen.height() / size.y);

@@ -1,15 +1,15 @@
-//! Messages échangés entre l'application (Windows) et `tcanvas-agent` (WSL).
-//! Transport : un objet JSON par ligne sur stdin/stdout de l'agent.
+//! Messages exchanged between the app (Windows) and `tcanvas-agent` (WSL).
+//! Transport: one JSON object per line on the agent's stdin/stdout.
 
 use serde::{Deserialize, Serialize};
 
-/// Socket tmux dédié (`tmux -L tcanvas`), isolé du tmux habituel.
+/// Dedicated tmux socket (`tmux -L tcanvas`), isolated from the user's regular tmux.
 pub const TMUX_SOCKET: &str = "tcanvas";
-/// Préfixe des sessions tmux gérées par le canevas.
+/// Prefix of the tmux sessions managed by the canvas.
 pub const SESSION_PREFIX: &str = "tc_";
 pub const DEFAULT_STALL_SECS: u64 = 60;
 
-/// Socket tmux effectif : `TCANVAS_TMUX_SOCKET` permet aux tests d'utiliser un serveur jetable.
+/// Effective tmux socket: `TCANVAS_TMUX_SOCKET` lets tests use a throwaway server.
 pub fn tmux_socket() -> String {
     std::env::var("TCANVAS_TMUX_SOCKET").unwrap_or_else(|_| TMUX_SOCKET.to_string())
 }
@@ -17,37 +17,37 @@ pub fn tmux_socket() -> String {
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 #[serde(tag = "kind", content = "code")]
 pub enum TermStatus {
-    /// Le shell attend une commande.
+    /// The shell is waiting for a command.
     Idle,
-    /// Une commande tourne et produit de la sortie (ou une app plein écran est ouverte).
+    /// A command is running and producing output (or a full-screen app is open).
     Running,
-    /// Une commande tourne mais n'affiche plus rien et ne consomme pas de CPU.
+    /// A command is running but no longer prints anything and uses no CPU.
     Stalled,
-    /// La dernière ligne ressemble à une question (`[y/N]`, `password:`…).
+    /// The last line looks like a question (`[y/N]`, `password:`…).
     WaitingInput,
-    /// La dernière commande a échoué avec ce code.
+    /// The last command failed with this code.
     Exited(i32),
-    /// Le pane tmux est mort.
+    /// The tmux pane is dead.
     Dead,
 }
 
-/// Problème signalé par l'agent. Le protocole transporte le sens, pas le texte :
-/// l'application le traduit dans la langue de Windows.
+/// Problem reported by the agent. The protocol carries the meaning, not the text:
+/// the app translates it into the Windows language.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(tag = "kind")]
 pub enum Problem {
-    /// Le chemin existe mais n'est pas un dossier.
+    /// The path exists but is not a folder.
     NotADir { path: String },
     DirNotFound { path: String },
-    /// Lecture du dossier impossible (détail de l'OS, non traduit).
+    /// The folder cannot be read (OS detail, not translated).
     Unreadable { detail: String },
-    /// Le sha demandé n'a pas la forme d'un sha.
+    /// The requested sha does not look like a sha.
     CommitRefused,
     CommitNotFound,
-    /// Chemin de fichier absolu ou qui sort du dépôt.
+    /// File path is absolute or escapes the repository.
     PathRefused,
     NotAGitRepo,
-    /// Le fichier ne diffère pas de HEAD.
+    /// The file does not differ from HEAD.
     NoDiff,
     TmuxMissing { detail: String },
 }
@@ -56,13 +56,13 @@ pub enum Problem {
 pub struct SessionInfo {
     pub session: String,
     pub status: TermStatus,
-    /// Commande au premier plan (ligne de commande complète), si une commande tourne.
+    /// Foreground command (full command line), if a command is running.
     pub command: Option<String>,
     pub cwd: Option<String>,
-    /// Code et durée de la dernière commande terminée (nécessite les hooks shell).
+    /// Exit code and duration of the last finished command (requires the shell hooks).
     pub last_exit: Option<i32>,
     pub last_duration_secs: Option<u64>,
-    /// Dernières lignes non vides de l'écran, pour l'aperçu dézoomé.
+    /// Last non-empty lines of the screen, for the zoomed-out preview.
     pub tail: Vec<String>,
 }
 
@@ -72,9 +72,9 @@ pub enum ChangeKind {
     Modified,
     Added,
     Deleted,
-    /// Renommé depuis ce chemin.
+    /// Renamed from this path.
     Renamed(String),
-    /// Nouveau fichier pas encore suivi par git.
+    /// New file not yet tracked by git.
     Untracked,
 }
 
@@ -90,68 +90,68 @@ impl ChangeKind {
     }
 }
 
-/// Un fichier modifié dans un dossier surveillé (chemin relatif à la racine).
+/// A modified file in a watched folder (path relative to the root).
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct FileChange {
     pub path: String,
     pub kind: ChangeKind,
-    /// Lignes ajoutées / retirées par rapport à HEAD (inconnu hors git ou pour un binaire).
+    /// Lines added / removed relative to HEAD (unknown outside git or for a binary).
     pub added: Option<u32>,
     pub removed: Option<u32>,
-    /// Dernière modification (secondes Unix ; 0 si le fichier n'existe plus).
+    /// Last modification (Unix seconds; 0 if the file no longer exists).
     pub mtime: u64,
     pub binary: bool,
 }
 
-/// État d'un dossier surveillé, renvoyé à chaque changement.
+/// State of a watched folder, sent on every change.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct ChangeSet {
-    /// Clé donnée par l'application (id du projet).
+    /// Key given by the app (project id).
     pub key: String,
-    /// Chemin absolu résolu (`~` développé), si le dossier existe.
+    /// Resolved absolute path (`~` expanded), if the folder exists.
     pub root: Option<String>,
     pub git: bool,
     pub branch: Option<String>,
-    /// HEAD détachée (`branch` est alors `None`).
+    /// Detached HEAD (`branch` is then `None`).
     #[serde(default)]
     pub detached: bool,
     pub error: Option<Problem>,
     pub files: Vec<FileChange>,
-    /// La liste a été coupée (trop de fichiers).
+    /// The list was truncated (too many files).
     pub truncated: bool,
-    /// Derniers commits de la branche, du plus récent au plus ancien (vide hors git).
+    /// Latest commits of the branch, newest first (empty outside git).
     #[serde(default)]
     pub commits: Vec<CommitInfo>,
 }
 
-/// Un commit récent du dépôt surveillé.
+/// A recent commit of the watched repository.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct CommitInfo {
     pub sha: String,
     pub summary: String,
     pub author: String,
-    /// Date du commit (secondes Unix).
+    /// Commit date (Unix seconds).
     pub time: u64,
 }
 
-/// Un sous-dossier, pour le sélecteur de dossiers.
+/// A subfolder, for the folder picker.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct DirEntry {
     pub name: String,
-    /// Contient un dépôt git (`.git`).
+    /// Contains a git repository (`.git`).
     pub git: bool,
 }
 
-/// Contenu d'un dossier WSL, en réponse à `AgentCmd::ListDir`.
+/// Contents of a WSL folder, in response to `AgentCmd::ListDir`.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct DirListing {
-    /// Chemin tel que demandé (sert à apparier la réponse).
+    /// Path as requested (used to match the response).
     pub request: String,
-    /// Chemin absolu résolu, si le dossier existe.
+    /// Resolved absolute path, if the folder exists.
     pub path: Option<String>,
     pub parent: Option<String>,
     pub git: bool,
-    /// Sous-dossiers visibles (les dossiers cachés sont omis), triés par nom.
+    /// Visible subfolders (hidden folders are omitted), sorted by name.
     pub dirs: Vec<DirEntry>,
     pub error: Option<Problem>,
 }
@@ -164,7 +164,7 @@ pub enum AgentEvent {
     Gone { session: String },
     Error { problem: Problem },
     Changes(ChangeSet),
-    /// `text` est vide quand `problem` explique pourquoi il n'y a pas de diff.
+    /// `text` is empty when `problem` explains why there is no diff.
     Diff {
         key: String,
         file: String,
@@ -181,15 +181,15 @@ pub enum AgentEvent {
 pub enum AgentCmd {
     SetStall { session: String, secs: u64 },
     Kill { session: String },
-    /// Surveille les fichiers modifiés de `path` (relancé si déjà surveillé avec un autre chemin).
+    /// Watch the modified files of `path` (restarted if already watched with another path).
     Watch { key: String, path: String },
     Unwatch { key: String },
-    /// Diff d'un fichier (chemin relatif) d'un dossier surveillé.
+    /// Diff of a file (relative path) in a watched folder.
     Diff { key: String, file: String },
-    /// Contenu d'un commit (`git show`) d'un dossier surveillé ; réponse : `AgentEvent::Diff`
-    /// avec `file` = `sha`.
+    /// Contents of a commit (`git show`) in a watched folder; response: `AgentEvent::Diff`
+    /// with `file` = `sha`.
     ShowCommit { key: String, sha: String },
-    /// Sous-dossiers de `path` (`~` accepté), pour le sélecteur de dossiers.
+    /// Subfolders of `path` (`~` accepted), for the folder picker.
     ListDir { path: String },
 }
 

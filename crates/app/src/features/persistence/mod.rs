@@ -1,5 +1,5 @@
-//! Sauvegarde du canevas (cartes, projets, fils, caméra) dans `layout.json`.
-//! Écriture atomique ; un fichier illisible est mis de côté, jamais écrasé en silence.
+//! Saves the canvas (cards, projects, wires, camera) to `layout.json`.
+//! Atomic write; an unreadable file is set aside, never silently overwritten.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::shell::i18n::t;
 use crate::shell::world::{Camera, Card, Project, ProjectId, Wire, World, project_at};
 
-/// 2 : appartenance explicite des cartes aux groupes (`Card::project`), panneau « Changements ».
+/// 2: explicit card membership in groups (`Card::project`), "Changes" panel.
 const FORMAT_VERSION: u32 = 2;
 const SAVE_DELAY: Duration = Duration::from_millis(800);
 
@@ -23,7 +23,7 @@ pub struct LayoutFile {
     pub cards: Vec<Card>,
     pub projects: Vec<Project>,
     pub wires: Vec<Wire>,
-    /// Espace ouvert et caméra de chaque espace (absents des fichiers plus anciens).
+    /// Open space and per-space camera (missing from older files).
     #[serde(default)]
     pub space: Option<ProjectId>,
     #[serde(default)]
@@ -32,8 +32,8 @@ pub struct LayoutFile {
     pub changes_open: bool,
 }
 
-/// `%APPDATA%\tcanvas\config` sous Windows, `~/.config/tcanvas` sous Linux.
-/// `TCANVAS_CONFIG_DIR` le remplace (tests, profils séparés).
+/// `%APPDATA%\tcanvas\config` on Windows, `~/.config/tcanvas` on Linux.
+/// `TCANVAS_CONFIG_DIR` overrides it (tests, separate profiles).
 pub fn default_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("TCANVAS_CONFIG_DIR") {
         return PathBuf::from(dir);
@@ -57,8 +57,8 @@ impl Persistence {
         &self.path
     }
 
-    /// Charge le canevas. Un fichier absent donne un canevas vide ; un fichier corrompu est
-    /// renommé en `layout.json.corrompu-<horodatage>` et signalé.
+    /// Loads the canvas. A missing file gives an empty canvas; a corrupt file is
+    /// renamed to `layout.json.corrupt-<timestamp>` and reported.
     pub fn load(&mut self, world: &mut World) {
         let text = match fs::read_to_string(&self.path) {
             Ok(t) => t,
@@ -77,7 +77,7 @@ impl Persistence {
                 world.space_cameras = file.space_cameras;
                 world.changes_open = file.changes_open;
                 for mut card in file.cards {
-                    // Version 1 : une carte appartenait au cadre qui contenait son centre.
+                    // Version 1: a card belonged to the frame containing its center.
                     if file.version < 2 {
                         card.project = project_at(&world.projects, card.rect.center()).map(|p| p.id.clone());
                     }
@@ -90,14 +90,14 @@ impl Persistence {
             }
             Err(e) => {
                 let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                let backup = self.path.with_extension(format!("json.corrompu-{stamp}"));
+                let backup = self.path.with_extension(format!("json.corrupt-{stamp}"));
                 let _ = fs::rename(&self.path, &backup);
                 self.last_error = Some((t().layout_corrupt)(&e.to_string(), &backup.display().to_string()));
             }
         }
     }
 
-    /// Sauvegarde différée : regroupe les changements rapprochés (glisser une carte…).
+    /// Debounced save: batches changes that come close together (dragging a card…).
     pub fn tick(&mut self, world: &World) {
         if world.revision == self.saved_revision {
             self.dirty_since = None;
@@ -135,7 +135,7 @@ impl Persistence {
     }
 }
 
-/// Écrit dans un fichier temporaire voisin puis renomme : jamais de layout à moitié écrit.
+/// Writes to a sibling temp file, then renames: never a half-written layout.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
@@ -160,7 +160,7 @@ mod tests {
         let mut w = World::default();
         w.camera = Camera { center: pos2(12.0, -7.5), zoom: 0.42 };
         let mut a = Card::new(Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 200.0)), Some("~/api".into()));
-        a.name = Some("serveur".into());
+        a.name = Some("server".into());
         a.stall_secs = 15;
         a.attention = true;
         a.project = Some("p1".into());
@@ -189,16 +189,16 @@ mod tests {
         assert_eq!(loaded.wires, w.wires);
         assert_eq!(loaded.cards.len(), 2);
         let a = &loaded.cards[0];
-        assert_eq!((a.id.as_str(), a.name.as_deref(), a.cwd.as_deref(), a.stall_secs), (w.cards[0].id.as_str(), Some("serveur"), Some("~/api"), 15));
+        assert_eq!((a.id.as_str(), a.name.as_deref(), a.cwd.as_deref(), a.stall_secs), (w.cards[0].id.as_str(), Some("server"), Some("~/api"), 15));
         assert_eq!(a.rect, w.cards[0].rect);
-        assert!(!a.attention, "l'état d'exécution n'est pas sauvegardé");
+        assert!(!a.attention, "runtime state is not saved");
         assert_eq!((a.project.as_deref(), loaded.cards[1].project.as_deref()), (Some("p1"), None));
         assert!(loaded.changes_open);
         assert!(!dir.join("layout.json.tmp").exists());
         fs::remove_dir_all(dir).unwrap();
     }
 
-    /// Un layout de la version 1 : pas de `project` sur les cartes, l'appartenance était géométrique.
+    /// A version 1 layout: no `project` on cards, membership was geometric.
     #[test]
     fn version_1_layouts_get_membership_from_geometry() {
         let dir = temp_dir("v1");
@@ -207,17 +207,17 @@ mod tests {
         let json = format!(
             r#"{{"version":1,"camera":{{"center":{{"x":0.0,"y":0.0}},"zoom":1.0}},"cards":[{},{}],
                "projects":[{{"id":"p","name":"API","color":[1,2,3],"rect":{{"min":{{"x":-10.0,"y":-10.0}},"max":{{"x":5000.0,"y":5000.0}}}},"cwd":null}}],"wires":[]}}"#,
-            card("dedans", 100.0),
-            card("dehors", 9000.0)
+            card("inside", 100.0),
+            card("outside", 9000.0)
         );
         fs::write(dir.join("layout.json"), json).unwrap();
         let mut w = World::default();
         let mut p = Persistence::new(&dir);
         p.load(&mut w);
         assert_eq!(p.last_error, None);
-        assert_eq!(w.card("dedans").unwrap().project.as_deref(), Some("p"));
-        assert_eq!(w.card("dehors").unwrap().project, None);
-        assert!(w.projects[0].rect.width() < 1000.0, "le cadre s'ajuste à son seul membre : {:?}", w.projects[0].rect);
+        assert_eq!(w.card("inside").unwrap().project.as_deref(), Some("p"));
+        assert_eq!(w.card("outside").unwrap().project, None);
+        assert!(w.projects[0].rect.width() < 1000.0, "the frame fits its only member: {:?}", w.projects[0].rect);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -240,7 +240,7 @@ mod tests {
         p.load(&mut w);
         assert!(w.cards.is_empty());
         assert!(p.last_error.as_deref().unwrap().contains("mis de côté"));
-        let backups: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().contains("corrompu")).collect();
+        let backups: Vec<_> = fs::read_dir(&dir).unwrap().filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().contains("corrupt")).collect();
         assert_eq!(backups.len(), 1);
         assert_eq!(fs::read(backups[0].path()).unwrap(), b"{ pas du json");
         fs::remove_dir_all(dir).unwrap();
@@ -252,7 +252,7 @@ mod tests {
         let mut w = sample_world();
         let mut p = Persistence::new(&dir);
         p.tick(&w);
-        assert!(!p.path().exists(), "pas d'écriture immédiate");
+        assert!(!p.path().exists(), "no immediate write");
         assert!(p.wants_repaint());
         std::thread::sleep(SAVE_DELAY + Duration::from_millis(50));
         p.tick(&w);

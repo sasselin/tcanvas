@@ -1,19 +1,19 @@
-//! Lancement de `tcanvas-agent` dans WSL, partagé par les slices qui en ont besoin
-//! (surveillance continue, arrêt complet d'une session).
+//! Launching `tcanvas-agent` in WSL, shared by the slices that need it
+//! (continuous watching, full shutdown of a session).
 
 use std::process::{Command, Stdio};
 
-/// `tcanvas-agent <args>`. `TCANVAS_AGENT` remplace le chemin par défaut
-/// (`~/.local/bin/tcanvas-agent` dans WSL, ou à côté de l'exécutable sous Linux).
+/// `tcanvas-agent <args>`. `TCANVAS_AGENT` overrides the default path
+/// (`~/.local/bin/tcanvas-agent` in WSL, or next to the executable on Linux).
 pub fn agent(args: &[&str]) -> Command {
     let custom = std::env::var("TCANVAS_AGENT").ok();
     if cfg!(windows) {
-        // Les variables Windows ne traversent pas wsl.exe : on transmet le socket explicitement.
+        // Windows variables don't cross wsl.exe: pass the socket explicitly.
         let mut cmd = Command::new("wsl.exe");
         cmd.args(["-e", "env", &format!("TCANVAS_TMUX_SOCKET={}", protocol::tmux_socket())]);
         match custom {
             Some(path) => cmd.arg(path),
-            // `sh -l` charge le profil ; "$@" reçoit nos arguments ($0 = nom affiché).
+            // `sh -l` loads the profile; "$@" receives our arguments ($0 = displayed name).
             None => cmd.args(["sh", "-lc", r#"exec "$HOME/.local/bin/tcanvas-agent" "$@""#, "tcanvas-agent"]),
         };
         cmd.args(args);
@@ -33,7 +33,7 @@ pub fn agent(args: &[&str]) -> Command {
     }
 }
 
-/// Pas de console noire qui clignote sous Windows.
+/// No black console flashing on Windows.
 pub fn no_window(cmd: &mut Command) {
     #[cfg(windows)]
     {
@@ -44,7 +44,7 @@ pub fn no_window(cmd: &mut Command) {
     let _ = cmd;
 }
 
-/// Lance et attend en arrière-plan ; `true` si la commande a réussi.
+/// Runs and waits in the background; `true` if the command succeeded.
 pub fn succeeds(mut cmd: Command) -> bool {
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
     cmd.status().is_ok_and(|s| s.success())

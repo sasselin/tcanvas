@@ -1,11 +1,11 @@
-//! Petits composants d'interface partagés.
+//! Small shared UI components.
 
 use egui::{Id, Key, Modal, Modifiers, RichText};
 
 use crate::shell::i18n::t;
 
-/// Confirmation modale. `Some(true)` : confirmé (bouton ou Entrée), `Some(false)` : annulé
-/// (bouton, Échap ou clic à côté), `None` : encore ouverte.
+/// Modal confirmation. `Some(true)`: confirmed (button or Enter), `Some(false)`: cancelled
+/// (button, Escape or click outside), `None`: still open.
 pub fn confirm(ctx: &egui::Context, id: &str, title: &str, body: &str, ok_label: &str) -> Option<bool> {
     let mut result = None;
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
@@ -33,7 +33,7 @@ pub fn confirm(ctx: &egui::Context, id: &str, title: &str, body: &str, ok_label:
     result
 }
 
-/// Boîte de saisie modale. `Some(true)` : validée, `Some(false)` : annulée, `None` : encore ouverte.
+/// Modal input box. `Some(true)`: confirmed, `Some(false)`: cancelled, `None`: still open.
 pub fn text_prompt(ctx: &egui::Context, id: &str, title: &str, text: &mut String) -> Option<bool> {
     let mut result = None;
     let modal = Modal::new(Id::unique(("prompt", id))).show(ctx, |ui| {

@@ -1,5 +1,5 @@
-//! Suivi des changements de bout en bout : vrai binaire `tcanvas-agent`, vrai dépôt git temporaire.
-//! Ignoré proprement si git n'est pas installé.
+//! End-to-end change tracking: real `tcanvas-agent` binary, real temporary git repository.
+//! Skipped cleanly if git is not installed.
 
 use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Write};
@@ -17,13 +17,13 @@ struct Agent {
     child: Child,
     stdin: ChildStdin,
     events: Receiver<AgentEvent>,
-    /// Événements reçus pendant qu'on en attendait un autre : gardés pour les attentes suivantes.
+    /// Events received while waiting for another one: kept for later waits.
     backlog: RefCell<Vec<AgentEvent>>,
 }
 
 impl Agent {
     fn spawn() -> Self {
-        // Socket tmux qui n'existe pas : aucune session, on ne touche à rien.
+        // Nonexistent tmux socket: no sessions, nothing gets touched.
         let mut child = Command::new(AGENT)
             .env("TCANVAS_TMUX_SOCKET", format!("tcanvas-changes-test-{}", std::process::id()))
             .stdin(Stdio::piped())
@@ -35,7 +35,7 @@ impl Agent {
         let (tx, events) = mpsc::channel();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let _ = tx.send(protocol::decode(&line).expect("ligne JSON valide"));
+                let _ = tx.send(protocol::decode(&line).expect("valid JSON line"));
             }
         });
         Agent { child, stdin, events, backlog: RefCell::new(Vec::new()) }
@@ -59,7 +59,7 @@ impl Agent {
                 Err(_) => break,
             }
         }
-        panic!("attendu : {what}\nreçu : {backlog:#?}");
+        panic!("expected: {what}\nreceived: {backlog:#?}");
     }
 
     fn wait_changes(&self, key: &str, what: &str, pred: impl Fn(&ChangeSet) -> bool) -> ChangeSet {
@@ -103,12 +103,12 @@ fn git(dir: &Path, args: &[&str]) {
 #[test]
 fn lists_git_changes_and_serves_diffs() {
     if !has_git() {
-        eprintln!("git absent : test ignoré");
+        eprintln!("git missing: test skipped");
         return;
     }
     let repo = temp_dir("repo");
     git(&repo, &["init", "-q", "-b", "main"]);
-    std::fs::write(repo.join("a.txt"), "un\ndeux\ntrois\n").unwrap();
+    std::fs::write(repo.join("a.txt"), "one\ntwo\nthree\n").unwrap();
     std::fs::write(repo.join("gone.txt"), "x\n").unwrap();
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "init"]);
@@ -116,27 +116,27 @@ fn lists_git_changes_and_serves_diffs() {
     let mut agent = Agent::spawn();
     agent.wait_for("Hello", |ev| matches!(ev, AgentEvent::Hello { .. }));
     agent.send(&AgentCmd::Watch { key: "p".into(), path: repo.display().to_string() });
-    let clean = agent.wait_changes("p", "dépôt propre", |_| true);
+    let clean = agent.wait_changes("p", "clean repo", |_| true);
     assert!(clean.git && clean.files.is_empty() && clean.error.is_none(), "{clean:?}");
     assert_eq!(clean.branch.as_deref(), Some("main"));
-    // Dépôt propre : le travail déjà commité reste visible, avec son contenu.
+    // Clean repo: already committed work stays visible, with its contents.
     assert_eq!(clean.commits.iter().map(|c| (c.summary.as_str(), c.author.as_str())).collect::<Vec<_>>(), vec![("init", "t")]);
     let sha = clean.commits[0].sha.clone();
     agent.send(&AgentCmd::ShowCommit { key: "p".into(), sha: sha.clone() });
-    let AgentEvent::Diff { text, .. } = agent.wait_for("contenu du commit", |ev| matches!(ev, AgentEvent::Diff { file, .. } if *file == sha)) else { unreachable!() };
-    assert!(text.contains("init") && text.contains("Author: ") && text.contains("+deux") && text.contains("gone.txt"), "{text}");
+    let AgentEvent::Diff { text, .. } = agent.wait_for("commit contents", |ev| matches!(ev, AgentEvent::Diff { file, .. } if *file == sha)) else { unreachable!() };
+    assert!(text.contains("init") && text.contains("Author: ") && text.contains("+two") && text.contains("gone.txt"), "{text}");
     agent.send(&AgentCmd::ShowCommit { key: "p".into(), sha: "--output=/tmp/x".into() });
-    let AgentEvent::Diff { text, problem, .. } = agent.wait_for("sha refusé", |ev| matches!(ev, AgentEvent::Diff { file, .. } if file.starts_with("--"))) else { unreachable!() };
+    let AgentEvent::Diff { text, problem, .. } = agent.wait_for("sha refused", |ev| matches!(ev, AgentEvent::Diff { file, .. } if file.starts_with("--"))) else { unreachable!() };
     assert_eq!((text.as_str(), problem), ("", Some(Problem::CommitRefused)));
 
-    // Ce que ferait Claude : modifier, créer, supprimer.
-    std::fs::write(repo.join("a.txt"), "un\nDEUX\ntrois\nquatre\n").unwrap();
+    // What Claude would do: modify, create, delete.
+    std::fs::write(repo.join("a.txt"), "one\nTWO\nthree\nfour\n").unwrap();
     std::fs::create_dir_all(repo.join("src")).unwrap();
-    std::fs::write(repo.join("src/new.rs"), "fn main() {}\n// fin\n").unwrap();
+    std::fs::write(repo.join("src/new.rs"), "fn main() {}\n// end\n").unwrap();
     std::fs::remove_file(repo.join("gone.txt")).unwrap();
 
-    let set = agent.wait_changes("p", "trois changements", |s| s.files.len() == 3);
-    let get = |p: &str| set.files.iter().find(|f| f.path == p).unwrap_or_else(|| panic!("{p} absent : {set:?}"));
+    let set = agent.wait_changes("p", "three changes", |s| s.files.len() == 3);
+    let get = |p: &str| set.files.iter().find(|f| f.path == p).unwrap_or_else(|| panic!("{p} missing: {set:?}"));
     let a = get("a.txt");
     assert_eq!((&a.kind, a.added, a.removed), (&ChangeKind::Modified, Some(2), Some(1)));
     let new = get("src/new.rs");
@@ -144,14 +144,14 @@ fn lists_git_changes_and_serves_diffs() {
     assert_eq!(get("gone.txt").kind, ChangeKind::Deleted);
 
     agent.send(&AgentCmd::Diff { key: "p".into(), file: "a.txt".into() });
-    let AgentEvent::Diff { text, truncated, .. } = agent.wait_for("diff de a.txt", |ev| matches!(ev, AgentEvent::Diff { file, .. } if file == "a.txt")) else { unreachable!() };
-    assert!(text.contains("-deux") && text.contains("+DEUX") && text.contains("+quatre") && !truncated, "{text}");
+    let AgentEvent::Diff { text, truncated, .. } = agent.wait_for("diff of a.txt", |ev| matches!(ev, AgentEvent::Diff { file, .. } if file == "a.txt")) else { unreachable!() };
+    assert!(text.contains("-two") && text.contains("+TWO") && text.contains("+four") && !truncated, "{text}");
 
     agent.send(&AgentCmd::Diff { key: "p".into(), file: "src/new.rs".into() });
-    let AgentEvent::Diff { text, .. } = agent.wait_for("diff du fichier non suivi", |ev| matches!(ev, AgentEvent::Diff { file, .. } if file == "src/new.rs")) else { unreachable!() };
+    let AgentEvent::Diff { text, .. } = agent.wait_for("diff of the untracked file", |ev| matches!(ev, AgentEvent::Diff { file, .. } if file == "src/new.rs")) else { unreachable!() };
     assert!(text.contains("+fn main() {}"), "{text}");
 
-    // Ne plus surveiller : plus aucun événement pour cette clé.
+    // Unwatch: no more events for this key.
     agent.send(&AgentCmd::Unwatch { key: "p".into() });
     thread::sleep(Duration::from_millis(200));
     std::fs::write(repo.join("b.txt"), "b\n").unwrap();
@@ -163,33 +163,33 @@ fn lists_git_changes_and_serves_diffs() {
 #[test]
 fn plain_folder_lists_recent_files_and_missing_folder_errors() {
     let dir = temp_dir("plain");
-    std::fs::write(dir.join("old.txt"), "vieux").unwrap();
-    // L'horloge de mtime est à la seconde : on attend la suivante avant de surveiller.
+    std::fs::write(dir.join("old.txt"), "old").unwrap();
+    // mtime has one-second resolution: wait for the next second before watching.
     thread::sleep(Duration::from_millis(1100));
 
     let mut agent = Agent::spawn();
     agent.send(&AgentCmd::Watch { key: "plain".into(), path: dir.display().to_string() });
-    agent.send(&AgentCmd::Watch { key: "absent".into(), path: "/nexiste/pas".into() });
-    let err = agent.wait_changes("absent", "erreur", |s| s.error.is_some());
+    agent.send(&AgentCmd::Watch { key: "absent".into(), path: "/does/not/exist".into() });
+    let err = agent.wait_changes("absent", "error", |s| s.error.is_some());
     assert!(matches!(err.error, Some(Problem::DirNotFound { .. })), "{err:?}");
 
-    let empty = agent.wait_changes("plain", "rien de neuf", |_| true);
+    let empty = agent.wait_changes("plain", "nothing new", |_| true);
     assert!(!empty.git && empty.files.is_empty(), "{empty:?}");
     std::fs::create_dir_all(dir.join("node_modules")).unwrap();
     std::fs::write(dir.join("node_modules/ignored.js"), "x").unwrap();
-    std::fs::write(dir.join("fresh.txt"), "neuf").unwrap();
+    std::fs::write(dir.join("fresh.txt"), "new").unwrap();
     let set = agent.wait_changes("plain", "fresh.txt", |s| !s.files.is_empty());
     assert_eq!(set.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec!["fresh.txt"]);
 
     agent.send(&AgentCmd::Diff { key: "plain".into(), file: "fresh.txt".into() });
-    let AgentEvent::Diff { problem, .. } = agent.wait_for("message hors git", |ev| matches!(ev, AgentEvent::Diff { .. })) else { unreachable!() };
+    let AgentEvent::Diff { problem, .. } = agent.wait_for("non-git message", |ev| matches!(ev, AgentEvent::Diff { .. })) else { unreachable!() };
     assert_eq!(problem, Some(Problem::NotAGitRepo));
 
-    // Sélecteur de dossiers : l'agent liste les sous-dossiers.
-    std::fs::create_dir_all(dir.join("sous-dossier")).unwrap();
+    // Folder picker: the agent lists the subfolders.
+    std::fs::create_dir_all(dir.join("subfolder")).unwrap();
     agent.send(&AgentCmd::ListDir { path: dir.display().to_string() });
-    let AgentEvent::DirListing(l) = agent.wait_for("liste du dossier", |ev| matches!(ev, AgentEvent::DirListing(_))) else { unreachable!() };
+    let AgentEvent::DirListing(l) = agent.wait_for("folder listing", |ev| matches!(ev, AgentEvent::DirListing(_))) else { unreachable!() };
     let names: Vec<&str> = l.dirs.iter().map(|d| d.name.as_str()).collect();
-    assert!(names.contains(&"sous-dossier") && !l.git, "{l:?}");
+    assert!(names.contains(&"subfolder") && !l.git, "{l:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }

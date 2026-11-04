@@ -1,5 +1,5 @@
-//! Fichiers modifiés des dossiers liés aux projets : liste (avec +/− par rapport à HEAD) et diffs.
-//! Tourne dans son propre fil : `git` ne retarde jamais l'observation des terminaux.
+//! Modified files of the folders linked to projects: list (with +/− relative to HEAD) and diffs.
+//! Runs on its own thread: `git` never delays watching the terminals.
 
 use std::collections::HashMap;
 use std::fs;
@@ -14,16 +14,16 @@ use protocol::{AgentEvent, ChangeKind, ChangeSet, CommitInfo, DirEntry, DirListi
 
 const SCAN_EVERY: Duration = Duration::from_secs(2);
 const MAX_FILES: usize = 500;
-/// Commits récents affichés dans le panneau.
+/// Recent commits shown in the panel.
 const MAX_COMMITS: usize = 20;
-/// Parcours d'un dossier hors git : au-delà, on s'arrête.
+/// Walking a non-git folder stops beyond this many entries.
 const MAX_WALK: usize = 20_000;
 const MAX_DIFF: usize = 512 * 1024;
-/// Taille lue pour compter les lignes d'un fichier non suivi.
+/// Bytes read to count the lines of an untracked file.
 const MAX_COUNT: u64 = 1024 * 1024;
-/// Arbre vide de git : base des diffs d'un dépôt sans commit.
+/// git's empty tree: diff base for a repository without commits.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
-/// Dossiers ignorés hors git (dépendances, sorties de build).
+/// Folders skipped outside git (dependencies, build outputs).
 const SKIP_DIRS: [&str; 4] = ["node_modules", "target", "dist", "build"];
 
 pub enum Cmd {
@@ -36,12 +36,12 @@ pub enum Cmd {
 
 struct Watched {
     path: String,
-    /// Début de la surveillance : hors git, seuls les fichiers modifiés depuis comptent.
+    /// Start of watching: outside git, only files modified since then count.
     since: u64,
     last_sent: Option<ChangeSet>,
 }
 
-/// Lance le fil de surveillance. Les événements produits passent par `send`.
+/// Starts the watcher thread. Produced events go through `send`.
 pub fn spawn(send: impl Fn(&AgentEvent) + Send + 'static) -> Sender<Cmd> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || run(rx, send));
@@ -57,7 +57,7 @@ fn run(rx: Receiver<Cmd>, send: impl Fn(&AgentEvent)) {
                 if watched.get(&key).is_none_or(|w| w.path != path) {
                     watched.insert(key.clone(), Watched { path, since: unix_now(), last_sent: None });
                 }
-                // Réponse immédiate (validation du dossier) : on rescanne tout de suite.
+                // Immediate response (folder validation): rescan right away.
                 next_scan = Instant::now();
             }
             Ok(Cmd::Unwatch { key }) => {
@@ -89,7 +89,7 @@ fn run(rx: Receiver<Cmd>, send: impl Fn(&AgentEvent)) {
     }
 }
 
-/// `~` et `~/x` → dossier personnel. Les autres chemins sont rendus tels quels.
+/// `~` and `~/x` → home folder. Other paths are returned unchanged.
 pub fn expand_tilde(path: &str, home: Option<&str>) -> String {
     let path = path.trim();
     match (path, home) {
@@ -99,7 +99,7 @@ pub fn expand_tilde(path: &str, home: Option<&str>) -> String {
     }
 }
 
-/// Chemin absolu d'un dossier existant.
+/// Absolute path of an existing folder.
 pub fn resolve(path: &str) -> Result<PathBuf, Problem> {
     let expanded = expand_tilde(path, std::env::var("HOME").ok().as_deref());
     match fs::canonicalize(&expanded) {
@@ -109,7 +109,7 @@ pub fn resolve(path: &str) -> Result<PathBuf, Problem> {
     }
 }
 
-/// Réponse à une demande de diff : le texte, ou le problème qui l'empêche.
+/// Response to a diff request: the text, or the problem preventing it.
 fn diff_event(key: String, file: String, result: Result<(String, bool), Problem>) -> AgentEvent {
     match result {
         Ok((text, truncated)) => AgentEvent::Diff { key, file, text, truncated, problem: None },
@@ -118,7 +118,7 @@ fn diff_event(key: String, file: String, result: Result<(String, bool), Problem>
 }
 
 fn git(dir: &Path, args: &[&str]) -> Option<Output> {
-    // Pas de verrou optionnel sur l'index : ne jamais gêner le git de l'utilisateur (ou de Claude).
+    // No optional lock on the index: never get in the way of the user's (or Claude's) git.
     Command::new("git").arg("-C").arg(dir).args(args).env("GIT_OPTIONAL_LOCKS", "0").output().ok()
 }
 
@@ -128,7 +128,7 @@ fn git_ok(dir: &Path, args: &[&str]) -> Option<String> {
 
 struct Repo {
     top: PathBuf,
-    /// HEAD, ou l'arbre vide si aucun commit.
+    /// HEAD, or the empty tree if there are no commits.
     base: String,
 }
 
@@ -191,7 +191,7 @@ fn git_files(dir: &Path, repo: &Repo) -> Vec<FileChange> {
         .collect()
 }
 
-/// Séparateur de champs du format de `git log` (caractère « unit separator »).
+/// Field separator for the `git log` format (the "unit separator" character).
 const FIELD: char = '\u{1f}';
 
 fn recent_commits(dir: &Path) -> Vec<CommitInfo> {
@@ -200,7 +200,7 @@ fn recent_commits(dir: &Path) -> Vec<CommitInfo> {
     git_ok(dir, &["log", &n, &format, "--no-color"]).map(|out| parse_log(&out)).unwrap_or_default()
 }
 
-/// Sortie de `git log --format=%H<US>%ct<US>%an<US>%s` : un commit par ligne.
+/// Output of `git log --format=%H<US>%ct<US>%an<US>%s`: one commit per line.
 pub fn parse_log(out: &str) -> Vec<CommitInfo> {
     out.lines()
         .filter_map(|line| {
@@ -216,14 +216,14 @@ pub fn parse_log(out: &str) -> Vec<CommitInfo> {
         .collect()
 }
 
-/// `git show` d'un commit : message, puis le patch de chaque fichier.
+/// `git show` of a commit: message, then each file's patch.
 fn show_commit(w: &Watched, sha: &str) -> Result<(String, bool), Problem> {
-    // Un sha seulement : rien qui puisse passer pour une option ou une plage.
+    // A sha only: nothing that could pass for an option or a range.
     if sha.len() < 7 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(Problem::CommitRefused);
     }
     let dir = resolve(&w.path)?;
-    // En-tête au format git standard : la sortie de git n'est pas traduite.
+    // Header in standard git format: git's output is not translated.
     let out = git(&dir, &["show", "--no-color", "--no-ext-diff", "-M", "--stat", "--patch", "--format=commit %H%nAuthor: %an <%ae>%nDate:   %ad%n%n%w(0,4,4)%B", "--date=format:%Y-%m-%d %H:%M", sha]);
     match out.filter(|o| o.status.success()) {
         Some(o) => Ok(truncate(String::from_utf8_lossy(&o.stdout).into_owned(), MAX_DIFF)),
@@ -231,7 +231,7 @@ fn show_commit(w: &Watched, sha: &str) -> Result<(String, bool), Problem> {
     }
 }
 
-/// `git status --porcelain=v1 -z` : `XY chemin\0`, suivi de `origine\0` pour un renommage ou une copie.
+/// `git status --porcelain=v1 -z`: `XY path\0`, followed by `origin\0` for a rename or a copy.
 pub fn parse_porcelain(out: &str) -> Vec<(String, ChangeKind)> {
     let mut fields = out.split('\0').filter(|f| !f.is_empty());
     let mut entries = Vec::new();
@@ -258,8 +258,8 @@ pub fn parse_porcelain(out: &str) -> Vec<(String, ChangeKind)> {
     entries
 }
 
-/// `git diff --numstat -z` : `ajouts\tretraits\tchemin\0`, ou `ajouts\tretraits\t\0origine\0cible\0`
-/// pour un renommage. `-` pour un binaire (→ `None`). Clé : chemin cible.
+/// `git diff --numstat -z`: `added\tremoved\tpath\0`, or `added\tremoved\t\0origin\0target\0`
+/// for a rename. `-` for a binary (→ `None`). Key: target path.
 pub fn parse_numstat(out: &str) -> HashMap<String, (Option<u32>, Option<u32>)> {
     let mut map = HashMap::new();
     let mut fields = out.split('\0');
@@ -277,7 +277,7 @@ pub fn parse_numstat(out: &str) -> HashMap<String, (Option<u32>, Option<u32>)> {
     map
 }
 
-/// Nombre de lignes d'un fichier texte ; `None` pour un binaire ou un fichier illisible.
+/// Line count of a text file; `None` for a binary or unreadable file.
 fn count_lines(path: &Path) -> Option<u32> {
     let mut buf = Vec::new();
     fs::File::open(path).ok()?.take(MAX_COUNT).read_to_end(&mut buf).ok()?;
@@ -292,7 +292,7 @@ fn mtime(path: &Path) -> u64 {
     fs::symlink_metadata(path).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Hors git : fichiers modifiés depuis `since` (début de la surveillance).
+/// Outside git: files modified since `since` (start of watching).
 fn walk_recent(root: &Path, since: u64) -> Vec<FileChange> {
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -324,10 +324,10 @@ fn walk_recent(root: &Path, since: u64) -> Vec<FileChange> {
     files
 }
 
-/// Au-delà, la liste d'un dossier est coupée (dossier de cache géant…).
+/// Beyond this, a folder listing is truncated (huge cache folder…).
 const MAX_DIRS: usize = 2000;
 
-/// Sous-dossiers de `path` pour le sélecteur : visibles seulement, triés sans tenir compte de la casse.
+/// Subfolders of `path` for the picker: visible ones only, sorted case-insensitively.
 pub fn list_dir(path: &str) -> DirListing {
     let mut listing = DirListing { request: path.into(), path: None, parent: None, git: false, dirs: Vec::new(), error: None };
     let dir = match resolve(if path.trim().is_empty() { "~" } else { path }) {
@@ -343,7 +343,7 @@ pub fn list_dir(path: &str) -> DirListing {
         Ok(entries) => {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                // `metadata` suit les liens : un lien vers un dossier compte comme un dossier.
+                // `metadata` follows symlinks: a link to a folder counts as a folder.
                 if name.starts_with('.') || !entry.path().metadata().is_ok_and(|m| m.is_dir()) {
                     continue;
                 }
@@ -360,7 +360,7 @@ pub fn list_dir(path: &str) -> DirListing {
     listing
 }
 
-/// Un chemin relatif qui ne sort pas du dépôt.
+/// A relative path that does not escape the repository.
 fn safe_relative(file: &str) -> bool {
     let p = Path::new(file);
     !file.is_empty() && p.is_relative() && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
@@ -472,27 +472,27 @@ mod tests {
         for d in ["beta/.git", "Alpha", ".cache", "gamma"] {
             fs::create_dir_all(root.join(d)).unwrap();
         }
-        fs::write(root.join("fichier.txt"), "x").unwrap();
-        std::os::unix::fs::symlink(root.join("gamma"), root.join("lien")).unwrap();
+        fs::write(root.join("file.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(root.join("gamma"), root.join("link")).unwrap();
         let l = list_dir(&root.display().to_string());
         assert_eq!(l.error, None);
         let names: Vec<(&str, bool)> = l.dirs.iter().map(|d| (d.name.as_str(), d.git)).collect();
-        assert_eq!(names, vec![("Alpha", false), ("beta", true), ("gamma", false), ("lien", false)]);
+        assert_eq!(names, vec![("Alpha", false), ("beta", true), ("gamma", false), ("link", false)]);
         assert_eq!(l.path.as_deref(), Some(fs::canonicalize(&root).unwrap().to_str().unwrap()));
         assert!(l.parent.is_some() && !l.git);
         assert!(list_dir(&root.join("beta").display().to_string()).git);
-        let missing = list_dir("/nexiste/pas");
-        assert_eq!(missing.error, Some(Problem::DirNotFound { path: "/nexiste/pas".into() }));
+        let missing = list_dir("/does/not/exist");
+        assert_eq!(missing.error, Some(Problem::DirNotFound { path: "/does/not/exist".into() }));
         assert!(missing.path.is_none());
-        let file = root.join("fichier.txt").display().to_string();
+        let file = root.join("file.txt").display().to_string();
         assert_eq!(list_dir(&file).error, Some(Problem::NotADir { path: file }));
         fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn missing_folder_reports_an_error() {
-        let set = scan("k", "/nexiste/pas/du/tout", 0);
-        assert_eq!(set.error, Some(Problem::DirNotFound { path: "/nexiste/pas/du/tout".into() }));
+        let set = scan("k", "/does/not/exist/at/all", 0);
+        assert_eq!(set.error, Some(Problem::DirNotFound { path: "/does/not/exist/at/all".into() }));
         assert!(set.root.is_none() && set.files.is_empty());
     }
 }

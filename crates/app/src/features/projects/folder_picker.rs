@@ -1,5 +1,5 @@
-//! Sélecteur de dossier (WSL) pour lier un groupe : l'agent liste les sous-dossiers, on navigue
-//! à la souris (fil d'Ariane, dossiers récents, filtre) ou en tapant un chemin.
+//! Folder picker (WSL) for linking a group: the agent lists subfolders, you navigate
+//! with the mouse (breadcrumb, recent folders, filter) or by typing a path.
 
 use egui::{Align, Color32, Id, Key, Layout, Modal, RichText, ScrollArea, TextEdit, Ui};
 use protocol::{AgentCmd, DirEntry, DirListing};
@@ -10,10 +10,10 @@ use crate::shell::world::ProjectId;
 
 const GIT: Color32 = Color32::from_rgb(230, 150, 60);
 
-/// Ce que l'utilisateur a décidé dans la frame.
+/// What the user decided this frame.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Choice {
-    /// Aller dans ce dossier (demande sa liste à l'agent).
+    /// Go into this folder (requests its listing from the agent).
     Navigate(String),
     Link(String),
     Unlink,
@@ -23,17 +23,17 @@ pub enum Choice {
 pub struct FolderPicker {
     pub project: ProjectId,
     pub title: String,
-    /// Le groupe a déjà un dossier : on propose aussi de le délier.
+    /// The group already has a folder: also offer to unlink it.
     pub linked: bool,
-    /// Champ de chemin, éditable (Entrée : y aller).
+    /// Path field, editable (Enter: go there).
     pub input: String,
-    /// Chemin demandé dont on attend la liste.
+    /// Requested path whose listing we are waiting for.
     pub pending: Option<String>,
     pub listing: Option<DirListing>,
     pub filter: String,
-    /// Raccourcis : dossiers des terminaux du groupe, des autres groupes, dossier personnel.
+    /// Shortcuts: folders of the group's terminals, of other groups, home folder.
     pub shortcuts: Vec<String>,
-    /// Première frame : le filtre prend le clavier.
+    /// First frame: the filter takes the keyboard.
     fresh: bool,
 }
 
@@ -54,7 +54,7 @@ pub fn join(dir: &str, name: &str) -> String {
 }
 
 impl FolderPicker {
-    /// Ouvre le sélecteur sur `start` (vide : dossier personnel) ; renvoie la commande à envoyer.
+    /// Opens the picker on `start` (empty: home folder); returns the command to send.
     pub fn open(project: ProjectId, title: String, linked: bool, start: &str, shortcuts: Vec<String>) -> (Self, AgentCmd) {
         let start = if start.trim().is_empty() { "~".to_string() } else { start.trim().to_string() };
         let picker = Self { project, title, linked, input: start.clone(), pending: Some(start.clone()), listing: None, filter: String::new(), shortcuts, fresh: true };
@@ -68,7 +68,7 @@ impl FolderPicker {
         AgentCmd::ListDir { path: path.to_string() }
     }
 
-    /// Réponse de l'agent : on ne garde que celle du dernier chemin demandé.
+    /// Agent response: only the one for the last requested path is kept.
     pub fn on_listing(&mut self, listing: &DirListing) {
         if self.pending.as_deref() != Some(listing.request.as_str()) {
             return;
@@ -80,14 +80,14 @@ impl FolderPicker {
         self.listing = Some(listing.clone());
     }
 
-    /// Sous-dossiers qui correspondent au filtre (sans tenir compte de la casse).
+    /// Subfolders matching the filter (case-insensitive).
     pub fn visible(&self) -> Vec<&DirEntry> {
         let f = self.filter.trim().to_lowercase();
         self.listing.iter().flat_map(|l| &l.dirs).filter(|d| f.is_empty() || d.name.to_lowercase().contains(&f)).collect()
     }
 
-    /// Dossier qui sera lié : celui affiché (chemin absolu résolu). Tant que l'agent n'a pas
-    /// répondu (absent, lent), le chemin tapé. Rien si l'agent dit que le dossier n'existe pas.
+    /// Folder that will be linked: the displayed one (resolved absolute path). Until the agent has
+    /// answered (missing, slow), the typed path. Nothing if the agent says the folder doesn't exist.
     pub fn target(&self) -> Option<String> {
         match self.listing.as_ref().filter(|_| self.pending.is_none()) {
             Some(l) if l.error.is_some() => None,
@@ -96,7 +96,7 @@ impl FolderPicker {
         }
     }
 
-    /// Fenêtre modale. Échap ou clic à côté : annuler.
+    /// Modal window. Escape or click outside: cancel.
     pub fn ui(&mut self, ctx: &egui::Context) -> Option<Choice> {
         let mut choice = None;
         let modal = Modal::new(Id::unique("folder-picker")).show(ctx, |ui| {
@@ -261,10 +261,10 @@ mod tests {
     fn opening_asks_the_agent_and_only_the_latest_answer_counts() {
         let (mut p, cmd) = FolderPicker::open("p".into(), "t".into(), false, "  ", vec![]);
         assert_eq!(cmd, AgentCmd::ListDir { path: "~".into() });
-        assert_eq!(p.target().as_deref(), Some("~"), "sans réponse : le chemin tapé");
+        assert_eq!(p.target().as_deref(), Some("~"), "no response: the typed path");
         p.navigate("/srv");
-        p.on_listing(&listing("~", "/home/me", &[("vieux", false)]));
-        assert!(p.listing.is_none(), "réponse périmée ignorée");
+        p.on_listing(&listing("~", "/home/me", &[("old", false)]));
+        assert!(p.listing.is_none(), "stale response ignored");
         p.on_listing(&listing("/srv", "/srv", &[("api", true)]));
         assert_eq!((p.input.as_str(), p.target().as_deref()), ("/srv", Some("/srv")));
     }
@@ -276,13 +276,13 @@ mod tests {
         p.filter = "AMI".into();
         assert_eq!(p.visible().iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), vec!["Amimoucheur-rust"]);
         p.navigate("/home/me/api");
-        assert!(p.filter.is_empty(), "changer de dossier efface le filtre");
+        assert!(p.filter.is_empty(), "changing folder clears the filter");
     }
 
     #[test]
     fn a_missing_folder_cannot_be_linked_as_listed() {
-        let (mut p, _) = FolderPicker::open("p".into(), "t".into(), false, "/nexiste", vec![]);
-        p.on_listing(&DirListing { request: "/nexiste".into(), path: None, parent: None, git: false, dirs: vec![], error: Some(protocol::Problem::DirNotFound { path: "/nexiste".into() }) });
+        let (mut p, _) = FolderPicker::open("p".into(), "t".into(), false, "/missing", vec![]);
+        p.on_listing(&DirListing { request: "/missing".into(), path: None, parent: None, git: false, dirs: vec![], error: Some(protocol::Problem::DirNotFound { path: "/missing".into() }) });
         assert_eq!(p.target(), None);
     }
 }

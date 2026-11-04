@@ -1,4 +1,4 @@
-//! Fils entre terminaux. Cliquer sur un fil fait voler la caméra jusqu'au bout le plus éloigné.
+//! Wires between terminals. Clicking a wire flies the camera to the farther end.
 
 use egui::{Id, Pos2, Rect, Sense, Stroke, Ui, Vec2, epaint::CubicBezierShape};
 
@@ -10,7 +10,7 @@ use crate::shell::world::{Wire, World};
 const SAMPLES: usize = 24;
 const HIT_PX: f32 = 6.0;
 
-/// Courbe de Bézier entre deux cartes, ancrée sur les côtés qui se font face.
+/// Bezier curve between two cards, anchored on the sides that face each other.
 pub fn wire_path(a: Rect, b: Rect) -> [Pos2; 4] {
     let d = b.center() - a.center();
     let (pa, pb, dir) = if d.x.abs() >= d.y.abs() {
@@ -55,7 +55,7 @@ pub fn distance_to_polyline(points: &[Pos2], p: Pos2) -> f32 {
 pub struct Wires;
 
 impl Wires {
-    /// Dessine les fils (sous les cartes) et gère clic / clic droit.
+    /// Draws the wires (below the cards) and handles click / right-click.
     pub fn ui(&mut self, ui: &mut Ui, world: &World, vp: Rect, events: &mut Vec<Event>) {
         let cam = world.camera;
         let pointer = ui.input(|i| i.pointer.hover_pos());
@@ -71,8 +71,8 @@ impl Wires {
             if !vp.intersects(bounds) {
                 continue;
             }
-            // Zone cliquable seulement autour du curseur quand il touche le fil : le reste de
-            // la boîte englobante doit laisser passer les clics vers le fond du canevas.
+            // Clickable area only around the cursor when it touches the wire: the rest of
+            // the bounding box must let clicks through to the canvas background.
             let near = pointer.filter(|p| distance_to_polyline(&points, *p) <= HIT_PX);
             let resp = near.map(|p| ui.interact(Rect::from_center_size(p, Vec2::splat(2.0 * HIT_PX)), Id::unique(("wire", &wire.from, &wire.to)), Sense::click()));
             let hot = resp.as_ref().is_some_and(|r| r.hovered());

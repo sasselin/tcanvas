@@ -1,11 +1,11 @@
-//! Hooks zsh qui publient début, fin et code de sortie de chaque commande
-//! dans des options de pane tmux (`@tc_started`, `@tc_ended`, `@tc_exit`).
+//! zsh hooks that publish the start, end and exit code of every command
+//! as tmux pane options (`@tc_started`, `@tc_ended`, `@tc_exit`).
 
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-pub const ZSH_HOOKS: &str = r#"# tcanvas : statut des commandes (installé par `tcanvas-agent install-hooks`)
+pub const ZSH_HOOKS: &str = r#"# tcanvas: command status (installed by `tcanvas-agent install-hooks`)
 if [[ -n "$TMUX" && "$TMUX" == *tcanvas* ]]; then
   zmodload zsh/datetime 2>/dev/null
   _tcanvas_preexec() {
@@ -39,7 +39,7 @@ pub fn installed() -> bool {
         && fs::read_to_string(home().join(".zshrc")).is_ok_and(|rc| rc.contains(SOURCE_LINE))
 }
 
-/// Écrit `~/.config/tcanvas/hooks.zsh` et l'ajoute une seule fois à `~/.zshrc`.
+/// Writes `~/.config/tcanvas/hooks.zsh` and adds it to `~/.zshrc` exactly once.
 pub fn install() -> io::Result<()> {
     let path = hooks_path();
     fs::create_dir_all(path.parent().expect("hooks path has a parent"))?;

@@ -1,4 +1,4 @@
-//! Un terminal = un client tmux dans un PTY (ConPTY sous Windows) analysé par `alacritty_terminal`.
+//! A terminal = a tmux client in a PTY (ConPTY on Windows) parsed by `alacritty_terminal`.
 
 use std::collections::HashMap;
 use std::io;
@@ -16,14 +16,14 @@ use alacritty_terminal::tty;
 use crate::shell::launch;
 use crate::shell::world::CardId;
 
-/// Programme et arguments à lancer (dans le PTY ou en tâche de fond).
+/// Program and arguments to launch (in the PTY or in the background).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Launch {
     pub program: String,
     pub args: Vec<String>,
 }
 
-/// Réglages imposés au serveur tmux du canevas à chaque attache.
+/// Settings forced on the canvas's tmux server on every attach.
 const TMUX_SETUP: &[&[&str]] = &[
     &["set", "-g", "status", "off"],
     &["set", "-g", "mouse", "on"],
@@ -33,7 +33,7 @@ const TMUX_SETUP: &[&[&str]] = &[
     &["set", "-s", "escape-time", "0"],
 ];
 
-/// Programme lancé dans WSL (via `wsl.exe` sous Windows, directement ailleurs).
+/// Program launched in WSL (via `wsl.exe` on Windows, directly elsewhere).
 fn in_wsl(program: &str, args: Vec<String>) -> Launch {
     if cfg!(windows) {
         let mut wsl = vec!["--cd".to_string(), "~".to_string(), "-e".to_string(), program.to_string()];
@@ -54,7 +54,7 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// `cd` vers le dossier ; `~` reste hors des guillemets pour que le shell le développe.
+/// `cd` to the folder; `~` stays outside the quotes so the shell expands it.
 fn cd_script(cwd: Option<&str>) -> String {
     match cwd.map(str::trim).filter(|c| !c.is_empty()) {
         None | Some("~") => "cd ~".into(),
@@ -65,8 +65,8 @@ fn cd_script(cwd: Option<&str>) -> String {
     }
 }
 
-/// Attache la session, en la créant si besoin. tmux ne développe pas `~` dans `-c` : on se
-/// place d'abord dans le dossier avec `sh`, et tmux reprend le dossier courant du client.
+/// Attaches the session, creating it if needed. tmux doesn't expand `~` in `-c`: we first
+/// cd into the folder with `sh`, and tmux picks up the client's current folder.
 pub fn attach_command(session: &str, cwd: Option<&str>) -> Launch {
     let mut args = tmux_args(&["new-session", "-A", "-s", session]);
     for cmd in TMUX_SETUP {
@@ -82,9 +82,9 @@ pub fn kill_command(session: &str) -> Launch {
     in_wsl("tmux", tmux_args(&["kill-session", "-t", session]))
 }
 
-/// Arrête la session et **tous** ses processus, en arrière-plan.
-/// `tcanvas-agent kill` traque aussi les processus détachés et finit par SIGKILL ; s'il est
-/// introuvable ou échoue, on ferme au moins la session avec tmux.
+/// Stops the session and **all** its processes, in the background.
+/// `tcanvas-agent kill` also hunts down detached processes and ends with SIGKILL; if it is
+/// missing or fails, at least close the session with tmux.
 pub fn kill_session_in_background(session: String) {
     std::thread::spawn(move || {
         if !launch::succeeds(launch::agent(&["kill", &session])) {
@@ -97,7 +97,7 @@ pub fn kill_session_in_background(session: String) {
     });
 }
 
-/// Relaie les événements du terminal vers l'interface.
+/// Relays terminal events to the UI.
 #[derive(Clone)]
 pub struct Proxy {
     card: CardId,
@@ -125,9 +125,9 @@ pub struct TermRuntime {
     notifier: Notifier,
     size: GridSize,
     cell_px: (u16, u16),
-    /// Fraction de ligne de molette pas encore envoyée.
+    /// Fraction of a wheel line not yet sent.
     pub wheel_acc: f32,
-    /// Bouton souris enfoncé et dernière cellule rapportée (pour les glissés).
+    /// Mouse button held and last reported cell (for drags).
     pub mouse_down: Option<(super::input::MouseButton, usize, usize)>,
 }
 
@@ -189,7 +189,7 @@ impl TermRuntime {
         }
     }
 
-    /// Texte visible, ligne par ligne (tests et aperçus).
+    /// Visible text, line by line (tests and previews).
     pub fn screen_text(&self) -> String {
         let term = self.term.lock();
         let content = term.renderable_content();
@@ -249,16 +249,16 @@ mod tests {
         assert_eq!(cd_script(Some("  ")), "cd ~");
         assert_eq!(cd_script(Some("~")), "cd ~");
         assert_eq!(cd_script(Some("~/code/api")), "cd ~/'code/api' 2>/dev/null || cd ~");
-        assert_eq!(cd_script(Some("/tmp/l'été")), r"cd '/tmp/l'\''été' 2>/dev/null || cd ~");
+        assert_eq!(cd_script(Some("/tmp/it's café")), r"cd '/tmp/it'\''s café' 2>/dev/null || cd ~");
     }
 
     #[test]
     fn attach_script_runs_in_a_real_shell() {
-        // Le script doit être du sh valide : on le vérifie avec `sh -n` (analyse sans exécution).
+        // The script must be valid sh: check it with `sh -n` (parse without executing).
         if cfg!(windows) {
             return;
         }
-        let l = attach_command("tc_x", Some("~/l'appli"));
+        let l = attach_command("tc_x", Some("~/it's"));
         let ok = std::process::Command::new("sh").args(["-n", "-c", script(&l)]).status().unwrap().success();
         assert!(ok);
     }

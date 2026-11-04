@@ -1,8 +1,8 @@
-//! Barre du haut : création, recherche, filtres par statut (dans l'espace ouvert).
-//! Les cartes qui ne correspondent pas sont estompées, jamais cachées : on garde ses repères.
-//! Activer un filtre cadre la vue sur les correspondances ; le retirer ramène la vue d'avant.
-//! Les puces de statut sont toujours toutes là (désactivées à 0) : la barre ne bouge jamais sous
-//! la souris, même quand les statuts changent sans cesse.
+//! Top bar: creation, search, status filters (within the open space).
+//! Non-matching cards are dimmed, never hidden: you keep your bearings.
+//! Enabling a filter frames the view on the matches; removing it restores the previous view.
+//! Status chips are always all there (disabled at 0): the bar never shifts under
+//! the mouse, even when statuses keep changing.
 
 use std::collections::BTreeSet;
 
@@ -57,11 +57,11 @@ pub const SEARCH_ID: &str = "filters-search";
 pub struct Filters {
     pub text: String,
     pub statuses: BTreeSet<StatusKind>,
-    /// Vue (et espace) avant l'activation du filtre, rendue quand on le retire.
+    /// View (and space) before the filter was enabled, restored when it is removed.
     saved: Option<(Option<ProjectId>, Camera)>,
 }
 
-/// Nombre de terminaux de l'espace ouvert dans chaque statut (ordre de `StatusKind::ALL`).
+/// Number of terminals of the open space in each status (order of `StatusKind::ALL`).
 pub fn counts(world: &World) -> [usize; 6] {
     let mut n = [0; 6];
     for c in world.cards.iter().filter(|c| world.shows_card(c)) {
@@ -73,8 +73,8 @@ pub fn counts(world: &World) -> [usize; 6] {
 }
 
 impl Filters {
-    /// Clic sur une puce : ne garder que ce statut (re-clic : l'enlever). Avec Ctrl : l'ajouter
-    /// ou l'enlever des statuts déjà choisis.
+    /// Click on a chip: keep only that status (click again: remove it). With Ctrl: add it to
+    /// or remove it from the statuses already chosen.
     pub fn click_status(&mut self, kind: StatusKind, additive: bool) {
         if additive || self.statuses.contains(&kind) {
             toggle(&mut self.statuses, kind);
@@ -88,8 +88,8 @@ impl Filters {
         self.statuses.clear();
     }
 
-    /// Après un changement de filtre : retenir la vue à l'activation, cadrer les correspondances
-    /// (`fit`), et rendre la vue d'avant quand plus rien n'est filtré.
+    /// After a filter change: remember the view on activation, frame the matches
+    /// (`fit`), and restore the previous view once nothing is filtered anymore.
     pub fn after_change(&mut self, was_active: bool, fit: bool, world: &World, events: &mut Vec<Event>) {
         let active = self.is_active();
         if active && !was_active {
@@ -134,7 +134,7 @@ impl Filters {
         query.split_whitespace().all(|word| haystack.contains(word))
     }
 
-    /// Zone à cadrer pour « Tout voir » : les cartes de l'espace qui correspondent, sinon tout l'espace.
+    /// Area to frame for "Show all": the space's matching cards, otherwise the whole space.
     pub fn fit_target(&self, world: &World) -> Option<Rect> {
         let matching = world.cards.iter().filter(|c| world.shows_card(c) && self.matches(world, c)).map(|c| c.rect).reduce(|a, b| a.union(b));
         match matching {
@@ -143,7 +143,7 @@ impl Filters {
         }
     }
 
-    /// Boutons de création (première ligne de la barre).
+    /// Creation buttons (first row of the bar).
     pub fn actions_ui(ui: &mut Ui, events: &mut Vec<Event>) {
         if ui.button(t().new_terminal_button).on_hover_text(t().new_terminal_hint).clicked() {
             events.push(Event::NewCard { at: None, project: None });
@@ -153,12 +153,12 @@ impl Filters {
         }
     }
 
-    /// Recherche, filtres de statut, « Tout voir » (seconde ligne de la barre).
+    /// Search, status filters, "Show all" (second row of the bar).
     pub fn ui(&mut self, ui: &mut Ui, world: &World, events: &mut Vec<Event>) {
         let was_active = self.is_active();
         {
             let search = ui.add(TextEdit::singleline(&mut self.text).id(Id::unique(SEARCH_ID)).hint_text(t().filter_hint).desired_width(200.0));
-            // Pendant la frappe on estompe seulement ; Entrée cadre les correspondances.
+            // While typing we only dim; Enter frames the matches.
             let mut fit = search.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let mut changed = search.changed() || fit;
 
@@ -178,7 +178,7 @@ impl Filters {
                 }
             }
 
-            // Toujours présent (désactivé sans filtre) : rien ne se décale quand on filtre.
+            // Always present (disabled without a filter): nothing shifts when filtering.
             let shown = world.cards.iter().filter(|c| world.shows_card(c)).count();
             let matching = world.cards.iter().filter(|c| world.shows_card(c) && self.matches(world, c)).count();
             let clear_label = if self.is_active() { (t().clear_filter_count)(matching, shown) } else { t().clear_filter.into() };
@@ -232,7 +232,7 @@ mod tests {
             last_duration_secs: None,
             tail: vec![],
         });
-        a.name = Some("serveur".into());
+        a.name = Some("server".into());
         a.project = Some("api".into());
         let b = Card::new(Rect::from_min_size(pos2(5000.0, 10.0), Vec2::splat(100.0)), Some("/home/me/blog".into()));
         w.add_card(a);
@@ -255,9 +255,9 @@ mod tests {
     #[test]
     fn text_matches_title_cwd_command_and_project_words() {
         let w = world();
-        for (q, expected) in [("serveur", vec![0]), ("CARGO watch", vec![0]), ("backend", vec![0]), ("blog", vec![1]), ("api blog", vec![]), ("  ", vec![0, 1])] {
+        for (q, expected) in [("server", vec![0]), ("CARGO watch", vec![0]), ("backend", vec![0]), ("blog", vec![1]), ("api blog", vec![]), ("  ", vec![0, 1])] {
             let f = Filters { text: q.into(), ..Default::default() };
-            assert_eq!(matching(&f, &w), expected, "requête {q:?}");
+            assert_eq!(matching(&f, &w), expected, "query {q:?}");
         }
     }
 
@@ -293,9 +293,9 @@ mod tests {
     fn fit_target_stays_in_the_open_space() {
         let mut w = world();
         w.space = Some("api".into());
-        assert_eq!(Filters::default().fit_target(&w), Some(w.projects[0].rect), "le terminal hors projet est ignoré");
+        assert_eq!(Filters::default().fit_target(&w), Some(w.projects[0].rect), "the terminal outside any project is ignored");
         let f = Filters { text: "blog".into(), ..Default::default() };
-        assert_eq!(f.fit_target(&w), Some(w.projects[0].rect), "aucune correspondance visible : tout l'espace");
+        assert_eq!(f.fit_target(&w), Some(w.projects[0].rect), "no visible match: the whole space");
     }
 
     #[test]
@@ -303,12 +303,12 @@ mod tests {
         let mut f = Filters::default();
         f.click_status(StatusKind::Stalled, false);
         f.click_status(StatusKind::Running, false);
-        assert_eq!(f.statuses, BTreeSet::from([StatusKind::Running]), "un clic remplace");
+        assert_eq!(f.statuses, BTreeSet::from([StatusKind::Running]), "a click replaces");
         f.click_status(StatusKind::Idle, true);
-        assert_eq!(f.statuses, BTreeSet::from([StatusKind::Running, StatusKind::Idle]), "Ctrl+clic combine");
+        assert_eq!(f.statuses, BTreeSet::from([StatusKind::Running, StatusKind::Idle]), "Ctrl+click combines");
         f.click_status(StatusKind::Idle, false);
         f.click_status(StatusKind::Running, false);
-        assert!(f.statuses.is_empty(), "re-cliquer enlève");
+        assert!(f.statuses.is_empty(), "clicking again removes");
     }
 
     #[test]
@@ -316,9 +316,9 @@ mod tests {
         let mut w = world();
         let stalled = StatusKind::ALL.iter().position(|k| *k == StatusKind::Stalled).unwrap();
         assert_eq!(counts(&w)[stalled], 1);
-        w.projects.push(Project { id: "autre".into(), name: "autre".into(), color: [0; 3], rect: Rect::NOTHING, cwd: None });
-        w.space = Some("autre".into());
-        assert_eq!(counts(&w), [0; 6], "le terminal bloqué est dans un autre espace");
+        w.projects.push(Project { id: "other".into(), name: "other".into(), color: [0; 3], rect: Rect::NOTHING, cwd: None });
+        w.space = Some("other".into());
+        assert_eq!(counts(&w), [0; 6], "the stalled terminal is in another space");
     }
 
     #[test]
@@ -331,13 +331,13 @@ mod tests {
         f.click_status(StatusKind::Stalled, false);
         f.after_change(false, true, &w, &mut ev);
         assert!(matches!(ev.as_slice(), [Event::FitRect(r)] if *r == w.cards[0].rect), "{ev:?}");
-        // La vue a bougé pendant le filtre ; le retirer ramène celle d'avant.
+        // The view moved during the filter; removing it restores the earlier one.
         w.camera = Camera { center: pos2(1.0, 1.0), zoom: 1.0 };
         let mut ev = vec![];
         f.clear();
         f.after_change(true, false, &w, &mut ev);
         assert!(matches!(ev.as_slice(), [Event::FlyCamera(c)] if *c == before), "{ev:?}");
-        // Plus de vue retenue : un second effacement ne fait rien.
+        // No remembered view anymore: a second clear does nothing.
         let mut ev = vec![];
         f.after_change(false, false, &w, &mut ev);
         assert!(ev.is_empty());
@@ -353,7 +353,7 @@ mod tests {
         f.clear();
         let mut ev = vec![];
         f.after_change(true, false, &w, &mut ev);
-        assert!(ev.is_empty(), "la vue retenue appartenait à « Tous »");
+        assert!(ev.is_empty(), "the remembered view belonged to 'All'");
     }
 
     #[test]

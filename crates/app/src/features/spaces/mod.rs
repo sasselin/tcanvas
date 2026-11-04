@@ -1,5 +1,5 @@
-//! Espaces : chaque projet est un canevas à part, on n'en voit qu'un à la fois. « Tous » reste
-//! disponible comme vue d'ensemble pour organiser. Chaque espace retient sa propre caméra.
+//! Spaces: each project is a separate canvas, only one is visible at a time. "All" remains
+//! available as an overview for organizing. Each space remembers its own camera.
 
 use egui::{Button, Color32, Pos2, Rect, RichText, Ui, Vec2};
 
@@ -8,9 +8,9 @@ use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::world::{Camera, ProjectId, World};
 
-/// Fichiers modifiés depuis moins longtemps : le groupe est « en train d'écrire ».
+/// Files modified more recently than this: the group is "writing".
 const WRITING_SECS: u64 = 30;
-/// Vue de repli tant que le canevas n'a pas encore été mesuré (première frame).
+/// Fallback view until the canvas has been measured (first frame).
 const FALLBACK_VIEWPORT: Vec2 = Vec2::new(1280.0, 800.0);
 
 #[derive(Default)]
@@ -22,17 +22,17 @@ fn camera_key(space: Option<&str>) -> String {
     space.unwrap_or_default().to_string()
 }
 
-/// Tout ce que montre l'espace courant : ses cartes et ses cadres.
+/// Everything the current space shows: its cards and frames.
 pub fn space_bounds(world: &World) -> Option<Rect> {
     let cards = world.cards.iter().filter(|c| world.shows_card(c)).map(|c| c.rect);
     let projects = world.projects.iter().filter(|p| world.shows_project(p)).map(|p| p.rect);
     cards.chain(projects).reduce(|a, b| a.union(b))
 }
 
-/// Bascule vers `target`. Un projet s'ouvre toujours cadré sur tout son contenu (centré, prêt,
-/// en un seul clic) ; « Tous » reprend la vue d'ensemble laissée la dernière fois. Le terminal
-/// focalisé perd le clavier s'il n'est pas dans le nouvel espace. Renvoie `false` si `target`
-/// n'existe pas.
+/// Switches to `target`. A project always opens framed on all its content (centered, ready,
+/// in a single click); "All" restores the overview left last time. The focused terminal
+/// loses the keyboard if it is not in the new space. Returns `false` if `target`
+/// does not exist.
 pub fn enter(world: &mut World, target: Option<ProjectId>, vp: Rect) -> bool {
     if target.as_ref().is_some_and(|id| world.project(id).is_none()) {
         return false;
@@ -57,7 +57,7 @@ impl Spaces {
         self.viewport.filter(|r| r.is_positive()).unwrap_or(Rect::from_min_size(Pos2::ZERO, FALLBACK_VIEWPORT))
     }
 
-    /// Puces de la barre du haut : « Tous », puis un projet par puce. Une seule est active.
+    /// Top bar chips: "All", then one project per chip. Only one is active.
     pub fn ui(&mut self, ui: &mut Ui, world: &World, vp: Rect, events: &mut Vec<Event>) {
         self.viewport = Some(vp);
         if world.projects.is_empty() && world.space.is_none() {
@@ -74,9 +74,9 @@ impl Spaces {
         }
         for (n, p) in world.projects.iter().enumerate() {
             let on = world.space.as_ref() == Some(&p.id);
-            // Une cloche signale un terminal qui demande l'attention dans un autre espace.
+            // A bell flags a terminal asking for attention in another space.
             let calling = !on && world.members(&p.id).any(|c| c.attention);
-            // Un crayon signale des fichiers modifiés à l'instant dans le dossier d'un autre groupe.
+            // A pencil flags files just modified in another group's folder.
             let writing = !on && world.file_activity.get(&p.id).is_some_and(|&t| now.saturating_sub(t) < WRITING_SECS);
             let label = format!("● {}{}{}", p.name, if writing { " ✎" } else { "" }, if calling { " 🔔" } else { "" });
             let text = RichText::new(label).color(if on { theme::CARD_BG } else { theme::rgb(p.color) });
@@ -94,7 +94,7 @@ impl Spaces {
         match ev {
             Event::EnterSpace(target) => {
                 if &world.space == target {
-                    // Redemander l'espace courant le recadre.
+                    // Requesting the current space again reframes it.
                     if let Some(r) = space_bounds(world) {
                         out.push(Event::FitRect(r));
                     }
@@ -102,7 +102,7 @@ impl Spaces {
                     enter(world, target.clone(), vp);
                 }
             }
-            // Aller à un terminal caché : on ouvre d'abord son espace (avant le vol de la caméra).
+            // Going to a hidden terminal: open its space first (before the camera flight).
             Event::FlyTo(id) => {
                 if let Some(card) = world.card(id).filter(|c| !world.shows_card(c)) {
                     let target = world.project_of(card).map(|p| p.id.clone());
@@ -143,7 +143,7 @@ mod tests {
             c.project = Some(id.into());
             w.add_card(c);
         }
-        w.add_card(Card::with_id("seul".into(), Rect::from_min_size(pos2(-9000.0, 0.0), Vec2::new(500.0, 300.0)), None));
+        w.add_card(Card::with_id("alone".into(), Rect::from_min_size(pos2(-9000.0, 0.0), Vec2::new(500.0, 300.0)), None));
         w
     }
 
@@ -171,14 +171,14 @@ mod tests {
         w.camera = overview;
         handle(&mut s, &mut w, Event::EnterSpace(Some("api".into())));
         let framed = w.camera;
-        // On s'éloigne dans api, on passe par web, puis on revient : api est de nouveau cadré.
+        // Wander off in api, go through web, then come back: api is framed again.
         w.camera = Camera { center: pos2(-5000.0, 9000.0), zoom: 2.0 };
         handle(&mut s, &mut w, Event::EnterSpace(Some("web".into())));
-        assert!(vp().contains_rect(w.camera.rect_to_screen(w.projects[1].rect, vp()).shrink(1.0)), "web cadré dès le premier clic");
+        assert!(vp().contains_rect(w.camera.rect_to_screen(w.projects[1].rect, vp()).shrink(1.0)), "web framed on the first click");
         handle(&mut s, &mut w, Event::EnterSpace(Some("api".into())));
         assert_eq!(w.camera, framed);
         handle(&mut s, &mut w, Event::EnterSpace(None));
-        assert_eq!(w.camera, overview, "« Tous » reprend la vue d'ensemble");
+        assert_eq!(w.camera, overview, "'All' restores the overview");
     }
 
     #[test]
@@ -205,7 +205,7 @@ mod tests {
         let mut s = Spaces::default();
         w.focused = Some("api-1".into());
         handle(&mut s, &mut w, Event::EnterSpace(Some("api".into())));
-        assert_eq!(w.focused.as_deref(), Some("api-1"), "toujours visible : garde le clavier");
+        assert_eq!(w.focused.as_deref(), Some("api-1"), "still visible: keeps the keyboard");
         handle(&mut s, &mut w, Event::EnterSpace(Some("web".into())));
         assert_eq!(w.focused, None);
     }
@@ -217,10 +217,10 @@ mod tests {
         handle(&mut s, &mut w, Event::EnterSpace(Some("api".into())));
         handle(&mut s, &mut w, Event::FlyTo("web-1".into()));
         assert_eq!(w.space.as_deref(), Some("web"));
-        handle(&mut s, &mut w, Event::FlyTo("seul".into()));
-        assert_eq!(w.space, None, "un terminal hors projet n'existe que dans « Tous »");
+        handle(&mut s, &mut w, Event::FlyTo("alone".into()));
+        assert_eq!(w.space, None, "a terminal outside any project only exists in 'All'");
         handle(&mut s, &mut w, Event::FlyTo("api-1".into()));
-        assert_eq!(w.space, None, "déjà visible : on reste");
+        assert_eq!(w.space, None, "already visible: stay");
     }
 
     #[test]

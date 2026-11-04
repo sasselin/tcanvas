@@ -1,4 +1,4 @@
-//! Couleurs communes à toutes les slices.
+//! Colors shared by all slices.
 
 use egui::Color32;
 use protocol::TermStatus;

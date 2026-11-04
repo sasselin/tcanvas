@@ -1,14 +1,14 @@
-//! Polices : celles d'egui (dont les emoji monochromes), Hack en secours de la police
-//! proportionnelle, et les polices de symboles du système quand elles existent.
+//! Fonts: egui's own (including monochrome emoji), Hack as a fallback for the
+//! proportional font, and the system's symbol fonts when they exist.
 
 use std::sync::Arc;
 
 use egui::{FontData, FontDefinitions, FontFamily};
 
-/// Symboles utilisés par l'interface ; un test vérifie qu'ils existent dans les polices embarquées.
+/// Symbols used by the UI; a test checks that they exist in the embedded fonts.
 pub const UI_SYMBOLS: &str = "+●○■×◆⇄·—…⏸⌨✖✔⚠🔔";
 
-/// Polices système essayées en dernier recours (symboles et écritures rares des terminaux).
+/// System fonts tried as a last resort (symbols and rare scripts in terminals).
 const SYSTEM_FALLBACKS: &[&str] = &[
     r"C:\Windows\Fonts\seguisym.ttf",
     r"C:\Windows\Fonts\msgothic.ttc",
@@ -39,14 +39,14 @@ mod tests {
     #[test]
     fn ui_symbols_are_covered_by_bundled_fonts() {
         let ctx = egui::Context::default();
-        // Seulement les polices embarquées : le résultat ne doit pas dépendre de la machine.
+        // Embedded fonts only: the result must not depend on the machine.
         let mut defs = FontDefinitions::default();
         defs.families.get_mut(&FontFamily::Proportional).unwrap().insert(1, "Hack".to_owned());
         ctx.set_fonts(defs);
         let mut out = ctx.run_ui(Default::default(), |ui| {
             for family in [FontId::proportional(14.0), FontId::monospace(14.0)] {
                 for c in UI_SYMBOLS.chars() {
-                    assert!(ui.ctx().fonts_mut(|f| f.has_glyph(&family, c)), "{c:?} absent de {family:?}");
+                    assert!(ui.ctx().fonts_mut(|f| f.has_glyph(&family, c)), "{c:?} missing from {family:?}");
                 }
             }
         });

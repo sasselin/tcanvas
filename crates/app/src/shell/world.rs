@@ -1,5 +1,5 @@
-//! Données partagées par toutes les slices : cartes, projets, fils, caméra.
-//! Chaque slice lit le monde ; les modifications transverses passent par `Event`.
+//! Data shared by all slices: cards, projects, wires, camera.
+//! Every slice reads the world; cross-cutting changes go through `Event`.
 
 use std::collections::BTreeMap;
 
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 pub type CardId = String;
 pub type ProjectId = String;
 
-/// Horloge murale en secondes Unix (âge des fichiers modifiés).
+/// Wall clock in Unix seconds (age of modified files).
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -21,7 +21,7 @@ pub fn new_id() -> String {
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Camera {
-    /// Point du monde affiché au centre de l'écran.
+    /// World point shown at the center of the screen.
     pub center: Pos2,
     pub zoom: f32,
 }
@@ -35,21 +35,21 @@ impl Default for Camera {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Card {
     pub id: CardId,
-    /// Nom choisi par l'utilisateur ; sinon le titre est déduit de la commande ou du dossier.
+    /// Name chosen by the user; otherwise the title is derived from the command or folder.
     pub name: Option<String>,
     pub rect: Rect,
-    /// Dossier de départ (mis à jour depuis l'agent pour la restauration).
+    /// Starting folder (updated from the agent for restoring).
     pub cwd: Option<String>,
     pub stall_secs: u64,
-    /// Groupe (projet) auquel appartient le terminal. Le cadre du groupe s'ajuste à ses membres.
+    /// Group (project) the terminal belongs to. The group's frame fits its members.
     #[serde(default)]
     pub project: Option<ProjectId>,
     #[serde(skip)]
     pub info: Option<SessionInfo>,
-    /// Une notification attend que l'utilisateur regarde ce terminal.
+    /// A notification is waiting for the user to look at this terminal.
     #[serde(skip)]
     pub attention: bool,
-    /// Le client tmux de cette carte s'est terminé (session tuée, `exit`…).
+    /// This card's tmux client has exited (session killed, `exit`…).
     #[serde(skip)]
     pub pty_dead: bool,
     #[serde(skip)]
@@ -98,7 +98,7 @@ fn basename(path: &str) -> &str {
     path.trim_end_matches('/').rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("/")
 }
 
-/// `/usr/bin/python3 -m http.server` → `python3 -m http.server`, coupé à 40 caractères.
+/// `/usr/bin/python3 -m http.server` → `python3 -m http.server`, truncated to 40 characters.
 fn short_command(cmd: &str) -> String {
     let mut parts = cmd.splitn(2, ' ');
     let prog = basename(parts.next().unwrap_or_default());
@@ -114,9 +114,9 @@ pub struct Project {
     pub id: ProjectId,
     pub name: String,
     pub color: [u8; 3],
-    /// Cadre : calculé à partir des membres (`World::refit_projects`) ; sert de position au groupe vide.
+    /// Frame: computed from the members (`World::refit_projects`); positions the group when empty.
     pub rect: Rect,
-    /// Dossier lié : les nouveaux terminaux du projet s'y ouvrent, ses changements sont suivis.
+    /// Linked folder: the project's new terminals open there, and its changes are tracked.
     pub cwd: Option<String>,
 }
 
@@ -152,22 +152,22 @@ pub struct World {
     pub projects: Vec<Project>,
     pub wires: Vec<Wire>,
     pub camera: Camera,
-    /// Espace affiché : un projet seul, ou tous (`None`). Les autres sont cachés.
+    /// Displayed space: a single project, or all of them (`None`). The others are hidden.
     pub space: Option<ProjectId>,
-    /// Caméra retenue par espace (clé : id du projet, `""` pour « Tous »).
+    /// Camera remembered per space (key: project id, `""` for "All").
     pub space_cameras: BTreeMap<String, Camera>,
-    /// Carte qui reçoit le clavier.
+    /// Card that receives keyboard input.
     pub focused: Option<CardId>,
-    /// Carte en cours de glissement : le cadre de son groupe ne la suit pas tant qu'elle n'est pas posée.
+    /// Card being dragged: its group's frame doesn't follow it until it is dropped.
     pub dragging: Option<CardId>,
-    /// Panneau « Changements » ouvert (sauvegardé).
+    /// "Changes" panel open (saved).
     pub changes_open: bool,
-    /// Dernière modification de fichier vue dans le dossier lié de chaque projet (secondes Unix).
+    /// Last file modification seen in each project's linked folder (Unix seconds).
     pub file_activity: BTreeMap<ProjectId, u64>,
-    /// Nombre de fichiers non commités dans le dossier lié de chaque projet (pastille Δ).
+    /// Number of uncommitted files in each project's linked folder (Δ badge).
     pub change_counts: BTreeMap<ProjectId, usize>,
     pub window_focused: bool,
-    /// Incrémenté à chaque changement à sauvegarder.
+    /// Incremented on every change that needs saving.
     pub revision: u64,
     next_z: u64,
 }
@@ -193,7 +193,7 @@ impl World {
         self.projects.iter().find(|p| p.id == id)
     }
 
-    /// Met la carte au premier plan.
+    /// Brings the card to the front.
     pub fn raise(&mut self, id: &str) {
         self.next_z += 1;
         let z = self.next_z;
@@ -218,17 +218,17 @@ impl World {
         self.touch();
     }
 
-    /// Groupe auquel appartient la carte.
+    /// Group the card belongs to.
     pub fn project_of(&self, card: &Card) -> Option<&Project> {
         card.project.as_deref().and_then(|id| self.project(id))
     }
 
-    /// Terminaux membres du groupe.
+    /// Member terminals of the group.
     pub fn members<'a>(&'a self, project: &'a str) -> impl Iterator<Item = &'a Card> + 'a {
         self.cards.iter().filter(move |c| c.project.as_deref() == Some(project))
     }
 
-    /// La carte fait partie de l'espace affiché (membre du projet ouvert, ou tout dans « Tous »).
+    /// The card is part of the displayed space (member of the open project, or anything in "All").
     pub fn shows_card(&self, card: &Card) -> bool {
         match &self.space {
             None => true,
@@ -240,16 +240,16 @@ impl World {
         self.space.as_ref().is_none_or(|id| &project.id == id)
     }
 
-    /// Le terminal `anchor` vient d'être posé (ou redimensionné) : il garde sa place et les autres
-    /// membres de son groupe qui le chevauchent s'écartent, en cascade, le long de l'axe le plus court.
-    /// Rien ne bouge hors groupe. Renvoie `true` si une carte a bougé.
+    /// The terminal `anchor` was just placed (or resized): it keeps its spot and the other
+    /// members of its group that overlap it move aside, cascading, along the shortest axis.
+    /// Nothing outside the group moves. Returns `true` if a card moved.
     pub fn settle(&mut self, anchor: &str) -> bool {
         let Some(project) = self.card(anchor).and_then(|c| c.project.clone()) else { return false };
         let members: Vec<usize> = (0..self.cards.len()).filter(|&i| self.cards[i].project.as_ref() == Some(&project)).collect();
         let Some(&a) = members.iter().find(|&&i| self.cards[i].id == anchor) else { return false };
         let mut queue = std::collections::VecDeque::from([a]);
         let mut moved = false;
-        // Garde-fou : une disposition pathologique ne doit jamais bloquer l'interface.
+        // Safety net: a pathological layout must never freeze the UI.
         let mut budget = 50 * members.len();
         while let Some(c) = queue.pop_front() {
             for &m in &members {
@@ -275,15 +275,15 @@ impl World {
         moved
     }
 
-    /// Groupe visible dont le cadre contient `at` (le plus petit) : une carte lâchée là en devient membre.
+    /// Visible group whose frame contains `at` (the smallest): a card dropped there joins it.
     pub fn drop_target(&self, at: Pos2) -> Option<ProjectId> {
         self.projects.iter().filter(|p| self.shows_project(p) && p.rect.contains(at)).min_by(|a, b| a.rect.area().total_cmp(&b.rect.area())).map(|p| p.id.clone())
     }
 
-    /// Ajuste chaque cadre à ses terminaux (plus une marge). Pendant qu'on glisse un terminal, le
-    /// cadre de son groupe est gelé : il ne le suit pas, on peut donc l'en sortir. Un groupe vide
-    /// garde une taille minimale autour de son dernier centre.
-    /// Un cadre qui change de taille écarte ce qu'il touche (voir `separate`).
+    /// Fits each frame to its terminals (plus a margin). While a terminal is dragged, its
+    /// group's frame is frozen: it doesn't follow, so the terminal can be dragged out. An empty group
+    /// keeps a minimum size around its last center.
+    /// A frame that changes size pushes away what it touches (see `separate`).
     pub fn refit_projects(&mut self) {
         let frozen = self.dragging.as_deref().and_then(|id| self.card(id)).and_then(|c| c.project.clone());
         let mut changed = Vec::new();
@@ -309,17 +309,17 @@ impl World {
         }
     }
 
-    /// Ce qui ne doit jamais se chevaucher : les groupes (cadre et étiquette, avec leurs membres)
-    /// et les terminaux hors groupe.
+    /// What must never overlap: groups (frame and label, with their members)
+    /// and terminals outside any group.
     fn bodies(&self) -> Vec<Body> {
         let groups = self.projects.iter().map(|p| Body::Group(p.id.clone()));
         groups.chain(self.cards.iter().filter(|c| c.project.is_none()).map(|c| Body::Card(c.id.clone()))).collect()
     }
 
-    /// Emprise d'un corps sur le canevas (étiquette comprise pour un groupe).
+    /// Footprint of a body on the canvas (label included for a group).
     pub fn body_rect(&self, body: &Body) -> Option<Rect> {
         match body {
-            // L'étiquette dépasse au-dessus du cadre : elle compte aussi.
+            // The label sticks out above the frame: it counts too.
             Body::Group(id) => self.project(id).map(|p| Rect::from_min_max(p.rect.min - Vec2::new(0.0, GROUP_LABEL), p.rect.max)),
             Body::Card(id) => self.card(id).map(|c| c.rect),
         }
@@ -343,11 +343,11 @@ impl World {
         }
     }
 
-    /// `anchor` vient de changer (groupe agrandi, terminal posé ou créé) : tout ce qu'il chevauche
-    /// s'écarte, en cascade, le long de l'axe le plus court. Un terminal hors groupe cède toujours
-    /// face à un groupe (on ne pousse pas tout un groupe parce qu'un terminal l'a frôlé) ; entre
-    /// deux corps de même nature, c'est celui qui n'a pas bougé qui s'écarte. Renvoie `true` si
-    /// quelque chose a bougé.
+    /// `anchor` just changed (group grown, terminal placed or created): everything it overlaps
+    /// moves aside, cascading, along the shortest axis. A terminal outside any group always yields
+    /// to a group (we don't push a whole group because a terminal brushed it); between
+    /// two bodies of the same kind, the one that didn't move gives way. Returns `true` if
+    /// anything moved.
     pub fn separate(&mut self, anchor: &Body) -> bool {
         let bodies = self.bodies();
         let Some(a) = bodies.iter().position(|b| b == anchor) else { return false };
@@ -370,8 +370,8 @@ impl World {
                 let push = separation(rf, rm, BODY_GAP);
                 if push != Vec2::ZERO {
                     budget -= 1;
-                    // Un terminal libre saute à la place libre la plus proche (le pousser à
-                    // l'aveugle peut le coincer entre deux obstacles) ; un groupe est poussé.
+                    // A free terminal jumps to the nearest free spot (pushing it
+                    // blindly can wedge it between two obstacles); a group is pushed.
                     let delta = match &bodies[mobile] {
                         Body::Card(_) => self.clear_spot(&bodies[mobile], rm).center() - rm.center(),
                         Body::Group(_) => push,
@@ -390,7 +390,7 @@ impl World {
         moved
     }
 
-    /// Place la plus proche de `rect` qui ne touche aucun autre corps (écart compris).
+    /// Nearest spot to `rect` that touches no other body (gap included).
     fn clear_spot(&self, body: &Body, rect: Rect) -> Rect {
         let obstacles: Vec<Rect> = self.bodies().iter().filter(|b| *b != body).filter_map(|b| self.body_rect(b)).map(|r| r.expand(BODY_GAP)).collect();
         let step = 40.0;
@@ -407,8 +407,8 @@ impl World {
         rect
     }
 
-    /// Un corps qui vient d'apparaître (nouveau groupe) va à la place libre la plus proche, sans
-    /// rien pousser. Renvoie `true` s'il a bougé.
+    /// A body that just appeared (new group) goes to the nearest free spot, without
+    /// pushing anything. Returns `true` if it moved.
     pub fn place_clear(&mut self, body: &Body) -> bool {
         let Some(r) = self.body_rect(body) else { return false };
         let delta = self.clear_spot(body, r).center() - r.center();
@@ -420,21 +420,21 @@ impl World {
         true
     }
 
-    /// Remet tout en ordre (chargement d'un ancien layout où des choses se chevauchent).
+    /// Puts everything back in order (loading an old layout where things overlap).
     pub fn separate_all(&mut self) {
         for body in self.bodies() {
             self.separate(&body);
         }
     }
 
-    /// Ordre de dessin : du fond vers le premier plan.
+    /// Draw order: from back to front.
     pub fn cards_by_z(&self) -> Vec<usize> {
         let mut order: Vec<usize> = (0..self.cards.len()).collect();
         order.sort_by_key(|&i| self.cards[i].z);
         order
     }
 
-    /// Une place libre près de `near` pour une carte de taille `size` (spirale de pas en pas).
+    /// A free spot near `near` for a card of size `size` (step-by-step spiral).
     pub fn free_spot(&self, near: Pos2, size: Vec2) -> Rect {
         let step = 40.0;
         for ring in 0..60 {
@@ -451,23 +451,23 @@ impl World {
     }
 }
 
-/// Ce qui ne doit pas se chevaucher sur le canevas : un groupe entier, ou un terminal hors groupe.
+/// What must not overlap on the canvas: a whole group, or a terminal outside any group.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Body {
     Group(ProjectId),
     Card(CardId),
 }
 
-/// Espace minimal entre deux groupes, ou un groupe et un terminal hors groupe.
+/// Minimum spacing between two groups, or a group and a terminal outside any group.
 pub const BODY_GAP: f32 = 60.0;
-/// Hauteur réservée à l'étiquette au-dessus d'un cadre (unités monde).
+/// Height reserved for the label above a frame (world units).
 const GROUP_LABEL: f32 = 40.0;
 
-/// Espace minimal entre deux terminaux d'un même groupe.
+/// Minimum spacing between two terminals of the same group.
 pub const CARD_GAP: f32 = 24.0;
 
-/// Déplacement à appliquer à `mobile` pour qu'il ne chevauche plus `fixed` (écart `gap` compris) :
-/// le long de l'axe où il faut bouger le moins, en s'éloignant du centre de `fixed`.
+/// Offset to apply to `mobile` so it no longer overlaps `fixed` (`gap` included):
+/// along the axis needing the least movement, away from the center of `fixed`.
 pub fn separation(fixed: Rect, mobile: Rect, gap: f32) -> Vec2 {
     let f = fixed.expand(gap / 2.0);
     let m = mobile.expand(gap / 2.0);
@@ -483,12 +483,12 @@ pub fn separation(fixed: Rect, mobile: Rect, gap: f32) -> Vec2 {
     if dx.abs() <= dy.abs() { Vec2::new(dx, 0.0) } else { Vec2::new(0.0, dy) }
 }
 
-/// Marge entre les terminaux et le cadre de leur groupe.
+/// Margin between the terminals and their group's frame.
 pub const PROJECT_PAD: f32 = 40.0;
-/// Taille d'un groupe sans terminal.
+/// Size of a group with no terminal.
 pub const EMPTY_PROJECT: Vec2 = Vec2::new(600.0, 400.0);
 
-/// Plus petit cadre qui contient le point (cible d'un dépôt, migration des anciens layouts).
+/// Smallest frame containing the point (drop target, migration of old layouts).
 pub fn project_at(projects: &[Project], p: Pos2) -> Option<&Project> {
     projects
         .iter()
@@ -509,8 +509,8 @@ mod tests {
     fn titles_fall_back_from_name_to_command_to_cwd() {
         let mut c = card_at(0.0, 0.0);
         assert_eq!(c.title(), "terminal");
-        c.cwd = Some("/home/me/projet/".into());
-        assert_eq!(c.title(), "projet");
+        c.cwd = Some("/home/me/project/".into());
+        assert_eq!(c.title(), "project");
         c.info = Some(SessionInfo {
             session: c.session(),
             status: TermStatus::Running,
@@ -566,12 +566,12 @@ mod tests {
         w.add_card(member(5100.0, 100.0, "web"));
         w.add_card(card_at(-9000.0, 0.0));
         let shown = |w: &World| (w.cards.iter().map(|c| w.shows_card(c)).collect::<Vec<_>>(), w.projects.iter().map(|p| w.shows_project(p)).collect::<Vec<_>>());
-        assert_eq!(shown(&w), (vec![true; 3], vec![true; 2]), "« Tous » montre tout");
+        assert_eq!(shown(&w), (vec![true; 3], vec![true; 2]), "'All' shows everything");
         w.space = Some("api".into());
         assert_eq!(shown(&w), (vec![true, false, false], vec![true, false]));
         w.space = Some("web".into());
         assert_eq!(shown(&w), (vec![false, true, false], vec![false, true]));
-        w.space = Some("disparu".into());
+        w.space = Some("gone".into());
         assert_eq!(shown(&w).0, vec![false; 3]);
     }
 
@@ -582,13 +582,13 @@ mod tests {
         w.add_card(member(400.0, 100.0, "api"));
         w.refit_projects();
         let expected = Rect::from_min_max(pos2(100.0, 100.0), pos2(500.0, 160.0)).expand(PROJECT_PAD);
-        assert_eq!(w.projects[0].rect, expected, "rétrécit autour des membres");
+        assert_eq!(w.projects[0].rect, expected, "shrinks around the members");
         w.cards[1].rect = w.cards[1].rect.translate(vec2(1000.0, 0.0));
         w.refit_projects();
-        assert_eq!(w.projects[0].rect.max.x, 1500.0 + PROJECT_PAD, "grandit avec eux");
+        assert_eq!(w.projects[0].rect.max.x, 1500.0 + PROJECT_PAD, "grows with them");
         let rev = w.revision;
         w.refit_projects();
-        assert_eq!(w.revision, rev, "stable : rien à sauvegarder");
+        assert_eq!(w.revision, rev, "stable: nothing to save");
     }
 
     #[test]
@@ -605,10 +605,10 @@ mod tests {
             w.card_mut(&ib).unwrap().rect = w.card(&ib).unwrap().rect.translate(vec2(300.0, 0.0));
             w.refit_projects();
         }
-        assert_eq!(w.projects[0].rect, before, "le cadre ne suit pas la carte glissée");
+        assert_eq!(w.projects[0].rect, before, "the frame doesn't follow the dragged card");
         w.dragging = None;
         w.refit_projects();
-        assert!(w.projects[0].rect.width() > before.width(), "posée : le cadre l'englobe");
+        assert!(w.projects[0].rect.width() > before.width(), "dropped: the frame contains it");
         w.cards.clear();
         w.refit_projects();
         assert_eq!(w.projects[0].rect.size(), EMPTY_PROJECT);
@@ -617,7 +617,7 @@ mod tests {
     #[test]
     fn a_dropped_card_keeps_its_place_and_pushes_its_neighbours_aside() {
         let mut w = World::default();
-        // a et b côte à côte ; c lâchée en plein sur a.
+        // a and b side by side; c dropped right on top of a.
         let (a, b, c) = (member(0.0, 0.0, "api"), member(130.0, 0.0, "api"), member(30.0, 20.0, "api"));
         let outsider = card_at(40.0, 10.0);
         let (ia, ic, io) = (a.id.clone(), c.id.clone(), outsider.id.clone());
@@ -626,27 +626,27 @@ mod tests {
         }
         let dropped = w.card(&ic).unwrap().rect;
         assert!(w.settle(&ic));
-        assert_eq!(w.card(&ic).unwrap().rect, dropped, "la carte posée garde sa place");
+        assert_eq!(w.card(&ic).unwrap().rect, dropped, "the dropped card keeps its spot");
         let rects: Vec<Rect> = w.members("api").map(|c| c.rect).collect();
         for i in 0..rects.len() {
             for j in i + 1..rects.len() {
-                assert!(!rects[i].expand(CARD_GAP / 2.0 - 0.01).intersects(rects[j].expand(CARD_GAP / 2.0 - 0.01)), "chevauchement {i}/{j} : {rects:?}");
+                assert!(!rects[i].expand(CARD_GAP / 2.0 - 0.01).intersects(rects[j].expand(CARD_GAP / 2.0 - 0.01)), "overlap {i}/{j}: {rects:?}");
             }
         }
-        assert_eq!(w.card(&io).unwrap().rect.min, pos2(40.0, 10.0), "hors groupe : intouché");
-        assert!(w.card(&ia).unwrap().rect.min != pos2(0.0, 0.0), "a s'est écartée");
+        assert_eq!(w.card(&io).unwrap().rect.min, pos2(40.0, 10.0), "outside the group: untouched");
+        assert!(w.card(&ia).unwrap().rect.min != pos2(0.0, 0.0), "a moved aside");
         let rev = w.revision;
-        assert!(!w.settle(&ic), "déjà rangé : rien ne bouge");
+        assert!(!w.settle(&ic), "already settled: nothing moves");
         assert_eq!(w.revision, rev);
     }
 
-    /// Aucun groupe (étiquette comprise) ni terminal libre ne se chevauche.
+    /// No group (label included) or free terminal overlaps another.
     fn assert_no_collision(w: &World) {
         let bodies = w.bodies();
         for i in 0..bodies.len() {
             for j in i + 1..bodies.len() {
                 let (a, b) = (w.body_rect(&bodies[i]).unwrap(), w.body_rect(&bodies[j]).unwrap());
-                assert!(!a.intersects(b), "{:?} {a:?} chevauche {:?} {b:?}", bodies[i], bodies[j]);
+                assert!(!a.intersects(b), "{:?} {a:?} overlaps {:?} {b:?}", bodies[i], bodies[j]);
             }
         }
     }
@@ -663,14 +663,14 @@ mod tests {
         w.separate_all();
         assert_no_collision(&w);
         let web_before = w.card(&iw).unwrap().rect;
-        // api reçoit un grand terminal : son cadre grandit vers web, qui pousse db.
+        // api gets a big terminal: its frame grows toward web, which pushes db.
         let mut big = member(0.0, 0.0, "api");
         big.rect = Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(900.0, 200.0));
         w.add_card(big);
         w.refit_projects();
         assert_no_collision(&w);
-        assert!(w.card(&iw).unwrap().rect.min.x > web_before.min.x || w.card(&iw).unwrap().rect.min.y != web_before.min.y, "web et son terminal se sont écartés ensemble");
-        assert!(w.projects[1].rect.contains_rect(w.card(&iw).unwrap().rect), "le terminal reste dans son cadre");
+        assert!(w.card(&iw).unwrap().rect.min.x > web_before.min.x || w.card(&iw).unwrap().rect.min.y != web_before.min.y, "web and its terminal moved aside together");
+        assert!(w.projects[1].rect.contains_rect(w.card(&iw).unwrap().rect), "the terminal stays in its frame");
     }
 
     #[test]
@@ -679,20 +679,20 @@ mod tests {
         w.add_card(member(0.0, 0.0, "api"));
         w.refit_projects();
         let api = w.projects[0].rect;
-        // Terminal libre posé à cheval sur le bord du cadre : c'est lui qui s'écarte, pas le groupe.
+        // Free terminal dropped across the frame's edge: it moves aside, not the group.
         let free = card_at(api.max.x - 30.0, 0.0);
         let other = card_at(api.max.x + 60.0, 10.0);
         let (ifree, iother) = (free.id.clone(), other.id.clone());
         w.add_card(free);
         w.add_card(other);
         assert!(w.separate(&Body::Card(ifree.clone())));
-        assert_eq!(w.projects[0].rect, api, "le groupe n'a pas bougé");
+        assert_eq!(w.projects[0].rect, api, "the group didn't move");
         assert_no_collision(&w);
         assert!(w.card(&iother).is_some());
     }
 
-    /// Scénarios pseudo-aléatoires (déterministes) : des groupes qui reçoivent des terminaux et
-    /// grandissent, des terminaux libres posés n'importe où. Jamais de chevauchement à la fin.
+    /// Pseudo-random (deterministic) scenarios: groups that receive terminals and
+    /// grow, free terminals dropped anywhere. Never any overlap at the end.
     #[test]
     fn nothing_ever_overlaps_under_random_growth() {
         let mut seed: u64 = 0x5eed;
@@ -734,7 +734,7 @@ mod tests {
         let fixed = Rect::from_min_size(Pos2::ZERO, Vec2::new(100.0, 60.0));
         assert_eq!(separation(fixed, Rect::from_min_size(pos2(90.0, 0.0), Vec2::new(100.0, 60.0)), 0.0), vec2(10.0, 0.0));
         assert_eq!(separation(fixed, Rect::from_min_size(pos2(0.0, -50.0), Vec2::new(100.0, 60.0)), 0.0), vec2(0.0, -10.0));
-        assert_eq!(separation(fixed, Rect::from_min_size(pos2(105.0, 0.0), Vec2::new(100.0, 60.0)), 10.0), vec2(5.0, 0.0), "l'écart compte");
+        assert_eq!(separation(fixed, Rect::from_min_size(pos2(105.0, 0.0), Vec2::new(100.0, 60.0)), 10.0), vec2(5.0, 0.0), "the gap counts");
         assert_eq!(separation(fixed, Rect::from_min_size(pos2(300.0, 0.0), Vec2::new(100.0, 60.0)), 10.0), Vec2::ZERO);
     }
 
@@ -773,9 +773,9 @@ mod tests {
         w.projects.push(project("new", Rect::from_center_size(pos2(50.0, 30.0), EMPTY_PROJECT)));
         assert!(w.place_clear(&Body::Group("new".into())));
         let (old, new) = (w.body_rect(&Body::Group("old".into())).unwrap(), w.body_rect(&Body::Group("new".into())).unwrap());
-        assert_eq!(w.projects[0].rect, before, "l'existant ne bouge pas");
+        assert_eq!(w.projects[0].rect, before, "the existing one doesn't move");
         assert!(!old.expand(BODY_GAP / 2.0 - 0.01).intersects(new.expand(BODY_GAP / 2.0 - 0.01)), "{old:?} / {new:?}");
-        assert!(!w.place_clear(&Body::Group("new".into())), "déjà libre : ne bouge plus");
+        assert!(!w.place_clear(&Body::Group("new".into())), "already clear: no longer moves");
     }
 
     #[test]

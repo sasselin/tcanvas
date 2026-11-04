@@ -1,4 +1,4 @@
-//! Lecture de l'état des sessions tmux du canevas (`tmux -L tcanvas`).
+//! Reads the state of the canvas tmux sessions (`tmux -L tcanvas`).
 
 use std::io;
 use std::process::{Command, Output};
@@ -13,9 +13,9 @@ pub struct PaneRow {
     pub pane_pid: u32,
     pub dead: bool,
     pub alternate: bool,
-    /// Horodatage (s) de la dernière sortie affichée.
+    /// Timestamp (s) of the last displayed output.
     pub activity: u64,
-    /// Valeurs posées par les hooks shell.
+    /// Values set by the shell hooks.
     pub started: Option<u64>,
     pub ended: Option<u64>,
     pub exit: Option<i32>,
@@ -26,7 +26,7 @@ fn tmux(args: &[&str]) -> io::Result<Output> {
     Command::new("tmux").arg("-L").arg(protocol::tmux_socket()).args(args).output()
 }
 
-/// Pane actif de chaque session `tc_*`. Aucune session si le serveur ne tourne pas.
+/// Active pane of each `tc_*` session. No sessions if the server is not running.
 pub fn list_panes() -> io::Result<Vec<PaneRow>> {
     let out = tmux(&["list-panes", "-a", "-F", FORMAT])?;
     if !out.status.success() {
@@ -57,7 +57,7 @@ fn parse_row(line: &str) -> Option<PaneRow> {
     })
 }
 
-/// Les `n` dernières lignes non vides de l'écran visible.
+/// The last `n` non-empty lines of the visible screen.
 pub fn capture_tail(session: &str, n: usize) -> Vec<String> {
     let Ok(out) = tmux(&["capture-pane", "-p", "-t", session]) else {
         return Vec::new();
@@ -85,7 +85,7 @@ mod tests {
     fn parses_active_canvas_panes_only() {
         let out = "tc_a\t1\t1\t42\t0\t0\t1700\t1690\t1695\t3\t/home/me/my\tdir\n\
                    tc_a\t0\t1\t43\t0\t0\t1700\t\t\t\t/tmp\n\
-                   perso\t1\t1\t44\t0\t0\t1700\t\t\t\t/tmp\n\
+                   personal\t1\t1\t44\t0\t0\t1700\t\t\t\t/tmp\n\
                    tc_b\t1\t1\t45\t1\t1\t1600\t\t\t\t/\n";
         let rows = parse_rows(out);
         assert_eq!(rows.len(), 2);

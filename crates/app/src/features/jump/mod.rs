@@ -1,5 +1,5 @@
-//! Palette « aller à » (Ctrl+Maj+K) : recherche floue parmi les terminaux et les projets,
-//! Entrée pour y voler.
+//! "Go to" palette (Ctrl+Shift+K): fuzzy search among terminals and projects,
+//! Enter to fly there.
 
 use egui::{Align2, Id, Key, Modal, Modifiers, RichText, TextEdit};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
@@ -23,9 +23,9 @@ pub struct Candidate {
     pub z: u64,
 }
 
-/// Sans requête : terminaux qui réclament l'attention, puis projets (dans l'ordre de leurs
-/// raccourcis), puis terminaux récemment utilisés. Avec requête : score flou décroissant ;
-/// à score égal, le projet passe devant.
+/// No query: terminals asking for attention, then projects (in the order of their
+/// shortcuts), then recently used terminals. With a query: descending fuzzy score;
+/// on equal score, the project comes first.
 pub fn rank(query: &str, candidates: &[Candidate]) -> Vec<Target> {
     let query = query.trim();
     let group = |c: &Candidate| match (&c.target, c.attention) {
@@ -75,7 +75,7 @@ pub fn candidates(world: &World) -> Vec<Candidate> {
     projects.chain(cards).collect()
 }
 
-/// Ce que fait le choix d'une cible.
+/// What choosing a target does.
 pub fn go_to(world: &World, target: &Target) -> Option<Event> {
     match target {
         Target::Card(id) => Some(Event::FlyTo(id.clone())),
@@ -195,7 +195,7 @@ mod tests {
     fn fuzzy_query_ranks_best_match_first() {
         let list = [
             card("blog", "blog  /home/me/blog zola serve", false, 5),
-            card("api", "serveur Backend API /srv/api cargo watch", false, 1),
+            card("api", "server Backend API /srv/api cargo watch", false, 1),
             card("db", "psql  /srv/db psql", false, 3),
         ];
         assert_eq!(rank("api", &list)[0], c("api"));
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn projects_are_found_by_name() {
-        let list = [card("t", "serveur Backend /srv/api", false, 1), project("p", "Backend ~/api")];
-        assert_eq!(rank("backend", &list)[0], Target::Project("p".into()), "à score égal, le projet d'abord");
+        let list = [card("t", "server Backend /srv/api", false, 1), project("p", "Backend ~/api")];
+        assert_eq!(rank("backend", &list)[0], Target::Project("p".into()), "on equal score, the project first");
     }
 }

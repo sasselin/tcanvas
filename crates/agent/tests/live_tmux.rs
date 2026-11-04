@@ -1,5 +1,5 @@
-//! Test de bout en bout : vrai serveur tmux jetable + vrai binaire `tcanvas-agent`.
-//! Ignoré proprement si tmux ou zsh ne sont pas installés.
+//! End-to-end test: real throwaway tmux server + real `tcanvas-agent` binary.
+//! Skipped cleanly if tmux or zsh is not installed.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -18,7 +18,7 @@ struct Server {
 impl Server {
     fn tmux(&self, args: &[&str]) {
         let ok = Command::new("tmux").arg("-L").arg(&self.socket).args(args).status().unwrap().success();
-        assert!(ok, "tmux {args:?} a échoué");
+        assert!(ok, "tmux {args:?} failed");
     }
     fn type_line(&self, session: &str, line: &str) {
         self.tmux(&["send-keys", "-t", session, "-l", line]);
@@ -33,7 +33,7 @@ impl Drop for Server {
     }
 }
 
-/// Supprime le fichier de socket que tmux laisse après `kill-server`.
+/// Removes the socket file tmux leaves behind after `kill-server`.
 fn remove_socket_file(socket: &str) {
     use std::os::unix::fs::MetadataExt;
     let uid = std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0);
@@ -61,7 +61,7 @@ impl Agent {
         let (tx, events) = mpsc::channel();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                let _ = tx.send(protocol::decode(&line).expect("ligne JSON valide"));
+                let _ = tx.send(protocol::decode(&line).expect("valid JSON line"));
             }
         });
         Agent { child, stdin, events }
@@ -82,7 +82,7 @@ impl Agent {
                 Err(_) => break,
             }
         }
-        panic!("attendu : {what}\nreçu : {seen:#?}");
+        panic!("expected: {what}\nreceived: {seen:#?}");
     }
 
     fn wait_status(&self, session: &str, what: &str, pred: impl Fn(&SessionInfo) -> bool) -> SessionInfo {
@@ -106,19 +106,19 @@ fn has(bin: &str) -> bool {
 #[test]
 fn reports_running_stalled_failed_question_and_gone() {
     if !has("tmux") || !has("zsh") {
-        eprintln!("tmux ou zsh absent : test ignoré");
+        eprintln!("tmux or zsh missing: test skipped");
         return;
     }
     let server = Server { socket: format!("tcanvas-test-{}", std::process::id()) };
     let session = "tc_live";
 
-    // Hooks dans un fichier temporaire. Le nom du socket contient « tcanvas », ce qui les active.
+    // Hooks in a temporary file. The socket name contains "tcanvas", which enables them.
     let hooks = std::env::temp_dir().join(format!("tcanvas-hooks-{}.zsh", std::process::id()));
     let out = Command::new(AGENT).arg("hooks").output().unwrap();
     std::fs::write(&hooks, &out.stdout).unwrap();
 
     server.tmux(&["new-session", "-d", "-s", session, "-x", "100", "-y", "20", "zsh -f -i"]);
-    server.tmux(&["new-session", "-d", "-s", "perso", "zsh -f -i"]);
+    server.tmux(&["new-session", "-d", "-s", "personal", "zsh -f -i"]);
     thread::sleep(Duration::from_millis(300));
     server.type_line(session, &format!("source {}", hooks.display()));
 
@@ -131,23 +131,23 @@ fn reports_running_stalled_failed_question_and_gone() {
     let running = agent.wait_status(session, "Running", |i| i.status == TermStatus::Running);
     assert_eq!(running.command.as_deref(), Some("sleep 4"));
     agent.wait_status(session, "Stalled", |i| i.status == TermStatus::Stalled);
-    let done = agent.wait_status(session, "Idle après sleep", |i| i.status == TermStatus::Idle && i.last_exit == Some(0));
-    assert!(matches!(done.last_duration_secs, Some(3..=5)), "durée {:?}", done.last_duration_secs);
+    let done = agent.wait_status(session, "Idle after sleep", |i| i.status == TermStatus::Idle && i.last_exit == Some(0));
+    assert!(matches!(done.last_duration_secs, Some(3..=5)), "duration {:?}", done.last_duration_secs);
 
     server.type_line(session, "false");
     let failed = agent.wait_status(session, "Exited(1)", |i| i.status == TermStatus::Exited(1));
     assert_eq!(failed.last_exit, Some(1));
 
-    server.type_line(session, r#"sh -c 'printf "Continuer ? [y/N] "; read x'"#);
+    server.type_line(session, r#"sh -c 'printf "Continue? [y/N] "; read x'"#);
     let asking = agent.wait_status(session, "WaitingInput", |i| i.status == TermStatus::WaitingInput);
     assert!(asking.tail.last().unwrap().ends_with("[y/N]"), "tail {:?}", asking.tail);
     server.type_line(session, "y");
-    agent.wait_status(session, "Idle après réponse", |i| i.status == TermStatus::Idle);
+    agent.wait_status(session, "Idle after answer", |i| i.status == TermStatus::Idle);
 
-    // La session « perso » (sans préfixe tc_) n'est jamais rapportée.
+    // The "personal" session (no tc_ prefix) is never reported.
     agent.send(&AgentCmd::Kill { session: session.into() });
     agent.wait_for("Gone", |ev| matches!(ev, AgentEvent::Gone { session: s } if s == session));
-    assert!(agent.events.try_iter().all(|ev| !matches!(ev, AgentEvent::Session(i) if i.session == "perso")));
+    assert!(agent.events.try_iter().all(|ev| !matches!(ev, AgentEvent::Session(i) if i.session == "personal")));
 
     let _ = std::fs::remove_file(hooks);
 }
@@ -159,40 +159,40 @@ fn proc_alive(cmd: &str) -> bool {
 #[test]
 fn kill_stops_every_process_even_stubborn_ones() {
     if !has("tmux") || !has("zsh") {
-        eprintln!("tmux ou zsh absent : test ignoré");
+        eprintln!("tmux or zsh missing: test skipped");
         return;
     }
     let server = Server { socket: format!("tcanvas-kill-{}", std::process::id()) };
     let session = "tc_stubborn";
-    // Durées uniques pour ne viser que nos processus.
+    // Unique durations so we only target our own processes.
     let base = 700_000 + std::process::id() % 100_000;
     let cmds: Vec<String> = (0..4).map(|k| format!("sleep {}", base + k)).collect();
 
     server.tmux(&["new-session", "-d", "-s", session, "-x", "120", "-y", "30", "zsh -f -i"]);
-    server.tmux(&["new-session", "-d", "-s", "tc_voisin", "zsh -f -i"]);
+    server.tmux(&["new-session", "-d", "-s", "tc_neighbor", "zsh -f -i"]);
     thread::sleep(Duration::from_millis(300));
-    // Shell et enfants qui ignorent SIGHUP et SIGTERM, nohup, setsid, et une commande au premier plan.
+    // Shell and children ignoring SIGHUP and SIGTERM, nohup, setsid, and a foreground command.
     server.type_line(session, &format!("trap '' HUP TERM; {} &", cmds[0]));
     server.type_line(session, &format!("nohup {} >/dev/null 2>&1 &", cmds[1]));
     server.type_line(session, &format!("setsid {} &", cmds[2]));
     server.type_line(session, &cmds[3]);
-    server.type_line("tc_voisin", &format!("sleep {}", base + 9));
+    server.type_line("tc_neighbor", &format!("sleep {}", base + 9));
     let deadline = Instant::now() + Duration::from_secs(5);
     while !cmds.iter().all(|c| proc_alive(c)) {
-        assert!(Instant::now() < deadline, "processus de test non démarrés");
+        assert!(Instant::now() < deadline, "test processes did not start");
         thread::sleep(Duration::from_millis(100));
     }
 
     let out = Command::new(AGENT).args(["kill", session]).env("TCANVAS_TMUX_SOCKET", &server.socket).output().unwrap();
     let report = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success(), "kill : {report} {}", String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "kill: {report} {}", String::from_utf8_lossy(&out.stderr));
     assert!(report.contains("SIGKILL"), "{report}");
 
     for c in &cmds {
-        assert!(!proc_alive(c), "{c} a survécu");
+        assert!(!proc_alive(c), "{c} survived");
     }
     let has_session = |s: &str| Command::new("tmux").args(["-L", &server.socket, "has-session", "-t", s]).status().unwrap().success();
-    assert!(!has_session(session), "session supprimée");
-    assert!(has_session("tc_voisin"), "les autres sessions ne sont pas touchées");
-    assert!(proc_alive(&format!("sleep {}", base + 9)), "ni leurs processus");
+    assert!(!has_session(session), "session removed");
+    assert!(has_session("tc_neighbor"), "other sessions are untouched");
+    assert!(proc_alive(&format!("sleep {}", base + 9)), "nor their processes");
 }
