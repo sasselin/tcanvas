@@ -429,7 +429,7 @@ fn jump() {
     demo_canvas(&mut h);
     ctrl_shift(&h, Key::Num0);
     steps(&mut h, 45);
-    ctrl_shift(&h, Key::K);
+    ctrl_shift(&h, Key::P);
     steps(&mut h, 2);
     assert!(h.state().jump_open());
     h.event(egui::Event::Text("cla".into()));

@@ -44,7 +44,7 @@ for watching what Claude (or any other AI agent) is doing while it works.
 
 ![The "Changes" panel: uncommitted files, a live diff and the recent commits](docs/screenshots/changes.png)
 
-![The "go to" palette (Ctrl+Shift+K), across every project](docs/screenshots/jump.png)
+![The "go to" palette (Ctrl+Shift+P), across every project](docs/screenshots/jump.png)
 
 ## Installation
 
@@ -107,13 +107,13 @@ Global shortcuts (they work even when a terminal has the keyboard):
 | Shortcut | Effect |
 |---|---|
 | `Ctrl+Shift+1` … `9` | Open project 1 to 9 (number shown on its label; physical keys, so AZERTY works too) |
-| `Ctrl+Shift+K` | "Go to" palette: terminals **and projects** from every space (opens the right project) |
+| `Ctrl+Shift+P` | "Go to" palette: terminals **and projects** from every space (opens the right project) |
 | `Ctrl+Shift+N` | New terminal |
 | `Ctrl+Shift+W` | Close the focused terminal (confirmation: Enter closes, Esc cancels) |
 | `Ctrl+Shift+F` | Filter (Enter: frame the matches) |
 | `Ctrl+Shift+0` | Show all (in the open space) |
 
-Ctrl+C, Ctrl+K, Ctrl+plus/minus, Esc, Tab… go to the terminal. Ctrl+V and `Ctrl+Shift+V` paste.
+Ctrl+C, Ctrl+K, Ctrl+P, Ctrl+plus/minus, Esc, Tab… go to the terminal. Ctrl+V and `Ctrl+Shift+V` paste.
 A mouse selection (in tmux) is copied to the Windows clipboard; `Ctrl+Shift+C` never sends ^C.
 
 **Spaces**: each project is a separate canvas. Only one is visible at a time; a terminal created

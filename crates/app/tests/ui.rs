@@ -130,7 +130,7 @@ fn jump_palette_flies_to_the_chosen_terminal() {
     add_card(&mut h, "api", Pos2::ZERO);
     let far = add_card(&mut h, "database", pos2(20_000.0, 9_000.0));
     steps(&mut h, 2);
-    ctrl_shift(&h, Key::K);
+    ctrl_shift(&h, Key::P);
     steps(&mut h, 2);
     assert!(h.state().jump_open());
     h.event(egui::Event::Text("data".into()));
@@ -424,7 +424,7 @@ fn palette_finds_projects() {
     add_card(&mut h, "api", Pos2::ZERO);
     steps(&mut h, 2);
     let far = project_rect(&h, &billing);
-    ctrl_shift(&h, Key::K);
+    ctrl_shift(&h, Key::P);
     steps(&mut h, 2);
     h.event(egui::Event::Text("bill".into()));
     steps(&mut h, 2);
@@ -510,7 +510,7 @@ fn going_to_a_hidden_terminal_opens_its_project() {
     steps(&mut h, 2);
     h.get_by_label("● api").click();
     steps(&mut h, 3);
-    ctrl_shift(&h, Key::K);
+    ctrl_shift(&h, Key::P);
     steps(&mut h, 2);
     h.event(egui::Event::Text("deploy".into()));
     steps(&mut h, 2);
@@ -1264,7 +1264,7 @@ fn scrolling_over_a_terminal_or_a_window_never_moves_the_canvas() {
     }
 
     // A window over the canvas ("go to" palette): it keeps the wheel.
-    ctrl_shift(&h, Key::K);
+    ctrl_shift(&h, Key::P);
     steps(&mut h, 2);
     let p = h.state().viewport().center();
     wheel_at(&mut h, p, -120.0);

@@ -1,4 +1,4 @@
-//! "Go to" palette (Ctrl+Shift+K): fuzzy search among terminals and projects,
+//! "Go to" palette (Ctrl+Shift+P): fuzzy search among terminals and projects,
 //! Enter to fly there.
 
 use egui::{Align2, Id, Key, Modal, Modifiers, RichText, TextEdit};

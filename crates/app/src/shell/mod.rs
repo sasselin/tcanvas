@@ -66,7 +66,7 @@ fn shortcut_of(ev: &egui::Event) -> Option<Shortcut> {
         return Some(if n == 0 { Shortcut::FitAll } else { Shortcut::Project(n) });
     }
     Some(match key {
-        Key::K => Shortcut::Jump,
+        Key::P => Shortcut::Jump,
         Key::N => Shortcut::NewCard,
         Key::F => Shortcut::Search,
         Key::W => Shortcut::CloseCard,
@@ -323,10 +323,11 @@ mod tests {
     #[test]
     fn shortcuts_need_ctrl_shift_and_no_alt() {
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
-        assert_eq!(shortcut_of(&key(Key::K, cs)), Some(Shortcut::Jump));
+        assert_eq!(shortcut_of(&key(Key::P, cs)), Some(Shortcut::Jump));
+        assert_eq!(shortcut_of(&key(Key::K, cs)), None);
         assert_eq!(shortcut_of(&key(Key::N, cs)), Some(Shortcut::NewCard));
-        assert_eq!(shortcut_of(&key(Key::K, Modifiers::CTRL)), None, "Ctrl+K stays with the shell");
-        assert_eq!(shortcut_of(&key(Key::K, cs | Modifiers::ALT)), None);
+        assert_eq!(shortcut_of(&key(Key::P, Modifiers::CTRL)), None, "Ctrl+P stays with the shell");
+        assert_eq!(shortcut_of(&key(Key::P, cs | Modifiers::ALT)), None);
         assert_eq!(shortcut_of(&egui::Event::Text("K".into())), None);
     }
 
