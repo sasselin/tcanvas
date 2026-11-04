@@ -6,6 +6,7 @@ use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 
 use crate::shell::event::Event;
+use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::world::{Card, CardId, ProjectId, World};
 
@@ -125,7 +126,7 @@ impl Jump {
         let modal = Modal::new(Id::unique("jump")).area(area).show(ctx, |ui| {
             ui.set_width(520.0);
             let edit = ui.add(
-                TextEdit::singleline(&mut self.query).id(Id::unique("jump-query")).hint_text("Aller au terminal ou au projet…").desired_width(f32::INFINITY),
+                TextEdit::singleline(&mut self.query).id(Id::unique("jump-query")).hint_text(t().jump_hint).desired_width(f32::INFINITY),
             );
             edit.request_focus();
             if edit.changed() {
@@ -133,7 +134,7 @@ impl Jump {
             }
             ui.separator();
             if results.is_empty() {
-                ui.label(RichText::new("Aucun résultat").color(theme::TEXT_DIM));
+                ui.label(RichText::new(t().no_results).color(theme::TEXT_DIM));
             }
             for (k, target) in results.iter().take(12).enumerate() {
                 let Some(text) = label(world, target) else { continue };
@@ -162,8 +163,8 @@ fn label(world: &World, target: &Target) -> Option<RichText> {
             let n = world.projects.iter().position(|p| &p.id == id)?;
             let p = &world.projects[n];
             let count = world.cards.iter().filter(|c| world.project_of(c).is_some_and(|q| q.id == p.id)).count();
-            let key = if n < 9 { format!("   Ctrl+Maj+{}", n + 1) } else { String::new() };
-            RichText::new(format!("■ {}  —  {count} terminal(aux){key}", p.name)).color(theme::rgb(p.color)).strong()
+            let key = if n < 9 { (t().project_shortcut)(n + 1) } else { String::new() };
+            RichText::new(format!("■ {}  —  {}{key}", p.name, (t().terminal_count)(count))).color(theme::rgb(p.color)).strong()
         }
     })
 }

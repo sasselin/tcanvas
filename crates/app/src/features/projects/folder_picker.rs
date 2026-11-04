@@ -4,6 +4,7 @@
 use egui::{Align, Color32, Id, Key, Layout, Modal, RichText, ScrollArea, TextEdit, Ui};
 use protocol::{AgentCmd, DirEntry, DirListing};
 
+use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::world::ProjectId;
 
@@ -118,16 +119,16 @@ impl FolderPicker {
 
     fn path_row(&mut self, ui: &mut Ui, choice: &mut Option<Choice>) {
         ui.horizontal(|ui| {
-            if ui.button("⌂").on_hover_text("Dossier personnel").clicked() {
+            if ui.button("⌂").on_hover_text(t().home_folder).clicked() {
                 *choice = Some(Choice::Navigate("~".into()));
             }
             let parent = self.listing.as_ref().and_then(|l| l.parent.clone());
-            if ui.add_enabled(parent.is_some(), egui::Button::new("⬆")).on_hover_text("Dossier parent").clicked()
+            if ui.add_enabled(parent.is_some(), egui::Button::new("⬆")).on_hover_text(t().parent_folder).clicked()
                 && let Some(p) = parent
             {
                 *choice = Some(Choice::Navigate(p));
             }
-            let edit = ui.add(TextEdit::singleline(&mut self.input).id(Id::unique("folder-picker-path")).desired_width(f32::INFINITY).hint_text("Chemin WSL, ex. ~/code/api"));
+            let edit = ui.add(TextEdit::singleline(&mut self.input).id(Id::unique("folder-picker-path")).desired_width(f32::INFINITY).hint_text(t().wsl_path_hint));
             if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 *choice = Some(Choice::Navigate(self.input.trim().to_string()));
             }
@@ -157,7 +158,7 @@ impl FolderPicker {
             return;
         }
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Récents :").color(theme::TEXT_DIM));
+            ui.label(RichText::new(t().recent_folders).color(theme::TEXT_DIM));
             for s in &self.shortcuts {
                 let name = s.trim_end_matches('/').rsplit('/').next().filter(|n| !n.is_empty()).unwrap_or(s);
                 if ui.small_button(format!("📁 {name}")).on_hover_text(s).clicked() {
@@ -168,7 +169,7 @@ impl FolderPicker {
     }
 
     fn list(&mut self, ui: &mut Ui, choice: &mut Option<Choice>) {
-        let filter = ui.add(TextEdit::singleline(&mut self.filter).id(Id::unique("folder-picker-filter")).hint_text("Filtrer les dossiers… (Entrée : ouvrir le seul résultat)").desired_width(f32::INFINITY));
+        let filter = ui.add(TextEdit::singleline(&mut self.filter).id(Id::unique("folder-picker-filter")).hint_text(t().filter_folders_hint).desired_width(f32::INFINITY));
         if self.fresh {
             self.fresh = false;
             filter.request_focus();
@@ -180,16 +181,16 @@ impl FolderPicker {
         }
         ScrollArea::vertical().id_salt("folder-picker-list").max_height(300.0).min_scrolled_height(300.0).auto_shrink([false, false]).show(ui, |ui| {
             if self.pending.is_some() {
-                ui.label(RichText::new("Chargement…").color(theme::TEXT_DIM));
+                ui.label(RichText::new(t().loading).color(theme::TEXT_DIM));
                 return;
             }
             let Some(listing) = &self.listing else { return };
             if let Some(err) = &listing.error {
-                ui.label(RichText::new(format!("⚠ {err}")).color(Color32::from_rgb(235, 95, 95)));
+                ui.label(RichText::new(format!("⚠ {}", t().problem(err))).color(Color32::from_rgb(235, 95, 95)));
                 return;
             }
             if visible.is_empty() {
-                ui.label(RichText::new(if listing.dirs.is_empty() { "Aucun sous-dossier." } else { "Aucun dossier ne correspond." }).color(theme::TEXT_DIM));
+                ui.label(RichText::new(if listing.dirs.is_empty() { t().no_subfolders } else { t().no_matching_folder }).color(theme::TEXT_DIM));
             }
             for d in &visible {
                 let resp = ui.add(egui::Button::new(format!("📁 {}", d.name)).frame(false).min_size(egui::vec2(ui.available_width(), 22.0)));
@@ -209,21 +210,21 @@ impl FolderPicker {
         ui.horizontal(|ui| {
             ui.label(RichText::new(target.as_deref().unwrap_or("—")).color(theme::TEXT));
             if git {
-                ui.label(RichText::new("⎇ dépôt git").color(GIT));
+                ui.label(RichText::new(t().git_repo).color(GIT));
             }
         });
         ui.horizontal(|ui| {
-            let link = egui::Button::new(RichText::new("Lier ce dossier").color(theme::CARD_BG)).fill(theme::FOCUS);
+            let link = egui::Button::new(RichText::new(t().link_folder).color(theme::CARD_BG)).fill(theme::FOCUS);
             if ui.add_enabled(target.is_some(), link).clicked()
                 && let Some(t) = target
             {
                 *choice = Some(Choice::Link(t));
             }
-            if ui.button("Annuler").clicked() {
+            if ui.button(t().cancel).clicked() {
                 *choice = Some(Choice::Cancel);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if self.linked && ui.button("Délier").on_hover_text("Le groupe n'aura plus de dossier").clicked() {
+                if self.linked && ui.button(t().unlink).on_hover_text(t().unlink_hint).clicked() {
                     *choice = Some(Choice::Unlink);
                 }
             });
@@ -281,7 +282,7 @@ mod tests {
     #[test]
     fn a_missing_folder_cannot_be_linked_as_listed() {
         let (mut p, _) = FolderPicker::open("p".into(), "t".into(), false, "/nexiste", vec![]);
-        p.on_listing(&DirListing { request: "/nexiste".into(), path: None, parent: None, git: false, dirs: vec![], error: Some("dossier introuvable".into()) });
+        p.on_listing(&DirListing { request: "/nexiste".into(), path: None, parent: None, git: false, dirs: vec![], error: Some(protocol::Problem::DirNotFound { path: "/nexiste".into() }) });
         assert_eq!(p.target(), None);
     }
 }

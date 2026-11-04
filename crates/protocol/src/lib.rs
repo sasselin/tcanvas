@@ -31,17 +31,25 @@ pub enum TermStatus {
     Dead,
 }
 
-impl TermStatus {
-    pub fn label(self) -> &'static str {
-        match self {
-            TermStatus::Idle => "inactif",
-            TermStatus::Running => "actif",
-            TermStatus::Stalled => "bloqué",
-            TermStatus::WaitingInput => "attend saisie",
-            TermStatus::Exited(_) => "échec",
-            TermStatus::Dead => "arrêté",
-        }
-    }
+/// Problème signalé par l'agent. Le protocole transporte le sens, pas le texte :
+/// l'application le traduit dans la langue de Windows.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "kind")]
+pub enum Problem {
+    /// Le chemin existe mais n'est pas un dossier.
+    NotADir { path: String },
+    DirNotFound { path: String },
+    /// Lecture du dossier impossible (détail de l'OS, non traduit).
+    Unreadable { detail: String },
+    /// Le sha demandé n'a pas la forme d'un sha.
+    CommitRefused,
+    CommitNotFound,
+    /// Chemin de fichier absolu ou qui sort du dépôt.
+    PathRefused,
+    NotAGitRepo,
+    /// Le fichier ne diffère pas de HEAD.
+    NoDiff,
+    TmuxMissing { detail: String },
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -104,7 +112,10 @@ pub struct ChangeSet {
     pub root: Option<String>,
     pub git: bool,
     pub branch: Option<String>,
-    pub error: Option<String>,
+    /// HEAD détachée (`branch` est alors `None`).
+    #[serde(default)]
+    pub detached: bool,
+    pub error: Option<Problem>,
     pub files: Vec<FileChange>,
     /// La liste a été coupée (trop de fichiers).
     pub truncated: bool,
@@ -142,7 +153,7 @@ pub struct DirListing {
     pub git: bool,
     /// Sous-dossiers visibles (les dossiers cachés sont omis), triés par nom.
     pub dirs: Vec<DirEntry>,
-    pub error: Option<String>,
+    pub error: Option<Problem>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -151,9 +162,17 @@ pub enum AgentEvent {
     Hello { version: String, hooks_installed: bool },
     Session(SessionInfo),
     Gone { session: String },
-    Error { message: String },
+    Error { problem: Problem },
     Changes(ChangeSet),
-    Diff { key: String, file: String, text: String, truncated: bool },
+    /// `text` est vide quand `problem` explique pourquoi il n'y a pas de diff.
+    Diff {
+        key: String,
+        file: String,
+        text: String,
+        truncated: bool,
+        #[serde(default)]
+        problem: Option<Problem>,
+    },
     DirListing(DirListing),
 }
 
@@ -211,6 +230,7 @@ mod tests {
             root: Some("/home/me/api".into()),
             git: true,
             branch: Some("main".into()),
+            detached: false,
             error: None,
             files: vec![
                 FileChange { path: "src/a.rs".into(), kind: ChangeKind::Modified, added: Some(3), removed: Some(1), mtime: 42, binary: false },
@@ -226,8 +246,12 @@ mod tests {
             parent: Some("/home".into()),
             git: false,
             dirs: vec![DirEntry { name: "api".into(), git: true }],
-            error: None,
+            error: Some(Problem::Unreadable { detail: "denied".into() }),
         });
+        assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        let ev = AgentEvent::Diff { key: "p1".into(), file: "a.rs".into(), text: String::new(), truncated: false, problem: Some(Problem::NotAGitRepo) };
+        assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        let ev = AgentEvent::Error { problem: Problem::TmuxMissing { detail: "no such file".into() } };
         assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
         let cmd = AgentCmd::Diff { key: "p1".into(), file: "src/a.rs".into() };
         assert_eq!(decode::<AgentCmd>(&encode(&cmd)).unwrap(), cmd);

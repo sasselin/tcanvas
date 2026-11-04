@@ -44,16 +44,16 @@ pub fn install() -> io::Result<()> {
     let path = hooks_path();
     fs::create_dir_all(path.parent().expect("hooks path has a parent"))?;
     fs::write(&path, ZSH_HOOKS)?;
-    println!("Hooks écrits dans {}", path.display());
+    println!("Hooks written to {}", path.display());
 
     let zshrc = home().join(".zshrc");
     let rc = fs::read_to_string(&zshrc).unwrap_or_default();
     if rc.contains(SOURCE_LINE) {
-        println!("{} source déjà les hooks.", zshrc.display());
+        println!("{} already sources the hooks.", zshrc.display());
     } else {
         let mut f = fs::OpenOptions::new().create(true).append(true).open(&zshrc)?;
         writeln!(f, "\n{SOURCE_LINE}")?;
-        println!("Ligne ajoutée à {}. Les nouveaux terminaux en profiteront.", zshrc.display());
+        println!("Line added to {}. New terminals will pick it up.", zshrc.display());
     }
     Ok(())
 }

@@ -36,7 +36,7 @@ impl OsToaster {
                 })
                 .show();
             if let Err(e) = result {
-                eprintln!("toast Windows impossible : {e}");
+                eprintln!("Windows toast failed: {e}");
             }
         }
         #[cfg(not(windows))]

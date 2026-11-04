@@ -4,6 +4,7 @@
 use egui::{Button, Color32, Pos2, Rect, RichText, Ui, Vec2};
 
 use crate::shell::event::Event;
+use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::world::{Camera, ProjectId, World};
 
@@ -67,8 +68,8 @@ impl Spaces {
         if world.file_activity.values().any(|&t| now.saturating_sub(t) < WRITING_SECS) {
             ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
         }
-        let chip = Button::selectable(all, RichText::new("Tous").color(if all { theme::CARD_BG } else { theme::TEXT })).fill(if all { theme::TEXT } else { Color32::TRANSPARENT });
-        if ui.add(chip).on_hover_text("Vue d'ensemble : tous les projets").clicked() {
+        let chip = Button::selectable(all, RichText::new(t().all_spaces).color(if all { theme::CARD_BG } else { theme::TEXT })).fill(if all { theme::TEXT } else { Color32::TRANSPARENT });
+        if ui.add(chip).on_hover_text(t().all_spaces_hint).clicked() {
             events.push(Event::EnterSpace(None));
         }
         for (n, p) in world.projects.iter().enumerate() {
@@ -80,7 +81,7 @@ impl Spaces {
             let label = format!("● {}{}{}", p.name, if writing { " ✎" } else { "" }, if calling { " 🔔" } else { "" });
             let text = RichText::new(label).color(if on { theme::CARD_BG } else { theme::rgb(p.color) });
             let chip = Button::selectable(on, text).fill(if on { theme::rgb(p.color) } else { Color32::TRANSPARENT });
-            let hint = if n < 9 { format!("Ouvrir ce projet · Ctrl+Maj+{}", n + 1) } else { "Ouvrir ce projet".into() };
+            let hint = if n < 9 { (t().open_project_shortcut)(n + 1) } else { t().open_project.into() };
             if ui.add(chip).on_hover_text(hint).clicked() {
                 events.push(Event::EnterSpace(Some(p.id.clone())));
             }

@@ -10,6 +10,7 @@ use egui::{RichText, Ui};
 use protocol::{AgentCmd, AgentEvent, DEFAULT_STALL_SECS};
 
 use crate::shell::event::Event;
+use crate::shell::i18n::t;
 use crate::shell::launch;
 use crate::shell::theme;
 use crate::shell::world::World;
@@ -68,7 +69,7 @@ impl AgentLink {
         let spawned = launch::agent(&[]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
         let mut child = match spawned {
             Ok(child) => child,
-            Err(e) => return self.fail(format!("lancement impossible : {e}")),
+            Err(e) => return self.fail((t().agent_launch_failed)(&e.to_string())),
         };
         let (stdout, mut stderr) = (child.stdout.take().expect("stdout piped"), child.stderr.take().expect("stderr piped"));
         let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
@@ -79,12 +80,12 @@ impl AgentLink {
                         let _ = tx.send(Msg::Event(ev));
                         ctx.request_repaint();
                     }
-                    Err(e) => eprintln!("agent : ligne ignorée ({e}) : {line}"),
+                    Err(e) => eprintln!("agent: ignored line ({e}): {line}"),
                 }
             }
             let mut err = String::new();
             let _ = stderr.read_to_string(&mut err);
-            let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("l'agent s'est arrêté").to_string();
+            let last = err.lines().rev().find(|l| !l.trim().is_empty()).map(str::to_string).unwrap_or_else(|| t().agent_stopped.to_string());
             let _ = tx.send(Msg::Closed(last));
             ctx.request_repaint();
         });
@@ -148,23 +149,19 @@ impl AgentLink {
         match self.state.clone() {
             LinkState::Off => {}
             LinkState::Starting => {
-                ui.label(RichText::new("○ agent…").color(theme::TEXT_DIM));
+                ui.label(RichText::new(t().agent_starting).color(theme::TEXT_DIM));
             }
             LinkState::Connected { hooks } => {
-                ui.label(RichText::new("● agent").color(theme::status_color(Some(protocol::TermStatus::Running))))
-                    .on_hover_text("tcanvas-agent surveille les terminaux dans WSL");
+                ui.label(RichText::new(t().agent_connected).color(theme::status_color(Some(protocol::TermStatus::Running))))
+                    .on_hover_text(t().agent_connected_hint);
                 if !hooks {
-                    ui.label(RichText::new("⚠ hooks zsh").color(theme::status_color(Some(protocol::TermStatus::Stalled)))).on_hover_text(
-                        "Sans les hooks, pas de code de sortie ni de durée de commande.\nDans WSL : tcanvas-agent install-hooks",
-                    );
+                    ui.label(RichText::new(t().hooks_missing).color(theme::status_color(Some(protocol::TermStatus::Stalled)))).on_hover_text(t().hooks_missing_hint);
                 }
             }
             LinkState::Failed(why) => {
-                let label = ui.label(RichText::new("✖ agent absent").color(theme::status_color(Some(protocol::TermStatus::Exited(1)))));
-                label.on_hover_text(format!(
-                    "{why}\n\nInstallez-le dans WSL :\n  cargo install --path crates/agent --root ~/.local\nNouvel essai automatique toutes les 10 s."
-                ));
-                if ui.small_button("Réessayer").clicked() {
+                let label = ui.label(RichText::new(t().agent_missing).color(theme::status_color(Some(protocol::TermStatus::Exited(1)))));
+                label.on_hover_text((t().agent_missing_hint)(&why));
+                if ui.small_button(t().retry).clicked() {
                     self.start();
                 }
             }

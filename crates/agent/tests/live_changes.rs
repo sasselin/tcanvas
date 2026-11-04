@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use protocol::{AgentCmd, AgentEvent, ChangeKind, ChangeSet};
+use protocol::{AgentCmd, AgentEvent, ChangeKind, ChangeSet, Problem};
 
 const AGENT: &str = env!("CARGO_BIN_EXE_tcanvas-agent");
 
@@ -124,10 +124,10 @@ fn lists_git_changes_and_serves_diffs() {
     let sha = clean.commits[0].sha.clone();
     agent.send(&AgentCmd::ShowCommit { key: "p".into(), sha: sha.clone() });
     let AgentEvent::Diff { text, .. } = agent.wait_for("contenu du commit", |ev| matches!(ev, AgentEvent::Diff { file, .. } if *file == sha)) else { unreachable!() };
-    assert!(text.contains("init") && text.contains("+deux") && text.contains("gone.txt"), "{text}");
+    assert!(text.contains("init") && text.contains("Author: ") && text.contains("+deux") && text.contains("gone.txt"), "{text}");
     agent.send(&AgentCmd::ShowCommit { key: "p".into(), sha: "--output=/tmp/x".into() });
-    let AgentEvent::Diff { text, .. } = agent.wait_for("sha refusé", |ev| matches!(ev, AgentEvent::Diff { file, .. } if file.starts_with("--"))) else { unreachable!() };
-    assert_eq!(text, "commit refusé");
+    let AgentEvent::Diff { text, problem, .. } = agent.wait_for("sha refusé", |ev| matches!(ev, AgentEvent::Diff { file, .. } if file.starts_with("--"))) else { unreachable!() };
+    assert_eq!((text.as_str(), problem), ("", Some(Problem::CommitRefused)));
 
     // Ce que ferait Claude : modifier, créer, supprimer.
     std::fs::write(repo.join("a.txt"), "un\nDEUX\ntrois\nquatre\n").unwrap();
@@ -171,7 +171,7 @@ fn plain_folder_lists_recent_files_and_missing_folder_errors() {
     agent.send(&AgentCmd::Watch { key: "plain".into(), path: dir.display().to_string() });
     agent.send(&AgentCmd::Watch { key: "absent".into(), path: "/nexiste/pas".into() });
     let err = agent.wait_changes("absent", "erreur", |s| s.error.is_some());
-    assert!(err.error.unwrap().contains("introuvable"));
+    assert!(matches!(err.error, Some(Problem::DirNotFound { .. })), "{err:?}");
 
     let empty = agent.wait_changes("plain", "rien de neuf", |_| true);
     assert!(!empty.git && empty.files.is_empty(), "{empty:?}");
@@ -182,8 +182,8 @@ fn plain_folder_lists_recent_files_and_missing_folder_errors() {
     assert_eq!(set.files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), vec!["fresh.txt"]);
 
     agent.send(&AgentCmd::Diff { key: "plain".into(), file: "fresh.txt".into() });
-    let AgentEvent::Diff { text, .. } = agent.wait_for("message hors git", |ev| matches!(ev, AgentEvent::Diff { .. })) else { unreachable!() };
-    assert!(text.contains("initialisez git"), "{text}");
+    let AgentEvent::Diff { problem, .. } = agent.wait_for("message hors git", |ev| matches!(ev, AgentEvent::Diff { .. })) else { unreachable!() };
+    assert_eq!(problem, Some(Problem::NotAGitRepo));
 
     // Sélecteur de dossiers : l'agent liste les sous-dossiers.
     std::fs::create_dir_all(dir.join("sous-dossier")).unwrap();

@@ -15,10 +15,10 @@ fn main() {
         return;
     }
 
-    let ico = ico.canonicalize().expect("assets/icon.ico introuvable");
+    let ico = ico.canonicalize().expect("assets/icon.ico not found");
     let ico = ico.to_string_lossy().replace('\\', "/");
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let rc = out_dir.join("tcanvas.rc");
-    fs::write(&rc, format!("1 ICON \"{ico}\"\n")).expect("écriture de tcanvas.rc");
-    embed_resource::compile(&rc, embed_resource::NONE).manifest_optional().expect("compilation des ressources Windows");
+    fs::write(&rc, format!("1 ICON \"{ico}\"\n")).expect("writing tcanvas.rc");
+    embed_resource::compile(&rc, embed_resource::NONE).manifest_optional().expect("compiling Windows resources");
 }

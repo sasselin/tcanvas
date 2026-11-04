@@ -10,6 +10,7 @@ use egui::{Id, Rect, RichText, TextEdit, Ui};
 use protocol::TermStatus;
 
 use crate::shell::event::Event;
+use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::world::{Camera, Card, ProjectId, World};
 
@@ -65,7 +66,7 @@ pub fn counts(world: &World) -> [usize; 6] {
     let mut n = [0; 6];
     for c in world.cards.iter().filter(|c| world.shows_card(c)) {
         if let Some(k) = StatusKind::of(c.status()) {
-            n[StatusKind::ALL.iter().position(|x| *x == k).expect("statut connu")] += 1;
+            n[StatusKind::ALL.iter().position(|x| *x == k).expect("known status")] += 1;
         }
     }
     n
@@ -144,10 +145,10 @@ impl Filters {
 
     /// Boutons de création (première ligne de la barre).
     pub fn actions_ui(ui: &mut Ui, events: &mut Vec<Event>) {
-        if ui.button("+ Terminal").on_hover_text("Nouveau terminal, dans le projet ouvert · Ctrl+Maj+N · double-clic sur le canevas").clicked() {
+        if ui.button(t().new_terminal_button).on_hover_text(t().new_terminal_hint).clicked() {
             events.push(Event::NewCard { at: None, project: None });
         }
-        if ui.button("+ Projet").clicked() {
+        if ui.button(t().new_project_button).clicked() {
             events.push(Event::NewProject { at: None });
         }
     }
@@ -156,7 +157,7 @@ impl Filters {
     pub fn ui(&mut self, ui: &mut Ui, world: &World, events: &mut Vec<Event>) {
         let was_active = self.is_active();
         {
-            let search = ui.add(TextEdit::singleline(&mut self.text).id(Id::unique(SEARCH_ID)).hint_text("Filtrer… (Ctrl+Maj+F, Entrée : cadrer)").desired_width(200.0));
+            let search = ui.add(TextEdit::singleline(&mut self.text).id(Id::unique(SEARCH_ID)).hint_text(t().filter_hint).desired_width(200.0));
             // Pendant la frappe on estompe seulement ; Entrée cadre les correspondances.
             let mut fit = search.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let mut changed = search.changed() || fit;
@@ -166,10 +167,10 @@ impl Filters {
                 let on = self.statuses.contains(&kind);
                 let status = kind.sample();
                 let color = theme::status_color(Some(status));
-                let text = RichText::new(format!("{} {}", status.label(), n[k])).color(if on { theme::CARD_BG } else { color });
+                let text = RichText::new(format!("{} {}", t().status(status), n[k])).color(if on { theme::CARD_BG } else { color });
                 let chip = egui::Button::selectable(on, text).fill(if on { color } else { egui::Color32::TRANSPARENT });
                 let resp = ui.push_id(("status-chip", k), |ui| ui.add_enabled(on || n[k] > 0, chip)).inner;
-                let resp = resp.on_hover_text("Clic : ne montrer que ce statut · Ctrl+clic : combiner");
+                let resp = resp.on_hover_text(t().status_chip_hint);
                 if resp.clicked() {
                     self.click_status(kind, ui.input(|i| i.modifiers.command));
                     changed = true;
@@ -180,8 +181,8 @@ impl Filters {
             // Toujours présent (désactivé sans filtre) : rien ne se décale quand on filtre.
             let shown = world.cards.iter().filter(|c| world.shows_card(c)).count();
             let matching = world.cards.iter().filter(|c| world.shows_card(c) && self.matches(world, c)).count();
-            let clear_label = if self.is_active() { format!("× filtre ({matching}/{shown})") } else { "× filtre".into() };
-            if ui.add_enabled(self.is_active(), egui::Button::new(clear_label)).on_hover_text("Retirer le filtre et revenir à la vue d'avant").clicked() {
+            let clear_label = if self.is_active() { (t().clear_filter_count)(matching, shown) } else { t().clear_filter.into() };
+            if ui.add_enabled(self.is_active(), egui::Button::new(clear_label)).on_hover_text(t().clear_filter_hint).clicked() {
                 self.clear();
                 changed = true;
             }
@@ -190,14 +191,14 @@ impl Filters {
             }
             ui.separator();
 
-            if ui.button("Tout voir").on_hover_text("Ctrl+Maj+0").clicked()
+            if ui.button(t().fit_all).on_hover_text(t().fit_all_hint).clicked()
                 && let Some(r) = self.fit_target(world) {
                     events.push(Event::FitRect(r));
                 }
             let attention: Vec<&Card> = world.cards.iter().filter(|c| c.attention).collect();
             if !attention.is_empty() {
                 let label = RichText::new(format!("🔔 {}", attention.len())).color(theme::status_color(Some(TermStatus::Stalled)));
-                if ui.button(label).on_hover_text("Aller au prochain terminal qui demande l'attention").clicked() {
+                if ui.button(label).on_hover_text(t().attention_hint).clicked() {
                     events.push(Event::FlyTo(attention[0].id.clone()));
                 }
             }

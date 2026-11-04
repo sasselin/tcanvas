@@ -3,6 +3,7 @@
 use egui::{Id, Pos2, Rect, Sense, Stroke, Ui, Vec2, epaint::CubicBezierShape};
 
 use crate::shell::event::Event;
+use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::world::{Wire, World};
 
@@ -92,7 +93,7 @@ impl Wires {
             if resp.secondary_clicked() {
                 events.push(Event::RemoveWire(wire.from.clone(), wire.to.clone()));
             }
-            resp.on_hover_text(format!("{}  ⇄  {}\nclic : aller au bout opposé · clic droit : supprimer", a.title(), b.title()));
+            resp.on_hover_text((t().wire_hint)(&a.title(), &b.title()));
         }
     }
 

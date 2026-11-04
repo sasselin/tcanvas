@@ -18,6 +18,7 @@ use egui::{
 use protocol::{AgentEvent, SESSION_PREFIX};
 
 use crate::shell::event::Event;
+use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::widgets::{confirm, text_prompt};
 use crate::shell::world::{Card, CardId, World};
@@ -263,7 +264,7 @@ impl TerminalCards {
                     self.runtimes.insert(card.id.clone(), rt);
                 }
                 Err(e) => {
-                    self.spawn_errors.insert(card.id.clone(), format!("Impossible de lancer {} : {e}", launch.program));
+                    self.spawn_errors.insert(card.id.clone(), (t().spawn_failed)(&launch.program, &e.to_string()));
                 }
             }
         }
@@ -319,8 +320,8 @@ impl TerminalCards {
         // Bouton de fermeture, au-dessus de la barre de titre (enregistré après : il gagne le clic).
         let close_rect = Rect::from_min_size(pos2(title_rect.max.x - title_rect.height(), title_rect.min.y), Vec2::splat(title_rect.height()));
         let close_r = (zoom >= CLOSE_MIN_ZOOM).then(|| {
-            let r = ui.interact(close_rect, eid.with("close"), Sense::click()).on_hover_text("Fermer le terminal (Ctrl+Maj+W)");
-            let a11y = format!("Fermer le terminal {}", world.cards[i].title());
+            let r = ui.interact(close_rect, eid.with("close"), Sense::click()).on_hover_text(t().close_terminal_hint);
+            let a11y = (t().close_terminal_a11y)(&world.cards[i].title());
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
             r
         });
@@ -397,7 +398,7 @@ impl TerminalCards {
         let dot = pos2(title_rect.min.x + 14.0 * zoom, title_rect.center().y);
         title_painter.circle_filled(dot, 5.0 * zoom, theme::status_color(status));
         let label = match status {
-            Some(s) => format!("{}  ·  {}", card.title(), s.label()),
+            Some(s) => format!("{}  ·  {}", card.title(), t().status(s)),
             None => card.title(),
         };
         title_painter.text(pos2(dot.x + 12.0 * zoom, dot.y), Align2::LEFT_CENTER, label, title_font.clone(), theme::TEXT);
@@ -466,19 +467,19 @@ impl TerminalCards {
 
     fn context_menu(&mut self, ui: &mut Ui, world: &World, i: usize, events: &mut Vec<Event>) {
         let card = &world.cards[i];
-        if ui.button("Renommer…").clicked() {
+        if ui.button(t().rename_menu).clicked() {
             self.rename = Some((card.id.clone(), card.name.clone().unwrap_or_default()));
             ui.close();
         }
-        if ui.button("Délai avant « bloqué »…").clicked() {
+        if ui.button(t().stall_delay_menu).clicked() {
             self.stall = Some((card.id.clone(), card.stall_secs.to_string()));
             ui.close();
         }
-        if ui.button("Centrer et zoomer").clicked() {
+        if ui.button(t().center_and_zoom).clicked() {
             events.push(Event::FlyTo(card.id.clone()));
             ui.close();
         }
-        ui.menu_button("Déplacer vers", |ui| {
+        ui.menu_button(t().move_to, |ui| {
             for p in &world.projects {
                 let here = card.project.as_ref() == Some(&p.id);
                 let text = egui::RichText::new(&p.name).color(theme::rgb(p.color));
@@ -490,13 +491,13 @@ impl TerminalCards {
             if !world.projects.is_empty() {
                 ui.separator();
             }
-            if ui.add_enabled(card.project.is_some(), egui::Button::new("Aucun groupe")).clicked() {
+            if ui.add_enabled(card.project.is_some(), egui::Button::new(t().no_group)).clicked() {
                 events.push(Event::AssignCard { card: card.id.clone(), project: None, relocate: true });
                 ui.close();
             }
         });
         ui.separator();
-        if ui.button("Fermer le terminal…  (Ctrl+Maj+W)").clicked() {
+        if ui.button(t().close_terminal_menu).clicked() {
             events.push(Event::RequestClose(card.id.clone()));
             ui.close();
         }
@@ -504,7 +505,7 @@ impl TerminalCards {
 
     fn dead_overlay(&mut self, ui: &mut Ui, body: Rect, id: &CardId, zoom: f32, events: &mut Vec<Event>) {
         let painter = ui.painter_at(body);
-        let msg = self.spawn_errors.get(id).cloned().unwrap_or_else(|| "Session terminée".into());
+        let msg = self.spawn_errors.get(id).cloned().unwrap_or_else(|| t().session_ended.into());
         let font = FontId::proportional((14.0 * zoom).max(6.0));
         painter.text(body.center() - vec2(0.0, 24.0 * zoom), Align2::CENTER_CENTER, msg, font, theme::TEXT_DIM);
         if zoom < 0.3 {
@@ -513,10 +514,10 @@ impl TerminalCards {
         let size = vec2(110.0, 26.0);
         let left = Rect::from_center_size(body.center() + vec2(-60.0, 12.0 * zoom), size);
         let right = Rect::from_center_size(body.center() + vec2(60.0, 12.0 * zoom), size);
-        if ui.put(left, egui::Button::new("Relancer")).clicked() {
+        if ui.put(left, egui::Button::new(t().respawn)).clicked() {
             events.push(Event::RespawnCard(id.clone()));
         }
-        if ui.put(right, egui::Button::new("Retirer")).clicked() {
+        if ui.put(right, egui::Button::new(t().remove)).clicked() {
             events.push(Event::RemoveCard(id.clone()));
         }
     }
@@ -631,7 +632,7 @@ impl TerminalCards {
                 None => self.confirm_close = None,
                 Some(card) => {
                     let (title, body) = close_message(card);
-                    match confirm(ctx, "close-card", &title, &body, "Fermer") {
+                    match confirm(ctx, "close-card", &title, &body, t().close) {
                         Some(true) => {
                             events.push(Event::KillCard(id));
                             self.confirm_close = None;
@@ -643,7 +644,7 @@ impl TerminalCards {
             }
         }
         if let Some((id, text)) = &mut self.rename {
-            match text_prompt(ctx, "rename-card", "Nom du terminal (vide : automatique)", text) {
+            match text_prompt(ctx, "rename-card", t().terminal_name_prompt, text) {
                 Some(true) => {
                     let name = Some(text.trim().to_string()).filter(|s| !s.is_empty());
                     events.push(Event::RenameCard(id.clone(), name));
@@ -654,7 +655,7 @@ impl TerminalCards {
             }
         }
         if let Some((id, text)) = &mut self.stall {
-            match text_prompt(ctx, "stall-card", "Secondes sans sortie avant « bloqué »", text) {
+            match text_prompt(ctx, "stall-card", t().stall_prompt, text) {
                 Some(true) => {
                     if let Ok(secs) = text.trim().parse::<u64>() {
                         events.push(Event::SetStall(id.clone(), secs.max(1)));
@@ -766,11 +767,11 @@ impl TerminalCards {
 
 /// Texte de la confirmation : on cite la commande en cours, c'est elle qu'on risque de perdre.
 pub fn close_message(card: &Card) -> (String, String) {
-    let title = format!("Fermer « {} » ?", card.title());
+    let title = (t().close_card_title)(&card.title());
     let running = card.info.as_ref().and_then(|i| i.command.as_deref());
     let body = match running {
-        Some(cmd) => format!("« {cmd} » est en cours d'exécution et sera arrêté.\nLe shell et tous ses processus seront fermés. C'est définitif."),
-        None => "Le shell et tous ses processus seront fermés. C'est définitif.".to_string(),
+        Some(cmd) => (t().close_card_running)(cmd),
+        None => t().close_card_body.to_string(),
     };
     (title, body)
 }
@@ -796,7 +797,7 @@ fn paint_preview(painter: &egui::Painter, card: &Card, body: Rect, zoom: f32) {
     let big = (body.height() * 0.16).clamp(6.0, 48.0);
     painter.text(body.center() - vec2(0.0, big * 0.6), Align2::CENTER_CENTER, card.title(), FontId::proportional(big), theme::TEXT);
     if let Some(s) = status {
-        painter.text(body.center() + vec2(0.0, big * 0.5), Align2::CENTER_CENTER, s.label(), FontId::proportional(big * 0.6), theme::status_color(status));
+        painter.text(body.center() + vec2(0.0, big * 0.5), Align2::CENTER_CENTER, t().status(s), FontId::proportional(big * 0.6), theme::status_color(status));
     }
     let tail_px = 11.0 * zoom.max(0.0) * 2.0;
     if tail_px >= 6.0
@@ -837,6 +838,7 @@ mod tests {
 
     #[test]
     fn close_message_names_the_running_command() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
         let mut card = Card::new(Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.0)), None);
         card.name = Some("api".into());
         let (title, body) = close_message(&card);

@@ -5,9 +5,10 @@
 use std::collections::{BTreeMap, HashMap};
 
 use egui::{Align, Align2, Button, Color32, CornerRadius, FontId, Layout, Panel, RichText, ScrollArea, Sense, Ui, vec2};
-use protocol::{AgentCmd, AgentEvent, ChangeKind, ChangeSet, CommitInfo, FileChange};
+use protocol::{AgentCmd, AgentEvent, ChangeKind, ChangeSet, CommitInfo, FileChange, Problem};
 
 use crate::shell::event::Event;
+use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::world::{Project, ProjectId, World, unix_now};
 
@@ -115,11 +116,11 @@ pub fn age_label(now: u64, mtime: u64) -> String {
         return String::new();
     }
     match now.saturating_sub(mtime) {
-        0..=2 => "à l'instant".into(),
-        s @ 3..=59 => format!("il y a {s} s"),
-        s @ 60..=3599 => format!("il y a {} min", s / 60),
-        s @ 3600..=86_399 => format!("il y a {} h", s / 3600),
-        s => format!("il y a {} j", s / 86_400),
+        0..=2 => t().just_now.into(),
+        s @ 3..=59 => (t().secs_ago)(s),
+        s @ 60..=3599 => (t().mins_ago)(s / 60),
+        s @ 3600..=86_399 => (t().hours_ago)(s / 3600),
+        s => (t().days_ago)(s / 86_400),
     }
 }
 
@@ -137,6 +138,8 @@ struct DiffView {
     /// `None` tant que l'agent n'a pas répondu.
     lines: Option<Vec<(LineKind, String)>>,
     truncated: bool,
+    /// Raison donnée par l'agent quand il n'y a pas de diff.
+    problem: Option<Problem>,
     fingerprint: Option<Fingerprint>,
 }
 
@@ -212,7 +215,7 @@ impl Changes {
             Target::Commit(sha) => AgentCmd::ShowCommit { key: key.to_string(), sha: sha.clone() },
         };
         self.selected.insert(key.to_string(), target.clone());
-        self.diff = Some(DiffView { key: key.to_string(), target, lines: None, truncated: false, fingerprint: fp });
+        self.diff = Some(DiffView { key: key.to_string(), target, lines: None, truncated: false, problem: None, fingerprint: fp });
         out.push(Event::ToAgent(cmd));
     }
 
@@ -275,10 +278,11 @@ impl Changes {
                     self.on_changes(set.clone(), world, out);
                 }
             }
-            Event::Agent(AgentEvent::Diff { key, file, text, truncated }) => {
+            Event::Agent(AgentEvent::Diff { key, file, text, truncated, problem }) => {
                 if let Some(d) = self.diff.as_mut().filter(|d| &d.key == key && d.target.reply_key() == file) {
                     d.lines = Some(text.lines().map(|l| (classify(l), l.to_string())).collect());
                     d.truncated = *truncated;
+                    d.problem = problem.clone();
                 }
             }
             Event::SetProjectCwd(id, _) | Event::RemoveProject(id) => {
@@ -299,9 +303,9 @@ impl Changes {
         let Some(p) = self.panel_project(world) else { return };
         let n = self.sets.get(&p.id).map(|s| s.files.len()).unwrap_or(0);
         let on = world.changes_open;
-        let text = RichText::new(format!("Δ Changements ({n})")).color(if on { theme::CARD_BG } else { theme::TEXT });
+        let text = RichText::new((t().changes_button)(n)).color(if on { theme::CARD_BG } else { theme::TEXT });
         let button = Button::selectable(on, text).fill(if on { theme::TEXT } else { Color32::TRANSPARENT });
-        if ui.add(button).on_hover_text("Fichiers modifiés dans le dossier lié et leurs diffs, en direct").clicked() {
+        if ui.add(button).on_hover_text(t().changes_button_hint).clicked() {
             events.push(Event::ToggleChanges);
         }
     }
@@ -317,10 +321,10 @@ impl Changes {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(format!("Δ {}", project.name)).strong().color(theme::rgb(project.color)));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.small_button("×").on_hover_text("Fermer le panneau").clicked() {
+                    if ui.small_button("×").on_hover_text(t().close_panel).clicked() {
                         events.push(Event::ToggleChanges);
                     }
-                    let follow = ui.checkbox(&mut self.follow, "Suivre").on_hover_text("Afficher automatiquement le dernier fichier modifié ou le dernier commit");
+                    let follow = ui.checkbox(&mut self.follow, t().follow).on_hover_text(t().follow_hint);
                     if follow.changed() && self.follow
                         && let Some(n) = self.sets.get(&project.id).and_then(newest)
                     {
@@ -330,7 +334,7 @@ impl Changes {
             });
             let Some(set) = self.sets.get(&project.id).cloned() else {
                 ui.label(RichText::new(format!("📁 {}", project.cwd.as_deref().unwrap_or_default())).color(theme::TEXT_DIM));
-                ui.label(RichText::new("En attente de l'agent…").color(theme::TEXT_DIM));
+                ui.label(RichText::new(t().waiting_for_agent).color(theme::TEXT_DIM));
                 return;
             };
             self.header(ui, &project, &set);
@@ -339,10 +343,10 @@ impl Changes {
             let list_h = (ui.available_height() * 0.42).max(100.0);
             ScrollArea::vertical().id_salt("changes-list").max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
                 if set.git {
-                    ui.label(RichText::new(format!("Non commité ({})", set.files.len())).small().strong().color(theme::TEXT_DIM));
+                    ui.label(RichText::new((t().uncommitted)(set.files.len())).small().strong().color(theme::TEXT_DIM));
                 }
                 if set.files.is_empty() && set.error.is_none() {
-                    ui.label(RichText::new(if set.git { "Rien en cours : tout est commité." } else { "Aucun fichier modifié depuis le début du suivi." }).color(theme::TEXT_DIM));
+                    ui.label(RichText::new(if set.git { t().all_committed } else { t().nothing_modified }).color(theme::TEXT_DIM));
                 }
                 for f in &set.files {
                     let on = self.selected(&project.id) == Some(f.path.as_str());
@@ -352,11 +356,11 @@ impl Changes {
                     }
                 }
                 if set.truncated {
-                    ui.label(RichText::new("… liste coupée (trop de fichiers)").color(theme::TEXT_DIM));
+                    ui.label(RichText::new(t().list_truncated).color(theme::TEXT_DIM));
                 }
                 if !set.commits.is_empty() {
                     ui.add_space(6.0);
-                    ui.label(RichText::new("Commits récents").small().strong().color(theme::TEXT_DIM));
+                    ui.label(RichText::new(t().recent_commits).small().strong().color(theme::TEXT_DIM));
                     for c in &set.commits {
                         let on = self.selected_target(&project.id) == Some(&Target::Commit(c.sha.clone()));
                         if self.commit_row(ui, c, now, on) {
@@ -380,23 +384,23 @@ impl Changes {
         let root = set.root.as_deref().or(project.cwd.as_deref()).unwrap_or_default();
         ui.label(RichText::new(format!("📁 {root}")).color(theme::TEXT_DIM)).on_hover_text(root);
         if let Some(err) = &set.error {
-            ui.label(RichText::new(format!("⚠ {err}")).color(DEL));
+            ui.label(RichText::new(format!("⚠ {}", t().problem(err))).color(DEL));
             return;
         }
         ui.horizontal(|ui| {
-            if let Some(b) = &set.branch {
+            if let Some(b) = set.branch.as_deref().or(set.detached.then_some(t().detached_head)) {
                 ui.label(RichText::new(format!("⎇ {b}")).color(theme::TEXT));
             }
             let (a, r) = set.files.iter().fold((0, 0), |(a, r), f| (a + f.added.unwrap_or(0), r + f.removed.unwrap_or(0)));
             let n = set.files.len();
-            ui.label(RichText::new(format!("{n} fichier{}", if n > 1 { "s" } else { "" })).color(theme::TEXT_DIM));
+            ui.label(RichText::new((t().file_count)(n)).color(theme::TEXT_DIM));
             if set.git {
                 ui.label(RichText::new(format!("+{a}")).color(ADD));
                 ui.label(RichText::new(format!("−{r}")).color(DEL));
             }
         });
         if !set.git {
-            ui.label(RichText::new("Pas un dépôt git : initialisez git dans ce dossier pour voir les diffs.").color(theme::TEXT_DIM));
+            ui.label(RichText::new(t().not_a_git_repo).color(theme::TEXT_DIM));
         }
     }
 
@@ -407,7 +411,7 @@ impl Changes {
             ChangeKind::Renamed(from) => format!("{from} → {}", f.path),
             _ => f.path.clone(),
         });
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Fichier modifié {}", f.path)));
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, (t().modified_file)(&f.path)));
         let painter = ui.painter_at(rect);
         let age = now.saturating_sub(f.mtime);
         if selected {
@@ -459,7 +463,7 @@ impl Changes {
     fn commit_row(&self, ui: &mut Ui, c: &CommitInfo, now: u64, selected: bool) -> bool {
         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
         let resp = resp.on_hover_text(format!("{}\n{} · {}", c.summary, c.author, &c.sha[..c.sha.len().min(12)]));
-        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Commit {}", c.summary)));
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, (t().commit_a11y)(&c.summary)));
         let painter = ui.painter_at(rect);
         let age = now.saturating_sub(c.time);
         if selected {
@@ -481,7 +485,7 @@ impl Changes {
     fn diff_ui(&self, ui: &mut Ui, key: &str, git: bool) {
         let Some(d) = self.diff.as_ref().filter(|d| d.key == key) else {
             if git {
-                ui.label(RichText::new("Cliquez un fichier ou un commit pour voir son diff.").color(theme::TEXT_DIM));
+                ui.label(RichText::new(t().pick_a_file).color(theme::TEXT_DIM));
             }
             return;
         };
@@ -491,15 +495,19 @@ impl Changes {
         };
         ui.label(RichText::new(title).strong().color(theme::TEXT));
         let Some(lines) = &d.lines else {
-            ui.label(RichText::new("Chargement du diff…").color(theme::TEXT_DIM));
+            ui.label(RichText::new(t().loading_diff).color(theme::TEXT_DIM));
             return;
         };
+        if let Some(p) = &d.problem {
+            ui.label(RichText::new(t().problem(p)).color(theme::TEXT_DIM));
+            return;
+        }
         let mono = FontId::monospace(12.0);
         let row_h = ui.fonts_mut(|f| f.row_height(&mono));
         ScrollArea::both().id_salt("changes-diff").auto_shrink([false, false]).show_rows(ui, row_h, lines.len() + usize::from(d.truncated), |ui, range| {
             for i in range {
                 let Some((kind, text)) = lines.get(i) else {
-                    ui.label(RichText::new("… diff coupé (fichier trop gros)").color(theme::TEXT_DIM));
+                    ui.label(RichText::new(t().diff_truncated).color(theme::TEXT_DIM));
                     continue;
                 };
                 let (color, bg) = match kind {
@@ -530,7 +538,7 @@ mod tests {
     }
 
     fn set(key: &str, files: Vec<FileChange>) -> ChangeSet {
-        ChangeSet { key: key.into(), root: Some("/r".into()), git: true, branch: Some("main".into()), error: None, files, truncated: false, commits: vec![] }
+        ChangeSet { key: key.into(), root: Some("/r".into()), git: true, branch: Some("main".into()), detached: false, error: None, files, truncated: false, commits: vec![] }
     }
 
     fn world() -> World {
@@ -598,7 +606,7 @@ mod tests {
         let mut out = vec![];
         c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("a.rs", 30, 2), file("b.rs", 20, 1)]))), &mut w, &mut out);
         assert_eq!(diff_requests(&out), vec!["a.rs"]);
-        c.handle(&Event::Agent(AgentEvent::Diff { key: "api".into(), file: "a.rs".into(), text: "@@ x\n+a\n".into(), truncated: false }), &mut w, &mut vec![]);
+        c.handle(&Event::Agent(AgentEvent::Diff { key: "api".into(), file: "a.rs".into(), text: "@@ x\n+a\n".into(), truncated: false, problem: None }), &mut w, &mut vec![]);
         assert_eq!(c.diff_lines().unwrap(), vec![(LineKind::Hunk, "@@ x".into()), (LineKind::Add, "+a".into())]);
     }
 
@@ -643,7 +651,7 @@ mod tests {
         assert_eq!(requests(&out), vec![AgentCmd::ShowCommit { key: "api".into(), sha: "b".repeat(40) }]);
         assert_eq!(w.change_counts.get("api"), Some(&0));
         let sha = "b".repeat(40);
-        c.handle(&Event::Agent(AgentEvent::Diff { key: "api".into(), file: sha, text: "commit x\n+a\n".into(), truncated: false }), &mut w, &mut vec![]);
+        c.handle(&Event::Agent(AgentEvent::Diff { key: "api".into(), file: sha, text: "commit x\n+a\n".into(), truncated: false, problem: None }), &mut w, &mut vec![]);
         assert_eq!(c.diff_lines().unwrap()[1], (LineKind::Add, "+a".into()));
         // Un fichier modifié après le dernier commit passe devant.
         s.files = vec![file("x.rs", 60, 1)];
@@ -703,7 +711,7 @@ mod tests {
         let mut w = world();
         c.handle(&Event::Agent(AgentEvent::Changes(set("inconnu", vec![file("a.rs", 1, 1)]))), &mut w, &mut vec![]);
         assert!(c.set("inconnu").is_none());
-        c.handle(&Event::Agent(AgentEvent::Diff { key: "api".into(), file: "z.rs".into(), text: "+x".into(), truncated: false }), &mut w, &mut vec![]);
+        c.handle(&Event::Agent(AgentEvent::Diff { key: "api".into(), file: "z.rs".into(), text: "+x".into(), truncated: false, problem: None }), &mut w, &mut vec![]);
         assert!(c.diff_lines().is_none());
         c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("a.rs", 1, 1)]))), &mut w, &mut vec![]);
         c.handle(&Event::SetProjectCwd("api".into(), Some("~/autre".into())), &mut w, &mut vec![]);
@@ -712,6 +720,7 @@ mod tests {
 
     #[test]
     fn labels() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
         assert_eq!(age_label(100, 99), "à l'instant");
         assert_eq!(age_label(100, 88), "il y a 12 s");
         assert_eq!(age_label(1000, 100), "il y a 15 min");

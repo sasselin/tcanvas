@@ -18,7 +18,7 @@ pub mod shell;
 pub use shell::{App, Config};
 
 pub fn run() -> eframe::Result {
-    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon-256.png")).expect("assets/icon-256.png invalide");
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon-256.png")).expect("assets/icon-256.png is invalid");
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()

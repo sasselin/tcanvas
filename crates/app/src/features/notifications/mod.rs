@@ -10,6 +10,7 @@ use egui::{Align2, Id, RichText, Sense};
 use protocol::{AgentEvent, SessionInfo, TermStatus};
 
 use crate::shell::event::{Event, Notice};
+use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::world::{Card, CardId, World};
 
@@ -45,25 +46,25 @@ pub fn decide(prev: Option<TermStatus>, info: &SessionInfo) -> Option<Notice> {
 pub fn message(notice: &Notice, card: &Card) -> (String, String) {
     let title = card.title();
     match notice {
-        Notice::Stalled => ("⏸ Terminal bloqué".into(), format!("{title} : aucune sortie depuis {} s", card.stall_secs)),
+        Notice::Stalled => (t().notice_stalled.into(), (t().notice_stalled_body)(&title, card.stall_secs)),
         Notice::WaitingInput => {
             let line = card.info.as_ref().and_then(|i| i.tail.last().cloned()).unwrap_or_default();
-            ("⌨ Attend une réponse".into(), format!("{title} : {line}"))
+            (t().notice_waiting.into(), format!("{title}: {line}"))
         }
-        Notice::Failed(code) => (format!("✖ Échec (code {code})"), title),
-        Notice::Finished { secs } => (format!("✔ Terminé en {}", human_duration(*secs)), title),
-        Notice::Stopped => ("■ Terminal arrêté".into(), title),
-        Notice::Moved(Some(group)) => (format!("➜ Déplacé vers « {group} »"), format!("{title} · clic : y aller")),
-        Notice::Moved(None) => ("➜ Sorti du groupe".into(), format!("{title} est dans « Tous » · clic : y aller")),
-        Notice::Copied => ("⧉ Copié".into(), "Sélection copiée dans le presse-papiers".into()),
+        Notice::Failed(code) => ((t().notice_failed)(*code), title),
+        Notice::Finished { secs } => ((t().notice_finished)(&human_duration(*secs)), title),
+        Notice::Stopped => (t().notice_stopped.into(), title),
+        Notice::Moved(Some(group)) => ((t().notice_moved)(group), (t().notice_moved_body)(&title)),
+        Notice::Moved(None) => (t().notice_left_group.into(), (t().notice_left_group_body)(&title)),
+        Notice::Copied => (t().notice_copied.into(), t().notice_copied_body.into()),
     }
 }
 
 pub fn human_duration(secs: u64) -> String {
     match secs {
-        0..=59 => format!("{secs} s"),
-        60..=3599 => format!("{} min {:02} s", secs / 60, secs % 60),
-        _ => format!("{} h {:02} min", secs / 3600, (secs % 3600) / 60),
+        0..=59 => (t().duration_secs)(secs),
+        60..=3599 => (t().duration_mins)(secs / 60, secs % 60),
+        _ => (t().duration_hours)(secs / 3600, (secs % 3600) / 60),
     }
 }
 
@@ -264,6 +265,7 @@ mod tests {
 
     #[test]
     fn messages_and_durations() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
         assert_eq!(human_duration(42), "42 s");
         assert_eq!(human_duration(125), "2 min 05 s");
         assert_eq!(human_duration(7300), "2 h 01 min");

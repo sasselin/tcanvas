@@ -2,6 +2,7 @@
 
 pub mod event;
 pub mod fonts;
+pub mod i18n;
 pub mod launch;
 pub mod theme;
 pub mod widgets;
@@ -24,6 +25,7 @@ use crate::features::spaces::Spaces;
 use crate::features::terminal_card::{Launcher, TerminalCards};
 use crate::features::wires::Wires;
 use event::Event;
+use i18n::t;
 use world::{Card, World};
 
 pub struct Config {
@@ -217,7 +219,7 @@ impl App {
                     self.agent.status_ui(ui);
                     self.changes.toolbar_ui(ui, &self.world, &mut events);
                     if let Some(err) = &self.persistence.last_error {
-                        ui.label(RichText::new("⚠ layout").color(theme::status_color(Some(protocol::TermStatus::Exited(1))))).on_hover_text(err);
+                        ui.label(RichText::new(t().layout_warning).color(theme::status_color(Some(protocol::TermStatus::Exited(1))))).on_hover_text(err);
                     }
                 });
             });
@@ -244,7 +246,7 @@ impl App {
                 ui.painter().text(
                     vp.center(),
                     Align2::CENTER_CENTER,
-                    "Double-cliquez pour ouvrir un terminal · Ctrl+Maj+N",
+                    t().empty_canvas,
                     FontId::proportional(18.0),
                     theme::TEXT_DIM,
                 );
@@ -270,7 +272,7 @@ impl App {
         while let Some(ev) = queue.pop_front() {
             budget -= 1;
             if budget == 0 {
-                eprintln!("boucle d'événements interrompue sur {ev:?}");
+                eprintln!("event loop cut short at {ev:?}");
                 break;
             }
             let mut out = Vec::new();

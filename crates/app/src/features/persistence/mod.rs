@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::shell::i18n::t;
 use crate::shell::world::{Camera, Card, Project, ProjectId, Wire, World, project_at};
 
 /// 2 : appartenance explicite des cartes aux groupes (`Card::project`), panneau « Changements ».
@@ -63,7 +64,7 @@ impl Persistence {
             Ok(t) => t,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return,
             Err(e) => {
-                self.last_error = Some(format!("lecture de {} impossible : {e}", self.path.display()));
+                self.last_error = Some((t().layout_read_failed)(&self.path.display().to_string(), &e.to_string()));
                 return;
             }
         };
@@ -91,7 +92,7 @@ impl Persistence {
                 let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                 let backup = self.path.with_extension(format!("json.corrompu-{stamp}"));
                 let _ = fs::rename(&self.path, &backup);
-                self.last_error = Some(format!("layout illisible ({e}), mis de côté dans {}", backup.display()));
+                self.last_error = Some((t().layout_corrupt)(&e.to_string(), &backup.display().to_string()));
             }
         }
     }
@@ -125,7 +126,7 @@ impl Persistence {
                 self.dirty_since = None;
                 self.last_error = None;
             }
-            Err(e) => self.last_error = Some(format!("sauvegarde impossible : {e}")),
+            Err(e) => self.last_error = Some((t().layout_save_failed)(&e.to_string())),
         }
     }
 
@@ -230,6 +231,7 @@ mod tests {
 
     #[test]
     fn corrupt_file_is_set_aside_not_lost() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
         let dir = temp_dir("corrupt");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("layout.json"), b"{ pas du json").unwrap();

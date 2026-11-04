@@ -9,6 +9,7 @@ use protocol::{AgentEvent, SessionInfo, TermStatus};
 use tcanvas::features::agent_link::AgentMode;
 use tcanvas::features::terminal_card::Launcher;
 use tcanvas::shell::event::Event;
+use tcanvas::shell::i18n::{self, Lang};
 use tcanvas::shell::world::{Card, World};
 use tcanvas::{App, Config};
 
@@ -18,7 +19,13 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
+/// Les tests vérifient l'interface en français, quelle que soit la langue de la machine.
 fn harness(dir: &std::path::Path) -> Harness<'static, App> {
+    harness_in(dir, Lang::Fr)
+}
+
+fn harness_in(dir: &std::path::Path, lang: Lang) -> Harness<'static, App> {
+    i18n::set(lang);
     let dir = dir.to_path_buf();
     Harness::builder().with_size(Vec2::new(1400.0, 900.0)).with_step_dt(1.0 / 60.0).build_eframe(move |cc| {
         App::new(&cc.egui_ctx, Config { launcher: Launcher::Disabled, agent: AgentMode::Disabled, config_dir: dir, os_toasts: false })
@@ -819,6 +826,7 @@ fn changes(key: &str, files: &[(&str, u64)]) -> AgentEvent {
         root: Some("/home/me/api".into()),
         git: true,
         branch: Some("main".into()),
+        detached: false,
         error: None,
         files: files
             .iter()
@@ -919,7 +927,7 @@ fn changes_panel_follows_the_ai_and_shows_diffs() {
     assert!(h.query_by_label("⎇ main").is_some());
     // « Suivre » : le dernier fichier touché est affiché d'office.
     assert_eq!(diff_requests(&h), vec!["src/main.rs"]);
-    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Diff { key: "p-api".into(), file: "src/main.rs".into(), text: "@@ -1 +1 @@\n-ancien\n+nouveau\n".into(), truncated: false })]);
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Diff { key: "p-api".into(), file: "src/main.rs".into(), text: "@@ -1 +1 @@\n-ancien\n+nouveau\n".into(), truncated: false, problem: None })]);
     steps(&mut h, 3);
     assert!(h.query_by_label("+nouveau").is_some() && h.query_by_label("-ancien").is_some(), "diff affiché");
 
@@ -936,6 +944,34 @@ fn changes_panel_follows_the_ai_and_shows_diffs() {
     h.get_by_label("Δ Changements (2)").click();
     steps(&mut h, 3);
     assert!(h.query_by_label("Fichier modifié src/main.rs").is_none(), "panneau fermé");
+}
+
+#[test]
+fn the_interface_follows_the_system_language() {
+    let dir = temp_dir("english");
+    let mut h = harness_in(&dir, Lang::En);
+    add_project(&mut h, "api", Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 500.0)));
+    h.state_mut().world.projects[0].cwd = Some("~/api".into());
+    add_card(&mut h, "a", pos2(40.0, 40.0));
+    steps(&mut h, 2);
+    assert!(h.query_by_label("+ Project").is_some() && h.query_by_label("Show all").is_some());
+    assert!(h.query_by_label("All").is_some(), "the overview chip");
+    h.get_by_label("● api").click();
+    steps(&mut h, 3);
+    let now = tcanvas::shell::world::unix_now();
+    h.state_mut().dispatch(vec![Event::Agent(changes("p-api", &[("src/main.rs", now - 1)]))]);
+    steps(&mut h, 2);
+    h.get_by_label("Δ Changes (1)").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Follow").is_some() && h.query_by_label("Modified file src/main.rs").is_some());
+    assert!(h.query_by_label("Suivre").is_none(), "no French left in the panel");
+    // Un problème signalé par l'agent est traduit côté application.
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Diff { key: "p-api".into(), file: "src/main.rs".into(), text: String::new(), truncated: false, problem: Some(protocol::Problem::NoDiff) })]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("No difference from HEAD.").is_some());
+    h.get_by_label("Close terminal a").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Close “a”?").is_some() && h.query_by_label("Cancel").is_some(), "confirmation dialog in English");
 }
 
 #[test]
@@ -1378,7 +1414,7 @@ fn the_changes_badge_shows_diffs_and_commits_from_the_overview() {
     assert!(h.query_by_label("Rien en cours : tout est commité.").is_some());
     assert!(h.query_by_label("Commit feat: connexion").is_some());
     assert!(h.state().agent_sent().contains(&protocol::AgentCmd::ShowCommit { key: "p-api".into(), sha: sha.clone() }), "« Suivre » affiche le dernier commit");
-    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Diff { key: "p-api".into(), file: sha, text: "commit ccc\n+nouveau\n".into(), truncated: false })]);
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Diff { key: "p-api".into(), file: sha, text: "commit ccc\n+nouveau\n".into(), truncated: false, problem: None })]);
     steps(&mut h, 3);
     assert!(h.query_by_label("+nouveau").is_some(), "diff du commit affiché");
 }

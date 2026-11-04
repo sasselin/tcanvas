@@ -26,19 +26,19 @@ fn main() -> std::io::Result<()> {
         }
         Some("kill") => {
             let Some(session) = std::env::args().nth(2) else {
-                eprintln!("usage : tcanvas-agent kill <session>");
+                eprintln!("usage: tcanvas-agent kill <session>");
                 std::process::exit(2);
             };
             let report = features::kill::kill_session(&session);
-            println!("{} processus arrêtés ({} ont exigé SIGKILL)", report.targeted, report.needed_sigkill);
+            println!("{} processes stopped ({} needed SIGKILL)", report.targeted, report.needed_sigkill);
             if !report.survivors.is_empty() {
-                eprintln!("processus toujours vivants : {:?}", report.survivors);
+                eprintln!("processes still alive: {:?}", report.survivors);
                 std::process::exit(1);
             }
             Ok(())
         }
         Some(other) => {
-            eprintln!("commande inconnue : {other}\nusage : tcanvas-agent [serve|install-hooks|hooks|kill <session>]");
+            eprintln!("unknown command: {other}\nusage: tcanvas-agent [serve|install-hooks|hooks|kill <session>]");
             std::process::exit(2);
         }
     }

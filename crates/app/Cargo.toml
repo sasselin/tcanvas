@@ -15,6 +15,7 @@ directories = "6"
 nucleo-matcher = "0.3"
 # Lecture du presse-papiers pour Ctrl+Maj+V et le clic droit (egui ne lit que pour Ctrl+V).
 arboard = { version = "3.6", default-features = false }
+sys-locale = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.7"

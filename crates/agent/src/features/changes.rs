@@ -10,7 +10,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use protocol::{AgentEvent, ChangeKind, ChangeSet, CommitInfo, DirEntry, DirListing, FileChange};
+use protocol::{AgentEvent, ChangeKind, ChangeSet, CommitInfo, DirEntry, DirListing, FileChange, Problem};
 
 const SCAN_EVERY: Duration = Duration::from_secs(2);
 const MAX_FILES: usize = 500;
@@ -65,14 +65,12 @@ fn run(rx: Receiver<Cmd>, send: impl Fn(&AgentEvent)) {
             }
             Ok(Cmd::Diff { key, file }) => {
                 if let Some(w) = watched.get(&key) {
-                    let (text, truncated) = diff(w, &file);
-                    send(&AgentEvent::Diff { key, file, text, truncated });
+                    send(&diff_event(key, file.clone(), diff(w, &file)));
                 }
             }
             Ok(Cmd::ShowCommit { key, sha }) => {
                 if let Some(w) = watched.get(&key) {
-                    let (text, truncated) = show_commit(w, &sha);
-                    send(&AgentEvent::Diff { key, file: sha, text, truncated });
+                    send(&diff_event(key, sha.clone(), show_commit(w, &sha)));
                 }
             }
             Ok(Cmd::List { path }) => send(&AgentEvent::DirListing(list_dir(&path))),
@@ -101,13 +99,21 @@ pub fn expand_tilde(path: &str, home: Option<&str>) -> String {
     }
 }
 
-/// Chemin absolu d'un dossier existant, ou message d'erreur lisible.
-pub fn resolve(path: &str) -> Result<PathBuf, String> {
+/// Chemin absolu d'un dossier existant.
+pub fn resolve(path: &str) -> Result<PathBuf, Problem> {
     let expanded = expand_tilde(path, std::env::var("HOME").ok().as_deref());
     match fs::canonicalize(&expanded) {
         Ok(p) if p.is_dir() => Ok(p),
-        Ok(_) => Err(format!("« {path} » n'est pas un dossier")),
-        Err(_) => Err(format!("dossier introuvable : {path}")),
+        Ok(_) => Err(Problem::NotADir { path: path.into() }),
+        Err(_) => Err(Problem::DirNotFound { path: path.into() }),
+    }
+}
+
+/// Réponse à une demande de diff : le texte, ou le problème qui l'empêche.
+fn diff_event(key: String, file: String, result: Result<(String, bool), Problem>) -> AgentEvent {
+    match result {
+        Ok((text, truncated)) => AgentEvent::Diff { key, file, text, truncated, problem: None },
+        Err(p) => AgentEvent::Diff { key, file, text: String::new(), truncated: false, problem: Some(p) },
     }
 }
 
@@ -133,7 +139,7 @@ fn repo(dir: &Path) -> Option<Repo> {
 }
 
 pub fn scan(key: &str, path: &str, since: u64) -> ChangeSet {
-    let mut set = ChangeSet { key: key.into(), root: None, git: false, branch: None, error: None, files: Vec::new(), truncated: false, commits: Vec::new() };
+    let mut set = ChangeSet { key: key.into(), root: None, git: false, branch: None, detached: false, error: None, files: Vec::new(), truncated: false, commits: Vec::new() };
     let dir = match resolve(path) {
         Ok(d) => d,
         Err(e) => {
@@ -144,7 +150,8 @@ pub fn scan(key: &str, path: &str, since: u64) -> ChangeSet {
     let mut files = match repo(&dir) {
         Some(repo) => {
             set.git = true;
-            set.branch = git_ok(&dir, &["symbolic-ref", "--short", "-q", "HEAD"]).map(|b| b.trim().to_string()).or(Some("HEAD détachée".into()));
+            set.branch = git_ok(&dir, &["symbolic-ref", "--short", "-q", "HEAD"]).map(|b| b.trim().to_string());
+            set.detached = set.branch.is_none();
             set.root = Some(repo.top.to_string_lossy().into_owned());
             set.commits = recent_commits(&dir);
             git_files(&dir, &repo)
@@ -210,16 +217,17 @@ pub fn parse_log(out: &str) -> Vec<CommitInfo> {
 }
 
 /// `git show` d'un commit : message, puis le patch de chaque fichier.
-fn show_commit(w: &Watched, sha: &str) -> (String, bool) {
+fn show_commit(w: &Watched, sha: &str) -> Result<(String, bool), Problem> {
     // Un sha seulement : rien qui puisse passer pour une option ou une plage.
     if sha.len() < 7 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return ("commit refusé".into(), false);
+        return Err(Problem::CommitRefused);
     }
-    let Ok(dir) = resolve(&w.path) else { return ("dossier introuvable".into(), false) };
-    let out = git(&dir, &["show", "--no-color", "--no-ext-diff", "-M", "--stat", "--patch", "--format=commit %H%nAuteur : %an <%ae>%nDate : %ad%n%n%w(0,4,4)%B", "--date=format:%Y-%m-%d %H:%M", sha]);
+    let dir = resolve(&w.path)?;
+    // En-tête au format git standard : la sortie de git n'est pas traduite.
+    let out = git(&dir, &["show", "--no-color", "--no-ext-diff", "-M", "--stat", "--patch", "--format=commit %H%nAuthor: %an <%ae>%nDate:   %ad%n%n%w(0,4,4)%B", "--date=format:%Y-%m-%d %H:%M", sha]);
     match out.filter(|o| o.status.success()) {
-        Some(o) => truncate(String::from_utf8_lossy(&o.stdout).into_owned(), MAX_DIFF),
-        None => ("commit introuvable".into(), false),
+        Some(o) => Ok(truncate(String::from_utf8_lossy(&o.stdout).into_owned(), MAX_DIFF)),
+        None => Err(Problem::CommitNotFound),
     }
 }
 
@@ -346,7 +354,7 @@ pub fn list_dir(path: &str) -> DirListing {
             }
             listing.dirs.sort_by_key(|d| d.name.to_lowercase());
         }
-        Err(e) => listing.error = Some(format!("lecture impossible : {e}")),
+        Err(e) => listing.error = Some(Problem::Unreadable { detail: e.to_string() }),
     }
     listing.path = Some(dir.to_string_lossy().into_owned());
     listing
@@ -358,12 +366,12 @@ fn safe_relative(file: &str) -> bool {
     !file.is_empty() && p.is_relative() && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
-fn diff(w: &Watched, file: &str) -> (String, bool) {
+fn diff(w: &Watched, file: &str) -> Result<(String, bool), Problem> {
     if !safe_relative(file) {
-        return ("chemin refusé".into(), false);
+        return Err(Problem::PathRefused);
     }
-    let Ok(dir) = resolve(&w.path) else { return ("dossier introuvable".into(), false) };
-    let Some(repo) = repo(&dir) else { return ("Pas un dépôt git : initialisez git dans ce dossier pour voir les diffs.".into(), false) };
+    let dir = resolve(&w.path)?;
+    let repo = repo(&dir).ok_or(Problem::NotAGitRepo)?;
     let entry = w.last_sent.as_ref().and_then(|s| s.files.iter().find(|f| f.path == file));
     let out = match entry.map(|f| &f.kind) {
         Some(ChangeKind::Untracked) => git(&repo.top, &["diff", "--no-index", "--no-color", "--no-ext-diff", "--", "/dev/null", file]),
@@ -372,9 +380,9 @@ fn diff(w: &Watched, file: &str) -> (String, bool) {
     };
     let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
     if text.is_empty() {
-        return ("Aucune différence avec HEAD.".into(), false);
+        return Err(Problem::NoDiff);
     }
-    truncate(text, MAX_DIFF)
+    Ok(truncate(text, MAX_DIFF))
 }
 
 fn truncate(mut text: String, max: usize) -> (String, bool) {
@@ -474,14 +482,17 @@ mod tests {
         assert!(l.parent.is_some() && !l.git);
         assert!(list_dir(&root.join("beta").display().to_string()).git);
         let missing = list_dir("/nexiste/pas");
-        assert!(missing.error.is_some() && missing.path.is_none());
+        assert_eq!(missing.error, Some(Problem::DirNotFound { path: "/nexiste/pas".into() }));
+        assert!(missing.path.is_none());
+        let file = root.join("fichier.txt").display().to_string();
+        assert_eq!(list_dir(&file).error, Some(Problem::NotADir { path: file }));
         fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn missing_folder_reports_an_error() {
         let set = scan("k", "/nexiste/pas/du/tout", 0);
-        assert!(set.error.as_deref().is_some_and(|e| e.contains("introuvable")), "{set:?}");
+        assert_eq!(set.error, Some(Problem::DirNotFound { path: "/nexiste/pas/du/tout".into() }));
         assert!(set.root.is_none() && set.files.is_empty());
     }
 }

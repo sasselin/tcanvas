@@ -9,6 +9,7 @@ mod folder_picker;
 
 use folder_picker::{Choice, FolderPicker};
 use crate::shell::event::{Event, Notice};
+use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::widgets::confirm;
 use crate::shell::world::{Body, CardId, EMPTY_PROJECT, PROJECT_COLORS, Project, ProjectId, World, new_id};
@@ -44,19 +45,19 @@ pub fn cards_in(world: &World, id: &str) -> Vec<CardId> {
 pub fn close_message(world: &World, id: &str) -> (String, String) {
     let name = world.project(id).map(|p| p.name.as_str()).unwrap_or("?");
     let cards = cards_in(world, id);
-    let title = format!("Fermer le groupe « {name} » ?");
+    let title = (t().close_group_title)(name);
     if cards.is_empty() {
-        return (title, "Le groupe ne contient aucun terminal. Le cadre sera supprimé.".into());
+        return (title, t().close_empty_group.into());
     }
     let mut body = match cards.len() {
-        1 => "Ce terminal sera fermé avec tous ses processus :\n".to_string(),
-        n => format!("Ces {n} terminaux seront fermés avec tous leurs processus :\n"),
+        1 => t().close_one_terminal.to_string(),
+        n => (t().close_n_terminals)(n),
     };
     for card in cards.iter().filter_map(|c| world.card(c)) {
-        let running = card.info.as_ref().and_then(|i| i.command.as_deref()).map(|c| format!("  —  « {c} » en cours")).unwrap_or_default();
+        let running = card.info.as_ref().and_then(|i| i.command.as_deref()).map(t().running_command).unwrap_or_default();
         body.push_str(&format!("  •  {}{running}\n", card.title()));
     }
-    body.push_str("\nLe cadre sera supprimé. C'est définitif.");
+    body.push_str(t().close_group_footer);
     (title, body)
 }
 
@@ -76,7 +77,7 @@ pub fn arrival_spot(world: &World, project: &str, card: &str) -> Option<Rect> {
 /// Libellé du dossier lié, raccourci par la gauche pour garder la fin du chemin.
 pub fn folder_label(cwd: Option<&str>) -> String {
     match cwd {
-        None => "📁 Lier un dossier".into(),
+        None => t().link_a_folder.into(),
         Some(c) if c.chars().count() > 40 => format!("📁 …{}", c.chars().skip(c.chars().count() - 39).collect::<String>()),
         Some(c) => format!("📁 {c}"),
     }
@@ -165,7 +166,7 @@ impl Projects {
             let header = Rect::from_min_size(pos2(screen.min.x, screen.min.y - HEADER_H - 4.0), vec2(width, HEADER_H));
             let folder_font = FontId::proportional(12.0);
             let folder_rect = Rect::from_min_size(pos2(header.max.x + 6.0, header.min.y), vec2(measure(&folder, &folder_font) + 16.0, HEADER_H));
-            let add_label = "+ Terminal";
+            let add_label = t().new_terminal_button;
             let add_rect = Rect::from_min_size(pos2(folder_rect.max.x + 6.0, header.min.y), vec2(measure(add_label, &folder_font) + 16.0, HEADER_H));
             let eid = Id::unique(("project", &id));
 
@@ -182,10 +183,10 @@ impl Projects {
 
             // Dossier lié, à droite de l'étiquette : clic = changer de dossier.
             let folder_r = ui.interact(folder_rect, eid.with("folder"), Sense::click()).on_hover_text(match &p.cwd {
-                Some(_) => "Dossier lié : les nouveaux terminaux s'y ouvrent et ses changements sont suivis. Clic : changer",
-                None => "Lier un dossier : les nouveaux terminaux s'y ouvriront et ses changements seront suivis",
+                Some(_) => t().folder_linked_hint,
+                None => t().folder_unlinked_hint,
             });
-            let a11y = format!("Dossier du groupe {}", p.name);
+            let a11y = (t().group_folder_a11y)(&p.name);
             folder_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
             let folder_bg = if folder_r.hovered() { color.gamma_multiply(0.5) } else { color.gamma_multiply(0.22) };
             painter.rect_filled(folder_rect, CornerRadius::same(6), folder_bg);
@@ -196,8 +197,8 @@ impl Projects {
             }
 
             // Nouveau terminal dans ce groupe (dans son dossier lié), posé à côté des autres.
-            let add_r = ui.interact(add_rect, eid.with("add"), Sense::click()).on_hover_text("Ouvrir un terminal dans ce groupe (Ctrl+Maj+N quand le groupe est ouvert)");
-            let a11y = format!("Nouveau terminal dans le groupe {}", p.name);
+            let add_r = ui.interact(add_rect, eid.with("add"), Sense::click()).on_hover_text(t().group_new_terminal_hint);
+            let a11y = (t().group_new_terminal_a11y)(&p.name);
             add_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
             painter.rect_filled(add_rect, CornerRadius::same(6), if add_r.hovered() { color.gamma_multiply(0.5) } else { color.gamma_multiply(0.22) });
             painter.text(add_rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, add_label, folder_font.clone(), theme::TEXT);
@@ -210,8 +211,8 @@ impl Projects {
                 let n = world.change_counts.get(&id).copied().unwrap_or(0);
                 let delta_label = format!("Δ {n}");
                 let delta_rect = Rect::from_min_size(pos2(add_rect.max.x + 6.0, header.min.y), vec2(measure(&delta_label, &folder_font) + 16.0, HEADER_H));
-                let delta_r = ui.interact(delta_rect, eid.with("changes"), Sense::click()).on_hover_text("Voir les fichiers modifiés, les commits récents et leurs diffs");
-                let a11y = format!("Changements du groupe {}", p.name);
+                let delta_r = ui.interact(delta_rect, eid.with("changes"), Sense::click()).on_hover_text(t().group_changes_hint);
+                let a11y = (t().group_changes_a11y)(&p.name);
                 delta_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
                 let bg = if delta_r.hovered() { color.gamma_multiply(0.5) } else if n > 0 { color.gamma_multiply(0.35) } else { color.gamma_multiply(0.22) };
                 painter.rect_filled(delta_rect, CornerRadius::same(6), bg);
@@ -225,19 +226,19 @@ impl Projects {
             if world.members(&id).next().is_none() && screen.width() > 220.0 && screen.height() > 80.0 {
                 let empty_rect = Rect::from_center_size(screen.center(), vec2(220.0, 44.0));
                 let empty_r = ui.interact(empty_rect, eid.with("empty-add"), Sense::click());
-                empty_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, "+ Ouvrir un terminal"));
+                empty_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t().open_a_terminal));
                 painter.rect_filled(empty_rect, CornerRadius::same(8), if empty_r.hovered() { color.gamma_multiply(0.6) } else { color.gamma_multiply(0.35) });
-                painter.text(empty_rect.center(), Align2::CENTER_CENTER, "+ Ouvrir un terminal", FontId::proportional(16.0), theme::TEXT);
+                painter.text(empty_rect.center(), Align2::CENTER_CENTER, t().open_a_terminal, FontId::proportional(16.0), theme::TEXT);
                 if empty_r.clicked() {
                     events.push(Event::NewCard { at: None, project: Some(id.clone()) });
                 }
             }
 
-            let head = ui.interact(header, eid.with("head"), Sense::click_and_drag()).on_hover_text("Double-clic : renommer · glisser : déplacer avec ses terminaux");
+            let head = ui.interact(header, eid.with("head"), Sense::click_and_drag()).on_hover_text(t().group_header_hint);
             // Bouton × au bout de l'étiquette, enregistré après : il gagne le clic.
             let close_rect = Rect::from_min_size(pos2(header.max.x - CLOSE_W, header.min.y), vec2(CLOSE_W, HEADER_H));
-            let close = ui.interact(close_rect, eid.with("close"), Sense::click()).on_hover_text("Fermer le groupe et tous ses terminaux");
-            let a11y = format!("Fermer le groupe {}", world.projects[i].name);
+            let close = ui.interact(close_rect, eid.with("close"), Sense::click()).on_hover_text(t().close_group_hint);
+            let a11y = (t().close_group_a11y)(&world.projects[i].name);
             close.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
             let hot = close.hovered();
             if hot {
@@ -279,7 +280,7 @@ impl Projects {
             let red = egui::Color32::from_rgb(220, 80, 80);
             let pts = [screen.left_top(), screen.right_top(), screen.right_bottom(), screen.left_bottom(), screen.left_top()];
             painter.extend(egui::Shape::dashed_line(&pts, Stroke::new(2.0, red), 10.0, 6.0));
-            painter.text(screen.center_top() + vec2(0.0, 16.0), Align2::CENTER_TOP, "Relâcher pour sortir le terminal du groupe", FontId::proportional(14.0), red);
+            painter.text(screen.center_top() + vec2(0.0, 16.0), Align2::CENTER_TOP, t().drop_to_leave_group, FontId::proportional(14.0), red);
         }
     }
 
@@ -299,7 +300,7 @@ impl Projects {
         }
         if output.response.lost_focus() {
             let cancelled = ui.input(|i| i.key_pressed(Key::Escape));
-            let editing = self.editing.take().expect("édition en cours");
+            let editing = self.editing.take().expect("editing in progress");
             let name = editing.text.trim().to_string();
             if !cancelled && !name.is_empty() {
                 events.push(Event::RenameProject(editing.id, name));
@@ -310,7 +311,7 @@ impl Projects {
     /// Ouvre le sélecteur de dossier du groupe, sur son dossier ou celui d'un de ses terminaux.
     fn open_picker(&mut self, world: &World, id: &str, events: &mut Vec<Event>) {
         let Some(p) = world.project(id) else { return };
-        let title = format!("Dossier lié au groupe « {} »", p.name);
+        let title = (t().picker_title)(&p.name);
         let (picker, cmd) = FolderPicker::open(id.to_string(), title, p.cwd.is_some(), &suggested_folder(world, id), shortcuts(world, id));
         self.picker = Some(picker);
         events.push(Event::ToAgent(cmd));
@@ -319,23 +320,23 @@ impl Projects {
     /// Menu du groupe. Renvoie `true` pour ouvrir le sélecteur de dossier.
     fn menu(&mut self, ui: &mut Ui, p: &Project, events: &mut Vec<Event>) -> bool {
         let mut pick = false;
-        if ui.button("Nouveau terminal ici").clicked() {
+        if ui.button(t().new_terminal_here).clicked() {
             events.push(Event::NewCard { at: Some(p.rect.center()), project: Some(p.id.clone()) });
             ui.close();
         }
-        if ui.button("Renommer (double-clic sur le titre)").clicked() {
+        if ui.button(t().rename_group).clicked() {
             self.start_rename(p);
             ui.close();
         }
-        if ui.button("Dossier lié…").clicked() {
+        if ui.button(t().linked_folder_menu).clicked() {
             pick = true;
             ui.close();
         }
-        if p.cwd.is_some() && ui.button("Délier le dossier").clicked() {
+        if p.cwd.is_some() && ui.button(t().unlink_folder).clicked() {
             events.push(Event::SetProjectCwd(p.id.clone(), None));
             ui.close();
         }
-        ui.menu_button("Couleur", |ui| {
+        ui.menu_button(t().color, |ui| {
             for c in PROJECT_COLORS {
                 let (rect, resp) = ui.allocate_exact_size(vec2(60.0, 18.0), Sense::click());
                 ui.painter().rect_filled(rect, CornerRadius::same(4), theme::rgb(c));
@@ -346,11 +347,11 @@ impl Projects {
             }
         });
         ui.separator();
-        if ui.button("Fermer le groupe et ses terminaux…").clicked() {
+        if ui.button(t().close_group_menu).clicked() {
             events.push(Event::RequestCloseProject(p.id.clone()));
             ui.close();
         }
-        if ui.button("Supprimer le cadre (garde les terminaux)").clicked() {
+        if ui.button(t().remove_frame).clicked() {
             events.push(Event::RemoveProject(p.id.clone()));
             ui.close();
         }
@@ -363,7 +364,7 @@ impl Projects {
                 self.confirm_close = None;
             } else {
                 let (title, body) = close_message(world, &id);
-                match confirm(ctx, "close-project", &title, &body, "Tout fermer") {
+                match confirm(ctx, "close-project", &title, &body, t().close_all) {
                     Some(true) => {
                         events.extend(cards_in(world, &id).into_iter().map(Event::KillCard));
                         events.push(Event::RemoveProject(id));
@@ -408,12 +409,12 @@ impl Projects {
             _ => None,
         };
         let name = project.as_deref().and_then(|p| world.project(p)).map(|p| p.name.clone());
-        let c = world.card_mut(card).expect("carte présente");
+        let c = world.card_mut(card).expect("card exists");
         c.project = project;
         if let Some(r) = spot {
             c.rect = r;
         }
-        let hidden_now = !world.shows_card(world.card(card).expect("carte présente"));
+        let hidden_now = !world.shows_card(world.card(card).expect("card exists"));
         if relocate {
             out.push(Event::SettleCard(card.to_string()));
         }
@@ -438,7 +439,7 @@ impl Projects {
                 let n = world.projects.len();
                 let p = Project {
                     id: new_id(),
-                    name: format!("Projet {}", n + 1),
+                    name: (t().default_project_name)(n + 1),
                     color: PROJECT_COLORS[n % PROJECT_COLORS.len()],
                     rect: Rect::from_center_size(center, EMPTY_PROJECT),
                     cwd: None,
@@ -535,6 +536,7 @@ mod tests {
 
     #[test]
     fn group_members_and_close_message() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
         let mut w = World::default();
         w.projects.push(Project { id: "p".into(), name: "API".into(), color: [0; 3], rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0)), cwd: None });
         let mut a = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::splat(50.0)), None);
@@ -623,6 +625,7 @@ mod tests {
 
     #[test]
     fn folder_suggestion_and_label() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
         let (mut w, id) = two_groups();
         assert_eq!(suggested_folder(&w, "api"), "");
         w.card_mut(&id).unwrap().cwd = Some("/home/me/api".into());

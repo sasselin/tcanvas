@@ -2,6 +2,8 @@
 
 use egui::{Id, Key, Modal, Modifiers, RichText};
 
+use crate::shell::i18n::t;
+
 /// Confirmation modale. `Some(true)` : confirmé (bouton ou Entrée), `Some(false)` : annulé
 /// (bouton, Échap ou clic à côté), `None` : encore ouverte.
 pub fn confirm(ctx: &egui::Context, id: &str, title: &str, body: &str, ok_label: &str) -> Option<bool> {
@@ -20,7 +22,7 @@ pub fn confirm(ctx: &egui::Context, id: &str, title: &str, body: &str, ok_label:
             if ui.add(danger).clicked() {
                 result = Some(true);
             }
-            if ui.button("Annuler").clicked() {
+            if ui.button(t().cancel).clicked() {
                 result = Some(false);
             }
         });
@@ -45,10 +47,10 @@ pub fn text_prompt(ctx: &egui::Context, id: &str, title: &str, text: &mut String
             result = Some(true);
         }
         ui.horizontal(|ui| {
-            if ui.button("OK").clicked() {
+            if ui.button(t().ok).clicked() {
                 result = Some(true);
             }
-            if ui.button("Annuler").clicked() {
+            if ui.button(t().cancel).clicked() {
                 result = Some(false);
             }
         });

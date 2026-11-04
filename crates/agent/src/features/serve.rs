@@ -6,7 +6,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use protocol::{AgentCmd, AgentEvent, DEFAULT_STALL_SECS, SessionInfo, TermStatus};
+use protocol::{AgentCmd, AgentEvent, DEFAULT_STALL_SECS, Problem, SessionInfo, TermStatus};
 
 use super::{changes, hooks, kill, status, tmux};
 
@@ -50,7 +50,7 @@ pub fn run() -> io::Result<()> {
         let rows = match tmux::list_panes() {
             Ok(rows) => rows,
             Err(e) => {
-                send(&AgentEvent::Error { message: format!("tmux introuvable : {e}") })?;
+                send(&AgentEvent::Error { problem: Problem::TmuxMissing { detail: e.to_string() } })?;
                 Vec::new()
             }
         };
@@ -156,7 +156,7 @@ fn spawn_stdin_reader(watcher: Sender<changes::Cmd>) -> Receiver<AgentCmd> {
                         break;
                     }
                 }
-                Err(e) => eprintln!("commande ignorée ({e}) : {line}"),
+                Err(e) => eprintln!("ignored command ({e}): {line}"),
             }
         }
         std::process::exit(0);
