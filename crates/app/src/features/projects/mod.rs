@@ -200,9 +200,25 @@ impl Projects {
             let a11y = format!("Nouveau terminal dans le groupe {}", p.name);
             add_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
             painter.rect_filled(add_rect, CornerRadius::same(6), if add_r.hovered() { color.gamma_multiply(0.5) } else { color.gamma_multiply(0.22) });
-            painter.text(add_rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, add_label, folder_font, theme::TEXT);
+            painter.text(add_rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, add_label, folder_font.clone(), theme::TEXT);
             if add_r.clicked() {
                 events.push(Event::NewCard { at: None, project: Some(id.clone()) });
+            }
+
+            // Changements du dossier lié : nombre de fichiers non commités ; clic = panneau des diffs.
+            if p.cwd.is_some() {
+                let n = world.change_counts.get(&id).copied().unwrap_or(0);
+                let delta_label = format!("Δ {n}");
+                let delta_rect = Rect::from_min_size(pos2(add_rect.max.x + 6.0, header.min.y), vec2(measure(&delta_label, &folder_font) + 16.0, HEADER_H));
+                let delta_r = ui.interact(delta_rect, eid.with("changes"), Sense::click()).on_hover_text("Voir les fichiers modifiés, les commits récents et leurs diffs");
+                let a11y = format!("Changements du groupe {}", p.name);
+                delta_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
+                let bg = if delta_r.hovered() { color.gamma_multiply(0.5) } else if n > 0 { color.gamma_multiply(0.35) } else { color.gamma_multiply(0.22) };
+                painter.rect_filled(delta_rect, CornerRadius::same(6), bg);
+                painter.text(delta_rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, delta_label, folder_font.clone(), if n > 0 { theme::TEXT } else { theme::TEXT_DIM });
+                if delta_r.clicked() {
+                    events.push(Event::ShowChanges(id.clone()));
+                }
             }
 
             // Groupe vide : l'action évidente, au milieu du cadre.
@@ -428,11 +444,18 @@ impl Projects {
                     cwd: None,
                 };
                 self.start_rename(&p);
-                if in_space {
-                    out.push(Event::EnterSpace(Some(p.id.clone())));
-                }
+                let id = p.id.clone();
                 world.projects.push(p);
+                // Jamais par-dessus un groupe ou un terminal : à la place libre la plus proche.
+                world.place_clear(&Body::Group(id.clone()));
                 world.touch();
+                if in_space {
+                    out.push(Event::EnterSpace(Some(id.clone())));
+                }
+                // Le renommage se fait sur l'étiquette : elle doit être à l'écran.
+                if let Some(r) = world.body_rect(&Body::Group(id)) {
+                    out.push(Event::RevealRect(r));
+                }
             }
             Event::RenameProject(id, name) => {
                 if let Some(p) = world.projects.iter_mut().find(|p| &p.id == id)
@@ -637,6 +660,23 @@ mod tests {
         Projects::default().handle(&Event::NewProject { at: None }, &mut w, &mut out);
         let new = &w.projects[1];
         assert!(!new.rect.intersects(w.projects[0].rect));
-        assert!(matches!(out.as_slice(), [Event::EnterSpace(Some(id))] if id == &new.id));
+        assert!(matches!(out.as_slice(), [Event::EnterSpace(Some(id)), Event::RevealRect(_)] if id == &new.id));
+    }
+
+    #[test]
+    fn a_new_group_never_lands_on_an_existing_one() {
+        let mut w = World::default();
+        w.projects.push(Project { id: "api".into(), name: "API".into(), color: [0; 3], rect: Rect::from_center_size(Pos2::ZERO, EMPTY_PROJECT), cwd: None });
+        // Vue « Tous », caméra centrée sur le groupe existant, ou création à un point précis dedans.
+        for at in [None, Some(pos2(20.0, 10.0))] {
+            Projects::default().handle(&Event::NewProject { at }, &mut w, &mut vec![]);
+        }
+        let rects: Vec<Rect> = w.projects.iter().map(|p| w.body_rect(&Body::Group(p.id.clone())).unwrap()).collect();
+        for i in 0..rects.len() {
+            for j in i + 1..rects.len() {
+                assert!(!rects[i].intersects(rects[j]), "{i}/{j} : {rects:?}");
+            }
+        }
+        assert_eq!(w.projects[0].rect, Rect::from_center_size(Pos2::ZERO, EMPTY_PROJECT), "l'existant reste en place");
     }
 }

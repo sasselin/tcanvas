@@ -43,7 +43,7 @@ pub fn run() -> io::Result<()> {
                     thread::spawn(move || kill::kill_session(&session));
                 }
                 // Relayées directement au fil des changements par le lecteur de stdin.
-                AgentCmd::Watch { .. } | AgentCmd::Unwatch { .. } | AgentCmd::Diff { .. } | AgentCmd::ListDir { .. } => {}
+                AgentCmd::Watch { .. } | AgentCmd::Unwatch { .. } | AgentCmd::Diff { .. } | AgentCmd::ShowCommit { .. } | AgentCmd::ListDir { .. } => {}
             }
         }
 
@@ -144,6 +144,9 @@ fn spawn_stdin_reader(watcher: Sender<changes::Cmd>) -> Receiver<AgentCmd> {
                 }
                 Ok(AgentCmd::Diff { key, file }) => {
                     let _ = watcher.send(changes::Cmd::Diff { key, file });
+                }
+                Ok(AgentCmd::ShowCommit { key, sha }) => {
+                    let _ = watcher.send(changes::Cmd::ShowCommit { key, sha });
                 }
                 Ok(AgentCmd::ListDir { path }) => {
                     let _ = watcher.send(changes::Cmd::List { path });

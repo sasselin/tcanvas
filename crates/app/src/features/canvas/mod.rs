@@ -175,6 +175,11 @@ impl Canvas {
                 }
             }
             Event::FitRect(r) => self.fly(world.camera, Camera::fitting(*r, vp, 60.0, 1.0), None),
+            Event::RevealRect(r) => {
+                if !world.camera.visible_world(vp).contains_rect(*r) {
+                    self.fly(world.camera, Camera::fitting(*r, vp, 60.0, 1.0), None);
+                }
+            }
             Event::FlyCamera(to) => self.fly(world.camera, *to, None),
             // Changer d'espace remplace la caméra : un vol en cours n'a plus de sens.
             Event::EnterSpace(_) => self.flight = None,

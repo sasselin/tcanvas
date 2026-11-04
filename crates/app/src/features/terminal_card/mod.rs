@@ -1,5 +1,6 @@
 //! Cartes-terminaux : PTY, rendu, clavier/souris, déplacement, redimensionnement.
 
+mod clipboard;
 mod input;
 mod pty;
 mod render;
@@ -20,7 +21,8 @@ use crate::shell::event::Event;
 use crate::shell::theme;
 use crate::shell::widgets::{confirm, text_prompt};
 use crate::shell::world::{Card, CardId, World};
-use input::MouseButton;
+pub use clipboard::{ClipboardSource, Fixed as FixedClipboard};
+use input::{ClipAction, MouseButton};
 use pty::{GridSize, TermRuntime};
 pub use pty::{Launch, attach_command};
 
@@ -33,8 +35,8 @@ const GRIP: f32 = 16.0;
 const CLOSE_MIN_ZOOM: f32 = 0.35;
 const MIN_COLS: u16 = 20;
 const MIN_ROWS: u16 = 4;
-const DEFAULT_COLS: f32 = 100.0;
-const DEFAULT_ROWS: f32 = 28.0;
+const DEFAULT_COLS: f32 = 120.0;
+const DEFAULT_ROWS: f32 = 34.0;
 /// En dessous de cette taille de police (pixels), on dessine un aperçu au lieu de la grille.
 const LOD_FONT_PX: f32 = 5.5;
 
@@ -80,6 +82,10 @@ pub struct TerminalCards {
     /// Sessions tuées volontairement : ni notification, ni réadoption.
     killed: HashSet<String>,
     viewport: Rect,
+    /// Presse-papiers lu pour Ctrl+Maj+V et le clic droit.
+    clipboard: Box<dyn ClipboardSource>,
+    /// Sans vrai terminal (tests) : ce qui aurait été envoyé à chaque carte.
+    written: Vec<(CardId, Vec<u8>)>,
 }
 
 impl TerminalCards {
@@ -100,6 +106,47 @@ impl TerminalCards {
             wire_from: None,
             killed: HashSet::new(),
             viewport: Rect::NOTHING,
+            clipboard: match launcher {
+                Launcher::Tmux => Box::new(clipboard::System),
+                Launcher::Disabled => Box::new(clipboard::Fixed(None)),
+            },
+            written: Vec::new(),
+        }
+    }
+
+    /// Remplace le presse-papiers (tests).
+    pub fn set_clipboard(&mut self, clipboard: Box<dyn ClipboardSource>) {
+        self.clipboard = clipboard;
+    }
+
+    /// Octets envoyés à une carte sans vrai terminal (tests, `Launcher::Disabled`).
+    pub fn written(&self, id: &str) -> Vec<u8> {
+        self.written.iter().filter(|(c, _)| c == id).flat_map(|(_, b)| b.clone()).collect()
+    }
+
+    /// Envoie des octets au terminal d'une carte (ou les note, sans vrai terminal).
+    fn send_to(&mut self, id: &str, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        if let Some(rt) = self.runtimes.get(id) {
+            rt.scroll_to_bottom();
+            rt.write(bytes);
+        } else if self.launcher == Launcher::Disabled {
+            self.written.push((id.to_string(), bytes));
+        }
+    }
+
+    /// Mode du terminal d'une carte (mode par défaut sans vrai terminal).
+    fn mode_of(&self, id: &str) -> TermMode {
+        self.runtimes.get(id).map(|rt| *rt.term.lock().mode()).unwrap_or_default()
+    }
+
+    /// Colle le presse-papiers du système dans la carte.
+    fn paste_clipboard(&mut self, id: &str) {
+        if let Some(text) = self.clipboard.text() {
+            let bracketed = self.mode_of(id).contains(TermMode::BRACKETED_PASTE);
+            self.send_to(id, input::paste_bytes(&text, bracketed));
         }
     }
 
@@ -143,7 +190,10 @@ impl TerminalCards {
             let Some(rt) = self.runtimes.get(&id) else { continue };
             match ev {
                 TermEvent::PtyWrite(text) => rt.write(text.into_bytes()),
-                TermEvent::ClipboardStore(_, text) => self.ctx.copy_text(text),
+                TermEvent::ClipboardStore(_, text) => {
+                    self.ctx.copy_text(text);
+                    events.push(Event::Notify(id.clone(), crate::shell::event::Notice::Copied));
+                }
                 TermEvent::ColorRequest(index, format) => {
                     let c = match index {
                         0..=255 => render::indexed(index as u8),
@@ -170,8 +220,11 @@ impl TerminalCards {
     /// Envoie le clavier capturé à la carte focalisée.
     fn write_keys(&mut self, focused: Option<&str>) {
         let keys = std::mem::take(&mut self.keys);
-        let Some(rt) = focused.and_then(|id| self.runtimes.get(id)) else { return };
-        let mode = *rt.term.lock().mode();
+        let Some(id) = focused else { return };
+        if !self.runtimes.contains_key(id) && self.launcher != Launcher::Disabled {
+            return;
+        }
+        let mode = self.mode_of(id);
         let app_cursor = mode.contains(TermMode::APP_CURSOR);
         let mut out = Vec::new();
         for (ev, mods) in keys {
@@ -180,18 +233,19 @@ impl TerminalCards {
                 egui::Event::Paste(t) => out.extend(input::paste_bytes(&t, mode.contains(TermMode::BRACKETED_PASTE))),
                 egui::Event::Copy => out.push(0x03),
                 egui::Event::Cut => out.push(0x18),
-                egui::Event::Key { key, pressed: true, modifiers, .. } => {
-                    if let Some(b) = input::key_bytes(key, modifiers, app_cursor) {
-                        out.extend(b);
+                egui::Event::Key { key, pressed: true, modifiers, .. } => match input::clip_action(key, modifiers) {
+                    Some(ClipAction::Paste) => {
+                        if let Some(text) = self.clipboard.text() {
+                            out.extend(input::paste_bytes(&text, mode.contains(TermMode::BRACKETED_PASTE)));
+                        }
                     }
-                }
+                    Some(ClipAction::Copy) => {}
+                    None => out.extend(input::key_bytes(key, modifiers, app_cursor).unwrap_or_default()),
+                },
                 _ => {}
             }
         }
-        if !out.is_empty() {
-            rt.scroll_to_bottom();
-            rt.write(out);
-        }
+        self.send_to(id, out);
     }
 
     fn ensure_runtimes(&mut self, world: &World, cell: Vec2) {
@@ -314,13 +368,18 @@ impl TerminalCards {
         }
 
         let alt = ui.input(|inp| inp.modifiers.alt);
-        if body_r.drag_started() && alt {
+        // Clic droit = coller, comme dans Windows Terminal (Alt+clic droit : menu de tmux).
+        let paste_click = body_r.secondary_clicked() && !alt && !is_preview(zoom);
+        if body_r.drag_started_by(PointerButton::Primary) && alt {
             self.wire_from = Some(id.clone());
         } else if body_r.clicked() && is_preview(zoom) {
             // Un aperçu n'est pas utilisable : on zoome dessus pour pouvoir taper.
             events.push(Event::FlyTo(id.clone()));
-        } else if !focused && (body_r.clicked() || body_r.drag_started()) {
+        } else if !focused && (body_r.clicked() || body_r.drag_started() || paste_click) {
             events.push(Event::FocusCard(id.clone()));
+        }
+        if paste_click {
+            self.paste_clipboard(&id);
         }
 
         // --- Dessin -------------------------------------------------------------------
@@ -372,11 +431,9 @@ impl TerminalCards {
             let cell_screen = ui.ctx().fonts_mut(|f| vec2(f.glyph_width(&font, 'M'), f.row_height(&font)));
             let metrics = render::GridMetrics { origin: body_inner.min, cell: cell_screen, font, clip: body_inner.intersect(vp) };
             render::paint_grid(&painter, &rt.term.lock(), &metrics, focused);
-            // La molette fait défiler le terminal survolé, même sans le clavier ; les clics, eux,
-            // ne vont qu'au terminal focalisé.
-            if !alt {
-                self.forward_mouse(ui, &id, &body_r, body_inner.min, cell_screen, focused);
-            }
+            // La molette fait défiler le terminal survolé, même sans le clavier ; un clic va au
+            // terminal focalisé, ou à celui qu'il vise (le premier glissé sélectionne déjà).
+            self.forward_mouse(ui, &id, &body_r, body_inner.min, cell_screen, focused);
         }
         // Un terminal lisible sous le pointeur garde toute la molette, y compris la queue du
         // défilement lissé des frames suivantes : le canevas ne bouge pas derrière lui.
@@ -478,15 +535,26 @@ impl TerminalCards {
         let mut out = Vec::new();
         for ev in ui.input(|i| i.events.clone()) {
             match ev {
-                egui::Event::PointerButton { pos, button, pressed, modifiers, .. } if mouse_mode && focused => {
+                egui::Event::PointerButton { pos, button, pressed, modifiers, .. } if mouse_mode => {
                     let b = match button {
                         PointerButton::Primary => MouseButton::Left,
                         PointerButton::Middle => MouseButton::Middle,
                         PointerButton::Secondary => MouseButton::Right,
                         _ => continue,
                     };
+                    // Alt + glissé tire un fil ; clic droit seul = coller (Alt + clic droit va à
+                    // tmux : son menu). Le relâchement, lui, suit toujours l'appui transmis.
+                    let ours = match b {
+                        MouseButton::Left => modifiers.alt,
+                        MouseButton::Right => !modifiers.alt,
+                        _ => false,
+                    };
+                    if pressed && ours {
+                        continue;
+                    }
                     // Maj + clic appartient à l'outil main (déplacer la vue), pas au terminal.
-                    if pressed && body.rect.contains(pos) && !modifiers.shift {
+                    let aimed = focused || body.hovered();
+                    if pressed && aimed && body.rect.contains(pos) && !modifiers.shift {
                         let (col, line) = cell_at(pos);
                         out.extend(input::mouse_report(b, modifiers, col, line, true, false, sgr));
                         rt.mouse_down = Some((b, col, line));
@@ -496,7 +564,7 @@ impl TerminalCards {
                         rt.mouse_down = None;
                     }
                 }
-                egui::Event::PointerMoved(pos) if focused && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) => {
+                egui::Event::PointerMoved(pos) if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) => {
                     if let Some((b, c0, l0)) = rt.mouse_down {
                         let (col, line) = cell_at(pos);
                         if (col, line) != (c0, l0) {
@@ -751,7 +819,7 @@ mod tests {
     fn default_card_holds_default_grid() {
         let size = card_size(CELL, DEFAULT_COLS, DEFAULT_ROWS);
         let g = grid_for(Rect::from_min_size(Pos2::ZERO, size), CELL);
-        assert_eq!(g, GridSize { cols: 100, rows: 28 });
+        assert_eq!(g, GridSize { cols: 120, rows: 34 });
     }
 
     #[test]

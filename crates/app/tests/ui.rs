@@ -825,6 +825,7 @@ fn changes(key: &str, files: &[(&str, u64)]) -> AgentEvent {
             .map(|(path, mtime)| protocol::FileChange { path: (*path).into(), kind: protocol::ChangeKind::Modified, added: Some(3), removed: Some(1), mtime: *mtime, binary: false })
             .collect(),
         truncated: false,
+        commits: vec![],
     })
 }
 
@@ -1320,4 +1321,80 @@ fn one_click_on_a_project_chip_opens_it_centered_even_after_wandering_off() {
     h.get_by_label("● api").click();
     steps(&mut h, 3);
     assert!(sees_whole(&h, project_rect(&h, "p-api")), "un seul clic : api centré et entier");
+}
+
+// --- Copier / coller et diffs en vue « Tous » --------------------------------------------------
+
+#[test]
+fn terminal_clipboard_shortcuts_and_right_click_paste() {
+    let dir = temp_dir("clipboard");
+    let mut h = harness(&dir);
+    h.state_mut().cards.set_clipboard(Box::new(tcanvas::features::terminal_card::FixedClipboard(Some("echo un\necho deux".into()))));
+    let id = add_card(&mut h, "api", Pos2::ZERO);
+    h.state_mut().world.camera = tcanvas::shell::world::Camera { center: pos2(250.0, 150.0), zoom: 1.0 };
+    h.state_mut().dispatch(vec![Event::FocusCard(id.clone())]);
+    steps(&mut h, 2);
+
+    // Ctrl+Maj+V colle (et n'envoie pas ^V) ; Ctrl+Maj+C n'envoie pas ^C.
+    ctrl_shift(&h, Key::V);
+    ctrl_shift(&h, Key::C);
+    steps(&mut h, 2);
+    assert_eq!(h.state().cards.written(&id), b"echo un\recho deux");
+
+    // Clic droit dans le terminal : colle aussi, sans menu.
+    let body = screen_of(&h, h.state().world.card(&id).unwrap().rect).center();
+    h.hover_at(body);
+    h.step();
+    h.event(egui::Event::PointerButton { pos: body, button: egui::PointerButton::Secondary, pressed: true, modifiers: Modifiers::NONE });
+    h.step();
+    h.event(egui::Event::PointerButton { pos: body, button: egui::PointerButton::Secondary, pressed: false, modifiers: Modifiers::NONE });
+    steps(&mut h, 2);
+    assert_eq!(h.state().cards.written(&id), b"echo un\recho deuxecho un\recho deux");
+}
+
+
+#[test]
+fn the_changes_badge_shows_diffs_and_commits_from_the_overview() {
+    let dir = temp_dir("changes-badge");
+    let mut h = harness(&dir);
+    add_project(&mut h, "api", Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 500.0)));
+    h.state_mut().world.projects[0].cwd = Some("~/api".into());
+    add_card(&mut h, "a", pos2(40.0, 40.0));
+    h.state_mut().world.camera = tcanvas::shell::world::Camera { center: pos2(500.0, 250.0), zoom: 0.8 };
+    steps(&mut h, 2);
+    assert!(h.state().world.space.is_none(), "vue « Tous »");
+
+    // Dépôt propre : le travail est dans les commits.
+    let now = tcanvas::shell::world::unix_now();
+    let AgentEvent::Changes(mut set) = changes("p-api", &[]) else { unreachable!() };
+    let sha = "c".repeat(40);
+    set.commits = vec![protocol::CommitInfo { sha: sha.clone(), summary: "feat: connexion".into(), author: "Claude".into(), time: now - 120 }];
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Changes(set))]);
+    steps(&mut h, 2);
+
+    h.get_by_label("Changements du groupe api").click();
+    steps(&mut h, 3);
+    assert!(h.state().world.changes_open);
+    assert!(h.query_by_label("Rien en cours : tout est commité.").is_some());
+    assert!(h.query_by_label("Commit feat: connexion").is_some());
+    assert!(h.state().agent_sent().contains(&protocol::AgentCmd::ShowCommit { key: "p-api".into(), sha: sha.clone() }), "« Suivre » affiche le dernier commit");
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Diff { key: "p-api".into(), file: sha, text: "commit ccc\n+nouveau\n".into(), truncated: false })]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("+nouveau").is_some(), "diff du commit affiché");
+}
+
+#[test]
+fn a_new_group_from_the_overview_never_covers_an_existing_one() {
+    let dir = temp_dir("new-group");
+    let mut h = harness(&dir);
+    add_project(&mut h, "api", Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 500.0)));
+    add_card(&mut h, "a", pos2(40.0, 40.0));
+    h.state_mut().world.camera = tcanvas::shell::world::Camera { center: pos2(500.0, 250.0), zoom: 0.8 };
+    steps(&mut h, 2);
+    h.state_mut().dispatch(vec![Event::NewProject { at: None }]);
+    steps(&mut h, 40);
+    let w = &h.state().world;
+    let (a, b) = (w.projects[0].rect, w.projects[1].rect);
+    assert!(!a.expand(20.0).intersects(b), "{a:?} / {b:?}");
+    assert!(sees_whole(&h, b), "le nouveau cadre est à l'écran pour le nommer");
 }

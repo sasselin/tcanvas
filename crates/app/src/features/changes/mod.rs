@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use egui::{Align, Align2, Button, Color32, CornerRadius, FontId, Layout, Panel, RichText, ScrollArea, Sense, Ui, vec2};
-use protocol::{AgentCmd, AgentEvent, ChangeKind, ChangeSet, FileChange};
+use protocol::{AgentCmd, AgentEvent, ChangeKind, ChangeSet, CommitInfo, FileChange};
 
 use crate::shell::event::Event;
 use crate::shell::theme;
@@ -45,6 +45,48 @@ type Fingerprint = (u64, Option<u32>, Option<u32>, ChangeKind);
 
 fn fingerprint(f: &FileChange) -> Fingerprint {
     (f.mtime, f.added, f.removed, f.kind.clone())
+}
+
+/// Ce que montre la zone du diff : un fichier non commité, ou un commit récent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    File(String),
+    Commit(String),
+}
+
+impl Target {
+    /// Valeur de `file` dans la réponse `AgentEvent::Diff` de l'agent.
+    fn reply_key(&self) -> &str {
+        match self {
+            Target::File(f) | Target::Commit(f) => f,
+        }
+    }
+}
+
+/// Le plus récent entre le dernier fichier touché et le dernier commit : ce que « Suivre » affiche.
+pub fn newest(set: &ChangeSet) -> Option<Target> {
+    let file = set.files.iter().max_by_key(|f| f.mtime).map(|f| (f.mtime, Target::File(f.path.clone())));
+    let commit = set.commits.first().map(|c| (c.time, Target::Commit(c.sha.clone())));
+    match (file, commit) {
+        // À égalité (fichier touché puis commité dans la même seconde), le fichier en cours gagne.
+        (Some(f), Some(c)) => Some(if c.0 > f.0 { c.1 } else { f.1 }),
+        (f, c) => f.or(c).map(|x| x.1),
+    }
+}
+
+fn target_fingerprint(set: &ChangeSet, t: &Target) -> Option<Fingerprint> {
+    match t {
+        Target::File(path) => set.files.iter().find(|f| &f.path == path).map(fingerprint),
+        // Un commit ne change pas.
+        Target::Commit(_) => None,
+    }
+}
+
+fn exists(set: &ChangeSet, t: &Target) -> bool {
+    match t {
+        Target::File(path) => set.files.iter().any(|f| &f.path == path),
+        Target::Commit(sha) => set.commits.iter().any(|c| &c.sha == sha),
+    }
 }
 
 /// Commandes à envoyer pour que l'agent surveille exactement les dossiers liés.
@@ -91,7 +133,7 @@ pub fn split_path(path: &str) -> (&str, &str) {
 
 struct DiffView {
     key: ProjectId,
-    file: String,
+    target: Target,
     /// `None` tant que l'agent n'a pas répondu.
     lines: Option<Vec<(LineKind, String)>>,
     truncated: bool,
@@ -102,16 +144,20 @@ pub struct Changes {
     /// Dossiers dont la surveillance a été demandée à l'agent (clé : id du projet).
     watched: BTreeMap<ProjectId, String>,
     sets: HashMap<ProjectId, ChangeSet>,
-    /// Fichier sélectionné par groupe.
-    selected: HashMap<ProjectId, String>,
+    /// Fichier ou commit sélectionné par groupe.
+    selected: HashMap<ProjectId, Target>,
     diff: Option<DiffView>,
-    /// Sélectionner automatiquement le dernier fichier modifié.
+    /// Sélectionner automatiquement le dernier fichier modifié (ou le dernier commit).
     pub follow: bool,
+    /// Groupe affiché en vue « Tous » : celui du dernier terminal focalisé, ou de la pastille Δ cliquée.
+    shown: Option<ProjectId>,
+    /// Groupe du panneau à la frame précédente : en changer redemande son diff.
+    last_panel: Option<ProjectId>,
 }
 
 impl Default for Changes {
     fn default() -> Self {
-        Self { watched: BTreeMap::new(), sets: HashMap::new(), selected: HashMap::new(), diff: None, follow: true }
+        Self { watched: BTreeMap::new(), sets: HashMap::new(), selected: HashMap::new(), diff: None, follow: true, shown: None, last_panel: None }
     }
 }
 
@@ -120,8 +166,16 @@ impl Changes {
         self.sets.get(project)
     }
 
+    /// Fichier sélectionné du groupe (pas un commit).
     pub fn selected(&self, project: &str) -> Option<&str> {
-        self.selected.get(project).map(String::as_str)
+        match self.selected.get(project) {
+            Some(Target::File(f)) => Some(f),
+            _ => None,
+        }
+    }
+
+    pub fn selected_target(&self, project: &str) -> Option<&Target> {
+        self.selected.get(project)
     }
 
     /// Lignes du diff affiché, s'il est arrivé (tests).
@@ -129,52 +183,69 @@ impl Changes {
         self.diff.as_ref().and_then(|d| d.lines.clone())
     }
 
-    /// Le panneau a de quoi s'afficher : un groupe ouvert, lié à un dossier.
-    fn panel_project<'a>(&self, world: &'a World) -> Option<&'a Project> {
-        world.space.as_deref().and_then(|id| world.project(id)).filter(|p| p.cwd.is_some())
+    /// Groupe dont le panneau montre les changements : le groupe ouvert, sinon (vue « Tous »)
+    /// celui du dernier terminal focalisé ou de la pastille Δ cliquée. Il doit avoir un dossier lié.
+    pub fn panel_project<'a>(&self, world: &'a World) -> Option<&'a Project> {
+        world.space.as_deref().or(self.shown.as_deref()).and_then(|id| world.project(id)).filter(|p| p.cwd.is_some())
     }
 
-    /// À chaque frame : aligne les surveillances de l'agent sur les dossiers liés.
+    /// À chaque frame : aligne les surveillances de l'agent sur les dossiers liés, et redemande le
+    /// diff quand le panneau passe à un autre groupe.
     pub fn poll(&mut self, world: &World, events: &mut Vec<Event>) {
         events.extend(reconcile(&mut self.watched, &world.projects).into_iter().map(Event::ToAgent));
+        let panel = self.panel_project(world).map(|p| p.id.clone());
+        if panel != self.last_panel {
+            self.last_panel = panel.clone();
+            if let Some(id) = panel
+                && let Some(t) = self.selected.get(&id).cloned()
+                && self.diff.as_ref().is_none_or(|d| d.key != id || d.target != t)
+            {
+                self.select(&id, t, events);
+            }
+        }
     }
 
-    fn select(&mut self, key: &str, file: &str, out: &mut Vec<Event>) {
-        self.selected.insert(key.to_string(), file.to_string());
-        let fp = self.sets.get(key).and_then(|s| s.files.iter().find(|f| f.path == file)).map(fingerprint);
-        self.diff = Some(DiffView { key: key.to_string(), file: file.to_string(), lines: None, truncated: false, fingerprint: fp });
-        out.push(Event::ToAgent(AgentCmd::Diff { key: key.to_string(), file: file.to_string() }));
+    fn select(&mut self, key: &str, target: Target, out: &mut Vec<Event>) {
+        let fp = self.sets.get(key).and_then(|s| target_fingerprint(s, &target));
+        let cmd = match &target {
+            Target::File(file) => AgentCmd::Diff { key: key.to_string(), file: file.clone() },
+            Target::Commit(sha) => AgentCmd::ShowCommit { key: key.to_string(), sha: sha.clone() },
+        };
+        self.selected.insert(key.to_string(), target.clone());
+        self.diff = Some(DiffView { key: key.to_string(), target, lines: None, truncated: false, fingerprint: fp });
+        out.push(Event::ToAgent(cmd));
     }
 
-    /// Nouvel état d'un dossier : suivre le dernier fichier touché, rafraîchir le diff affiché.
+    /// Nouvel état d'un dossier : suivre le dernier fichier touché (ou commit), rafraîchir le diff affiché.
     fn on_changes(&mut self, set: ChangeSet, world: &mut World, out: &mut Vec<Event>) {
         let key = set.key.clone();
-        let newest = set.files.iter().max_by_key(|f| f.mtime).cloned();
-        if let Some(n) = &newest {
-            world.file_activity.insert(key.clone(), n.mtime);
+        if let Some(t) = set.files.iter().map(|f| f.mtime).max() {
+            world.file_activity.insert(key.clone(), t);
         }
+        world.change_counts.insert(key.clone(), set.files.len());
+        let newest = newest(&set);
         self.sets.insert(key.clone(), set);
         let set = &self.sets[&key];
         let current = self.selected.get(&key).cloned();
         let target = match (&current, &newest) {
-            (_, Some(n)) if self.follow => Some(n.path.clone()),
-            (Some(c), _) if set.files.iter().any(|f| &f.path == c) => Some(c.clone()),
+            (_, Some(n)) if self.follow => Some(n.clone()),
+            (Some(c), _) if exists(set, c) => Some(c.clone()),
             _ => None,
         };
-        let Some(file) = target else {
+        let Some(target) = target else {
             self.selected.remove(&key);
             if self.diff.as_ref().is_some_and(|d| d.key == key) {
                 self.diff = None;
             }
             return;
         };
-        let fp = set.files.iter().find(|f| f.path == file).map(fingerprint);
-        let shown = self.diff.as_ref().is_some_and(|d| d.key == key && d.file == file && d.fingerprint == fp);
-        // Seul le groupe ouvert affiche un diff : inutile de le demander pour les autres.
-        if !shown && world.space.as_ref() == Some(&key) {
-            self.select(&key, &file, out);
+        let fp = target_fingerprint(set, &target);
+        let shown = self.diff.as_ref().is_some_and(|d| d.key == key && d.target == target && d.fingerprint == fp);
+        // Seul le groupe du panneau affiche un diff : inutile de le demander pour les autres.
+        if !shown && self.panel_project(world).is_some_and(|p| p.id == key) {
+            self.select(&key, target, out);
         } else {
-            self.selected.insert(key, file);
+            self.selected.insert(key, target);
         }
     }
 
@@ -186,13 +257,26 @@ impl Changes {
                 world.changes_open = !world.changes_open;
                 world.touch();
             }
+            Event::ShowChanges(id) => {
+                self.shown = Some(id.clone());
+                if !world.changes_open {
+                    world.changes_open = true;
+                    world.touch();
+                }
+            }
+            // En vue « Tous », le panneau suit le groupe du terminal sur lequel on travaille.
+            Event::FocusCard(id) => {
+                if let Some(p) = world.card(id).and_then(|c| c.project.clone()) {
+                    self.shown = Some(p);
+                }
+            }
             Event::Agent(AgentEvent::Changes(set)) => {
                 if world.project(&set.key).is_some_and(|p| p.cwd.is_some()) {
                     self.on_changes(set.clone(), world, out);
                 }
             }
             Event::Agent(AgentEvent::Diff { key, file, text, truncated }) => {
-                if let Some(d) = self.diff.as_mut().filter(|d| &d.key == key && &d.file == file) {
+                if let Some(d) = self.diff.as_mut().filter(|d| &d.key == key && d.target.reply_key() == file) {
                     d.lines = Some(text.lines().map(|l| (classify(l), l.to_string())).collect());
                     d.truncated = *truncated;
                 }
@@ -201,16 +285,9 @@ impl Changes {
                 self.sets.remove(id);
                 self.selected.remove(id);
                 world.file_activity.remove(id);
+                world.change_counts.remove(id);
                 if self.diff.as_ref().is_some_and(|d| &d.key == id) {
                     self.diff = None;
-                }
-            }
-            // En ouvrant un groupe, on affiche le diff du fichier sélectionné.
-            Event::EnterSpace(Some(id)) => {
-                if let Some(file) = self.selected.get(id).cloned()
-                    && self.diff.as_ref().is_none_or(|d| &d.key != id || d.file != file)
-                {
-                    self.select(id, &file, out);
                 }
             }
             _ => {}
@@ -238,16 +315,16 @@ impl Changes {
         Panel::right("changes").resizable(true).default_size(440.0).min_size(260.0).show(ui, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Δ Changements").strong().color(theme::TEXT));
+                ui.label(RichText::new(format!("Δ {}", project.name)).strong().color(theme::rgb(project.color)));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if ui.small_button("×").on_hover_text("Fermer le panneau").clicked() {
                         events.push(Event::ToggleChanges);
                     }
-                    let follow = ui.checkbox(&mut self.follow, "Suivre").on_hover_text("Afficher automatiquement le dernier fichier modifié");
+                    let follow = ui.checkbox(&mut self.follow, "Suivre").on_hover_text("Afficher automatiquement le dernier fichier modifié ou le dernier commit");
                     if follow.changed() && self.follow
-                        && let Some(n) = self.sets.get(&project.id).and_then(|s| s.files.iter().max_by_key(|f| f.mtime)).map(|f| f.path.clone())
+                        && let Some(n) = self.sets.get(&project.id).and_then(newest)
                     {
-                        self.select(&project.id, &n, events);
+                        self.select(&project.id, n, events);
                     }
                 });
             });
@@ -259,19 +336,34 @@ impl Changes {
             self.header(ui, &project, &set);
             ui.separator();
             let now = unix_now();
-            let list_h = (ui.available_height() * 0.38).max(80.0);
+            let list_h = (ui.available_height() * 0.42).max(100.0);
             ScrollArea::vertical().id_salt("changes-list").max_height(list_h).auto_shrink([false, true]).show(ui, |ui| {
+                if set.git {
+                    ui.label(RichText::new(format!("Non commité ({})", set.files.len())).small().strong().color(theme::TEXT_DIM));
+                }
                 if set.files.is_empty() && set.error.is_none() {
-                    ui.label(RichText::new(if set.git { "Aucun changement par rapport au dernier commit." } else { "Aucun fichier modifié depuis le début du suivi." }).color(theme::TEXT_DIM));
+                    ui.label(RichText::new(if set.git { "Rien en cours : tout est commité." } else { "Aucun fichier modifié depuis le début du suivi." }).color(theme::TEXT_DIM));
                 }
                 for f in &set.files {
-                    if self.file_row(ui, f, now, self.selected(&project.id) == Some(f.path.as_str())) {
+                    let on = self.selected(&project.id) == Some(f.path.as_str());
+                    if self.file_row(ui, f, now, on) {
                         self.follow = false;
-                        self.select(&project.id, &f.path, events);
+                        self.select(&project.id, Target::File(f.path.clone()), events);
                     }
                 }
                 if set.truncated {
                     ui.label(RichText::new("… liste coupée (trop de fichiers)").color(theme::TEXT_DIM));
+                }
+                if !set.commits.is_empty() {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Commits récents").small().strong().color(theme::TEXT_DIM));
+                    for c in &set.commits {
+                        let on = self.selected_target(&project.id) == Some(&Target::Commit(c.sha.clone()));
+                        if self.commit_row(ui, c, now, on) {
+                            self.follow = false;
+                            self.select(&project.id, Target::Commit(c.sha.clone()), events);
+                        }
+                    }
                 }
             });
             if set.files.iter().any(|f| now.saturating_sub(f.mtime) < RECENT_SECS) {
@@ -363,14 +455,41 @@ impl Changes {
         resp.clicked()
     }
 
+    /// Une ligne de commit. Renvoie `true` si on a cliqué dessus.
+    fn commit_row(&self, ui: &mut Ui, c: &CommitInfo, now: u64, selected: bool) -> bool {
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 22.0), Sense::click());
+        let resp = resp.on_hover_text(format!("{}\n{} · {}", c.summary, c.author, &c.sha[..c.sha.len().min(12)]));
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Commit {}", c.summary)));
+        let painter = ui.painter_at(rect);
+        let age = now.saturating_sub(c.time);
+        if selected {
+            painter.rect_filled(rect, CornerRadius::same(4), theme::FOCUS.gamma_multiply(0.25));
+        } else if age < RECENT_SECS {
+            painter.rect_filled(rect, CornerRadius::same(4), HUNK.gamma_multiply(0.25 * (1.0 - age as f32 / RECENT_SECS as f32)));
+        } else if resp.hovered() {
+            painter.rect_filled(rect, CornerRadius::same(4), theme::TITLE_BG);
+        }
+        let y = rect.center().y;
+        let mono = FontId::monospace(12.0);
+        let sha = painter.text(egui::pos2(rect.min.x + 6.0, y), Align2::LEFT_CENTER, &c.sha[..c.sha.len().min(7)], mono, HUNK);
+        let w = painter.text(egui::pos2(rect.max.x - 6.0, y), Align2::RIGHT_CENTER, age_label(now, c.time), FontId::proportional(11.0), theme::TEXT_DIM).width();
+        let clip = painter.with_clip_rect(egui::Rect::from_min_max(rect.min, egui::pos2(rect.max.x - w - 16.0, rect.max.y)));
+        clip.text(egui::pos2(sha.max.x + 8.0, y), Align2::LEFT_CENTER, &c.summary, FontId::proportional(13.0), theme::TEXT);
+        resp.clicked()
+    }
+
     fn diff_ui(&self, ui: &mut Ui, key: &str, git: bool) {
         let Some(d) = self.diff.as_ref().filter(|d| d.key == key) else {
             if git {
-                ui.label(RichText::new("Cliquez un fichier pour voir son diff.").color(theme::TEXT_DIM));
+                ui.label(RichText::new("Cliquez un fichier ou un commit pour voir son diff.").color(theme::TEXT_DIM));
             }
             return;
         };
-        ui.label(RichText::new(&d.file).strong().color(theme::TEXT));
+        let title = match &d.target {
+            Target::File(f) => f.clone(),
+            Target::Commit(sha) => format!("commit {}", &sha[..sha.len().min(7)]),
+        };
+        ui.label(RichText::new(title).strong().color(theme::TEXT));
         let Some(lines) = &d.lines else {
             ui.label(RichText::new("Chargement du diff…").color(theme::TEXT_DIM));
             return;
@@ -411,7 +530,7 @@ mod tests {
     }
 
     fn set(key: &str, files: Vec<FileChange>) -> ChangeSet {
-        ChangeSet { key: key.into(), root: Some("/r".into()), git: true, branch: Some("main".into()), error: None, files, truncated: false }
+        ChangeSet { key: key.into(), root: Some("/r".into()), git: true, branch: Some("main".into()), error: None, files, truncated: false, commits: vec![] }
     }
 
     fn world() -> World {
@@ -490,7 +609,7 @@ mod tests {
         c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("a.rs", 10, 1), file("b.rs", 20, 1)]))), &mut w, &mut vec![]);
         assert_eq!(c.selected("api"), None, "rien d'imposé sans « Suivre »");
         let mut out = vec![];
-        c.select("api", "a.rs", &mut out);
+        c.select("api", Target::File("a.rs".into()), &mut out);
         let mut out = vec![];
         c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("a.rs", 10, 1), file("b.rs", 40, 3)]))), &mut w, &mut out);
         assert!(diff_requests(&out).is_empty(), "b.rs a changé, pas a.rs");
@@ -500,6 +619,82 @@ mod tests {
         c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("b.rs", 40, 3)]))), &mut w, &mut vec![]);
         assert_eq!(c.selected("api"), None);
         assert!(c.diff_lines().is_none());
+    }
+
+    fn commit(sha: char, time: u64) -> protocol::CommitInfo {
+        protocol::CommitInfo { sha: sha.to_string().repeat(40), summary: format!("commit {sha}"), author: "t".into(), time }
+    }
+
+    fn requests(out: &[Event]) -> Vec<AgentCmd> {
+        out.iter().filter_map(|e| match e {
+            Event::ToAgent(c @ (AgentCmd::Diff { .. } | AgentCmd::ShowCommit { .. })) => Some(c.clone()),
+            _ => None,
+        }).collect()
+    }
+
+    #[test]
+    fn a_clean_repo_shows_its_latest_commit() {
+        let mut c = Changes::default();
+        let mut w = world();
+        let mut s = set("api", vec![]);
+        s.commits = vec![commit('b', 50), commit('a', 10)];
+        let mut out = vec![];
+        c.handle(&Event::Agent(AgentEvent::Changes(s.clone())), &mut w, &mut out);
+        assert_eq!(requests(&out), vec![AgentCmd::ShowCommit { key: "api".into(), sha: "b".repeat(40) }]);
+        assert_eq!(w.change_counts.get("api"), Some(&0));
+        let sha = "b".repeat(40);
+        c.handle(&Event::Agent(AgentEvent::Diff { key: "api".into(), file: sha, text: "commit x\n+a\n".into(), truncated: false }), &mut w, &mut vec![]);
+        assert_eq!(c.diff_lines().unwrap()[1], (LineKind::Add, "+a".into()));
+        // Un fichier modifié après le dernier commit passe devant.
+        s.files = vec![file("x.rs", 60, 1)];
+        let mut out = vec![];
+        c.handle(&Event::Agent(AgentEvent::Changes(s)), &mut w, &mut out);
+        assert_eq!(requests(&out), vec![AgentCmd::Diff { key: "api".into(), file: "x.rs".into() }]);
+        assert_eq!(w.change_counts.get("api"), Some(&1));
+    }
+
+    #[test]
+    fn in_the_overview_the_panel_follows_the_focused_terminal_or_the_clicked_badge() {
+        let mut c = Changes::default();
+        let mut w = world();
+        w.projects.push(project("web", Some("~/web")));
+        w.space = None;
+        assert!(c.panel_project(&w).is_none(), "vue « Tous », rien de choisi");
+        // Les deux groupes ont des changements ; aucun diff demandé tant qu'aucun n'est affiché.
+        let mut out = vec![];
+        c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("a.rs", 10, 1)]))), &mut w, &mut out);
+        c.handle(&Event::Agent(AgentEvent::Changes(set("web", vec![file("w.rs", 10, 1)]))), &mut w, &mut out);
+        assert!(requests(&out).is_empty());
+
+        let mut card = crate::shell::world::Card::new(egui::Rect::from_min_size(Pos2::ZERO, Vec2::splat(10.0)), None);
+        card.project = Some("web".into());
+        let id = card.id.clone();
+        w.add_card(card);
+        c.handle(&Event::FocusCard(id), &mut w, &mut vec![]);
+        assert_eq!(c.panel_project(&w).map(|p| p.id.as_str()), Some("web"));
+        let mut out = vec![];
+        c.poll(&w, &mut out);
+        assert_eq!(diff_requests(&out), vec!["w.rs"], "le diff du groupe affiché est demandé");
+
+        c.handle(&Event::ShowChanges("api".into()), &mut w, &mut vec![]);
+        assert!(w.changes_open, "la pastille ouvre le panneau");
+        let mut out = vec![];
+        c.poll(&w, &mut out);
+        assert_eq!(diff_requests(&out), vec!["a.rs"]);
+        let mut out = vec![];
+        c.poll(&w, &mut out);
+        assert!(diff_requests(&out).is_empty(), "une seule fois");
+    }
+
+    #[test]
+    fn newest_prefers_the_file_being_edited_on_a_tie() {
+        let mut s = set("api", vec![file("a.rs", 10, 1)]);
+        assert_eq!(newest(&s), Some(Target::File("a.rs".into())));
+        s.commits = vec![commit('c', 10)];
+        assert_eq!(newest(&s), Some(Target::File("a.rs".into())));
+        s.commits = vec![commit('c', 11)];
+        assert_eq!(newest(&s), Some(Target::Commit("c".repeat(40))));
+        assert_eq!(newest(&set("api", vec![])), None);
     }
 
     #[test]

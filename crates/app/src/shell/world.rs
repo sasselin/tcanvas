@@ -164,6 +164,8 @@ pub struct World {
     pub changes_open: bool,
     /// Dernière modification de fichier vue dans le dossier lié de chaque projet (secondes Unix).
     pub file_activity: BTreeMap<ProjectId, u64>,
+    /// Nombre de fichiers non commités dans le dossier lié de chaque projet (pastille Δ).
+    pub change_counts: BTreeMap<ProjectId, usize>,
     pub window_focused: bool,
     /// Incrémenté à chaque changement à sauvegarder.
     pub revision: u64,
@@ -314,7 +316,8 @@ impl World {
         groups.chain(self.cards.iter().filter(|c| c.project.is_none()).map(|c| Body::Card(c.id.clone()))).collect()
     }
 
-    fn body_rect(&self, body: &Body) -> Option<Rect> {
+    /// Emprise d'un corps sur le canevas (étiquette comprise pour un groupe).
+    pub fn body_rect(&self, body: &Body) -> Option<Rect> {
         match body {
             // L'étiquette dépasse au-dessus du cadre : elle compte aussi.
             Body::Group(id) => self.project(id).map(|p| Rect::from_min_max(p.rect.min - Vec2::new(0.0, GROUP_LABEL), p.rect.max)),
@@ -402,6 +405,19 @@ impl World {
             }
         }
         rect
+    }
+
+    /// Un corps qui vient d'apparaître (nouveau groupe) va à la place libre la plus proche, sans
+    /// rien pousser. Renvoie `true` s'il a bougé.
+    pub fn place_clear(&mut self, body: &Body) -> bool {
+        let Some(r) = self.body_rect(body) else { return false };
+        let delta = self.clear_spot(body, r).center() - r.center();
+        if delta == Vec2::ZERO {
+            return false;
+        }
+        self.move_body(body, delta);
+        self.touch();
+        true
     }
 
     /// Remet tout en ordre (chargement d'un ancien layout où des choses se chevauchent).
@@ -746,6 +762,20 @@ mod tests {
         w.add_card(b);
         w.raise(&ia);
         assert_eq!(w.cards[*w.cards_by_z().last().unwrap()].id, ia);
+    }
+
+    #[test]
+    fn a_new_group_dropped_on_another_moves_away_without_pushing_it() {
+        let mut w = World { projects: vec![project("old", Rect::from_center_size(Pos2::ZERO, EMPTY_PROJECT))], ..Default::default() };
+        w.add_card(member(-100.0, -50.0, "old"));
+        w.refit_projects();
+        let before = w.projects[0].rect;
+        w.projects.push(project("new", Rect::from_center_size(pos2(50.0, 30.0), EMPTY_PROJECT)));
+        assert!(w.place_clear(&Body::Group("new".into())));
+        let (old, new) = (w.body_rect(&Body::Group("old".into())).unwrap(), w.body_rect(&Body::Group("new".into())).unwrap());
+        assert_eq!(w.projects[0].rect, before, "l'existant ne bouge pas");
+        assert!(!old.expand(BODY_GAP / 2.0 - 0.01).intersects(new.expand(BODY_GAP / 2.0 - 0.01)), "{old:?} / {new:?}");
+        assert!(!w.place_clear(&Body::Group("new".into())), "déjà libre : ne bouge plus");
     }
 
     #[test]

@@ -16,6 +16,8 @@ use crate::shell::world::{Card, CardId, World};
 /// Une commande qui réussit n'est signalée que si elle a duré au moins ça.
 pub const LONG_COMMAND_SECS: u64 = 30;
 const TOAST_SECS: f64 = 15.0;
+/// La confirmation d'une copie n'a pas besoin de rester.
+const COPIED_SECS: f64 = 2.0;
 const MAX_TOASTS: usize = 5;
 /// Code de sortie d'un Ctrl+C : pas un échec à signaler.
 const SIGINT_EXIT: i32 = 130;
@@ -53,6 +55,7 @@ pub fn message(notice: &Notice, card: &Card) -> (String, String) {
         Notice::Stopped => ("■ Terminal arrêté".into(), title),
         Notice::Moved(Some(group)) => (format!("➜ Déplacé vers « {group} »"), format!("{title} · clic : y aller")),
         Notice::Moved(None) => ("➜ Sorti du groupe".into(), format!("{title} est dans « Tous » · clic : y aller")),
+        Notice::Copied => ("⧉ Copié".into(), "Sélection copiée dans le presse-papiers".into()),
     }
 }
 
@@ -125,8 +128,8 @@ impl Notifications {
         let window_focused = world.window_focused;
         let watching = window_focused && world.focused.as_ref() == Some(id);
         let Some(card) = world.card_mut(id) else { return };
-        // Un déplacement est une simple information : ni bordure d'alerte, ni toast Windows.
-        let info_only = matches!(notice, Notice::Moved(_));
+        // Un déplacement ou une copie : simple information, ni bordure d'alerte, ni toast Windows.
+        let info_only = matches!(notice, Notice::Moved(_) | Notice::Copied);
         if watching && !info_only {
             return;
         }
@@ -144,7 +147,7 @@ impl Notifications {
 
     pub fn ui(&mut self, ctx: &egui::Context, world: &World, events: &mut Vec<Event>) {
         let now = ctx.input(|i| i.time);
-        self.toasts.retain(|t| t.created.is_none_or(|c| now - c < TOAST_SECS));
+        self.toasts.retain(|t| t.created.is_none_or(|c| now - c < if t.notice == Notice::Copied { COPIED_SECS } else { TOAST_SECS }));
         if self.toasts.is_empty() {
             return;
         }
@@ -269,5 +272,17 @@ mod tests {
         card.info = Some(info(TermStatus::WaitingInput, None, None));
         let (title, body) = message(&Notice::WaitingInput, &card);
         assert!(title.contains("réponse") && body.ends_with("[y/N]"));
+    }
+
+    #[test]
+    fn a_copy_is_confirmed_without_alarm_even_while_watching() {
+        let (mut w, id) = world_with_card();
+        w.window_focused = true;
+        w.focused = Some(id.clone());
+        let mut n = Notifications::new(egui::Context::default(), false);
+        n.handle(&Event::Notify(id.clone(), Notice::Copied), &mut w, &mut vec![]);
+        n.handle(&Event::Notify(id, Notice::Copied), &mut w, &mut vec![]);
+        assert_eq!(n.pending(), 1);
+        assert!(!w.cards[0].attention);
     }
 }

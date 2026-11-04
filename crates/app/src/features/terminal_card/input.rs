@@ -92,6 +92,28 @@ pub fn text_bytes(text: &str, m: Modifiers) -> Vec<u8> {
     if m.alt && !m.ctrl { [b"\x1b".as_slice(), text.as_bytes()].concat() } else { text.as_bytes().to_vec() }
 }
 
+/// Raccourcis de presse-papiers propres aux terminaux (comme Windows Terminal) : egui ne connaît
+/// que Ctrl+C/V seuls, qu'un terminal doit garder pour ^C et le collage habituel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipAction {
+    /// Ctrl+Maj+V : coller.
+    Paste,
+    /// Ctrl+Maj+C : la sélection tmux est déjà copiée au relâchement de la souris ; surtout ne
+    /// pas envoyer ^C (qui interromprait la commande en cours).
+    Copy,
+}
+
+pub fn clip_action(key: Key, m: Modifiers) -> Option<ClipAction> {
+    if !(m.ctrl && m.shift && !m.alt) {
+        return None;
+    }
+    match key {
+        Key::V => Some(ClipAction::Paste),
+        Key::C => Some(ClipAction::Copy),
+        _ => None,
+    }
+}
+
 pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     let text = text.replace("\r\n", "\r").replace('\n', "\r");
     if bracketed {
@@ -193,6 +215,17 @@ mod tests {
     fn paste_normalizes_newlines_and_brackets() {
         assert_eq!(paste_bytes("a\r\nb\nc", false), b"a\rb\rc");
         assert_eq!(paste_bytes("x\x1b[201~y", true), b"\x1b[200~xy\x1b[201~");
+    }
+
+    #[test]
+    fn terminal_clipboard_shortcuts() {
+        let cs = CTRL | SHIFT;
+        assert_eq!(clip_action(Key::V, cs), Some(ClipAction::Paste));
+        assert_eq!(clip_action(Key::C, cs), Some(ClipAction::Copy));
+        assert_eq!(clip_action(Key::V, CTRL), None, "Ctrl+V : collage d'egui (Event::Paste)");
+        assert_eq!(clip_action(Key::C, CTRL), None, "Ctrl+C reste ^C");
+        assert_eq!(clip_action(Key::V, cs | ALT), None);
+        assert_eq!(clip_action(Key::X, cs), None);
     }
 
     #[test]

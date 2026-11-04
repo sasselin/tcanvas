@@ -108,6 +108,19 @@ pub struct ChangeSet {
     pub files: Vec<FileChange>,
     /// La liste a été coupée (trop de fichiers).
     pub truncated: bool,
+    /// Derniers commits de la branche, du plus récent au plus ancien (vide hors git).
+    #[serde(default)]
+    pub commits: Vec<CommitInfo>,
+}
+
+/// Un commit récent du dépôt surveillé.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub summary: String,
+    pub author: String,
+    /// Date du commit (secondes Unix).
+    pub time: u64,
 }
 
 /// Un sous-dossier, pour le sélecteur de dossiers.
@@ -154,6 +167,9 @@ pub enum AgentCmd {
     Unwatch { key: String },
     /// Diff d'un fichier (chemin relatif) d'un dossier surveillé.
     Diff { key: String, file: String },
+    /// Contenu d'un commit (`git show`) d'un dossier surveillé ; réponse : `AgentEvent::Diff`
+    /// avec `file` = `sha`.
+    ShowCommit { key: String, sha: String },
     /// Sous-dossiers de `path` (`~` accepté), pour le sélecteur de dossiers.
     ListDir { path: String },
 }
@@ -201,6 +217,7 @@ mod tests {
                 FileChange { path: "b.rs".into(), kind: ChangeKind::Renamed("old.rs".into()), added: None, removed: None, mtime: 0, binary: true },
             ],
             truncated: false,
+            commits: vec![],
         });
         assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
         let ev = AgentEvent::DirListing(DirListing {

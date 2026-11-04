@@ -14,6 +14,8 @@ pub enum Notice {
     Stopped,
     /// Le terminal a été déplacé vers ce groupe (`None` : hors groupe). Simple information.
     Moved(Option<String>),
+    /// Texte copié dans le presse-papiers depuis ce terminal (sélection tmux).
+    Copied,
 }
 
 #[derive(Clone, Debug)]
@@ -28,6 +30,8 @@ pub enum Event {
     EnterSpace(Option<ProjectId>),
     /// Cadre la caméra sur une zone du monde.
     FitRect(Rect),
+    /// Comme `FitRect`, mais seulement si la zone n'est pas déjà entièrement visible.
+    RevealRect(Rect),
     /// Ramène la caméra (en vol) à une vue précise, par exemple celle d'avant un filtre.
     FlyCamera(Camera),
     RenameCard(CardId, Option<String>),
@@ -58,6 +62,8 @@ pub enum Event {
     Agent(AgentEvent),
     /// Ouvre ou ferme le panneau « Changements ».
     ToggleChanges,
+    /// Ouvre le panneau « Changements » sur ce groupe.
+    ShowChanges(ProjectId),
     /// Commande à transmettre à l'agent.
     ToAgent(AgentCmd),
     /// Le client tmux d'une carte s'est arrêté sans qu'on l'ait demandé.

@@ -119,6 +119,15 @@ fn lists_git_changes_and_serves_diffs() {
     let clean = agent.wait_changes("p", "dépôt propre", |_| true);
     assert!(clean.git && clean.files.is_empty() && clean.error.is_none(), "{clean:?}");
     assert_eq!(clean.branch.as_deref(), Some("main"));
+    // Dépôt propre : le travail déjà commité reste visible, avec son contenu.
+    assert_eq!(clean.commits.iter().map(|c| (c.summary.as_str(), c.author.as_str())).collect::<Vec<_>>(), vec![("init", "t")]);
+    let sha = clean.commits[0].sha.clone();
+    agent.send(&AgentCmd::ShowCommit { key: "p".into(), sha: sha.clone() });
+    let AgentEvent::Diff { text, .. } = agent.wait_for("contenu du commit", |ev| matches!(ev, AgentEvent::Diff { file, .. } if *file == sha)) else { unreachable!() };
+    assert!(text.contains("init") && text.contains("+deux") && text.contains("gone.txt"), "{text}");
+    agent.send(&AgentCmd::ShowCommit { key: "p".into(), sha: "--output=/tmp/x".into() });
+    let AgentEvent::Diff { text, .. } = agent.wait_for("sha refusé", |ev| matches!(ev, AgentEvent::Diff { file, .. } if file.starts_with("--"))) else { unreachable!() };
+    assert_eq!(text, "commit refusé");
 
     // Ce que ferait Claude : modifier, créer, supprimer.
     std::fs::write(repo.join("a.txt"), "un\nDEUX\ntrois\nquatre\n").unwrap();

@@ -10,10 +10,12 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use protocol::{AgentEvent, ChangeKind, ChangeSet, DirEntry, DirListing, FileChange};
+use protocol::{AgentEvent, ChangeKind, ChangeSet, CommitInfo, DirEntry, DirListing, FileChange};
 
 const SCAN_EVERY: Duration = Duration::from_secs(2);
 const MAX_FILES: usize = 500;
+/// Commits récents affichés dans le panneau.
+const MAX_COMMITS: usize = 20;
 /// Parcours d'un dossier hors git : au-delà, on s'arrête.
 const MAX_WALK: usize = 20_000;
 const MAX_DIFF: usize = 512 * 1024;
@@ -28,6 +30,7 @@ pub enum Cmd {
     Watch { key: String, path: String },
     Unwatch { key: String },
     Diff { key: String, file: String },
+    ShowCommit { key: String, sha: String },
     List { path: String },
 }
 
@@ -64,6 +67,12 @@ fn run(rx: Receiver<Cmd>, send: impl Fn(&AgentEvent)) {
                 if let Some(w) = watched.get(&key) {
                     let (text, truncated) = diff(w, &file);
                     send(&AgentEvent::Diff { key, file, text, truncated });
+                }
+            }
+            Ok(Cmd::ShowCommit { key, sha }) => {
+                if let Some(w) = watched.get(&key) {
+                    let (text, truncated) = show_commit(w, &sha);
+                    send(&AgentEvent::Diff { key, file: sha, text, truncated });
                 }
             }
             Ok(Cmd::List { path }) => send(&AgentEvent::DirListing(list_dir(&path))),
@@ -124,7 +133,7 @@ fn repo(dir: &Path) -> Option<Repo> {
 }
 
 pub fn scan(key: &str, path: &str, since: u64) -> ChangeSet {
-    let mut set = ChangeSet { key: key.into(), root: None, git: false, branch: None, error: None, files: Vec::new(), truncated: false };
+    let mut set = ChangeSet { key: key.into(), root: None, git: false, branch: None, error: None, files: Vec::new(), truncated: false, commits: Vec::new() };
     let dir = match resolve(path) {
         Ok(d) => d,
         Err(e) => {
@@ -137,6 +146,7 @@ pub fn scan(key: &str, path: &str, since: u64) -> ChangeSet {
             set.git = true;
             set.branch = git_ok(&dir, &["symbolic-ref", "--short", "-q", "HEAD"]).map(|b| b.trim().to_string()).or(Some("HEAD détachée".into()));
             set.root = Some(repo.top.to_string_lossy().into_owned());
+            set.commits = recent_commits(&dir);
             git_files(&dir, &repo)
         }
         None => {
@@ -172,6 +182,45 @@ fn git_files(dir: &Path, repo: &Repo) -> Vec<FileChange> {
             FileChange { mtime: mtime(&full), path, kind, added, removed, binary }
         })
         .collect()
+}
+
+/// Séparateur de champs du format de `git log` (caractère « unit separator »).
+const FIELD: char = '\u{1f}';
+
+fn recent_commits(dir: &Path) -> Vec<CommitInfo> {
+    let format = format!("--format=%H{FIELD}%ct{FIELD}%an{FIELD}%s");
+    let n = format!("-n{MAX_COMMITS}");
+    git_ok(dir, &["log", &n, &format, "--no-color"]).map(|out| parse_log(&out)).unwrap_or_default()
+}
+
+/// Sortie de `git log --format=%H<US>%ct<US>%an<US>%s` : un commit par ligne.
+pub fn parse_log(out: &str) -> Vec<CommitInfo> {
+    out.lines()
+        .filter_map(|line| {
+            let mut f = line.splitn(4, FIELD);
+            let (sha, time, author, summary) = (f.next()?, f.next()?, f.next()?, f.next().unwrap_or_default());
+            (sha.len() >= 7 && sha.bytes().all(|b| b.is_ascii_hexdigit())).then(|| CommitInfo {
+                sha: sha.into(),
+                summary: summary.into(),
+                author: author.into(),
+                time: time.parse().unwrap_or(0),
+            })
+        })
+        .collect()
+}
+
+/// `git show` d'un commit : message, puis le patch de chaque fichier.
+fn show_commit(w: &Watched, sha: &str) -> (String, bool) {
+    // Un sha seulement : rien qui puisse passer pour une option ou une plage.
+    if sha.len() < 7 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return ("commit refusé".into(), false);
+    }
+    let Ok(dir) = resolve(&w.path) else { return ("dossier introuvable".into(), false) };
+    let out = git(&dir, &["show", "--no-color", "--no-ext-diff", "-M", "--stat", "--patch", "--format=commit %H%nAuteur : %an <%ae>%nDate : %ad%n%n%w(0,4,4)%B", "--date=format:%Y-%m-%d %H:%M", sha]);
+    match out.filter(|o| o.status.success()) {
+        Some(o) => truncate(String::from_utf8_lossy(&o.stdout).into_owned(), MAX_DIFF),
+        None => ("commit introuvable".into(), false),
+    }
 }
 
 /// `git status --porcelain=v1 -z` : `XY chemin\0`, suivi de `origine\0` pour un renommage ou une copie.
@@ -381,6 +430,16 @@ mod tests {
         assert_eq!(map["img.png"], (None, None));
         assert_eq!(map["new.rs"], (Some(0), Some(2)));
         assert_eq!(map.len(), 3);
+    }
+
+    #[test]
+    fn log_lines_become_commits() {
+        let us = FIELD;
+        let out = format!("{}{us}1700000000{us}Seb{us}feat: a{us}b\nnot-a-sha{us}1{us}x{us}y\n", "a".repeat(40));
+        let c = parse_log(&out);
+        assert_eq!(c.len(), 1);
+        assert_eq!((c[0].sha.len(), c[0].time, c[0].author.as_str(), c[0].summary.as_str()), (40, 1_700_000_000, "Seb", "feat: a\u{1f}b"));
+        assert!(parse_log("").is_empty());
     }
 
     #[test]
