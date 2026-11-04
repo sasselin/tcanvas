@@ -167,26 +167,108 @@ fn dragging_the_title_bar_moves_the_card() {
     assert_eq!(after.size(), before.size());
 }
 
+/// Two groups side by side, each with a terminal, seen in "All".
+fn two_linked_groups(h: &mut Harness<'_, App>) -> (String, String) {
+    let api = add_project(h, "api", Rect::from_min_size(pos2(-900.0, -200.0), Vec2::new(600.0, 400.0)));
+    add_card(h, "a", pos2(-850.0, -150.0));
+    let web = add_project(h, "web", Rect::from_min_size(pos2(300.0, -200.0), Vec2::new(600.0, 400.0)));
+    add_card(h, "b", pos2(350.0, -150.0));
+    h.state_mut().world.camera = tcanvas::shell::world::Camera { center: Pos2::ZERO, zoom: 0.6 };
+    steps(h, 2);
+    (api, web)
+}
+
+/// Left button press, moves and release, with `mods` held.
+fn drag_with(h: &mut Harness<'_, App>, from: Pos2, to: Pos2, mods: Modifiers) {
+    h.event(egui::Event::ModifiersChanged(mods));
+    h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: mods });
+    h.step();
+    for k in 1..=10 {
+        h.hover_at(from + (to - from) * (k as f32 / 10.0));
+        h.step();
+    }
+    h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: mods });
+    h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+    steps(h, 2);
+}
+
+/// A point on a group's label (left part, away from its × button).
+fn label_of(h: &Harness<'_, App>, name: &str) -> Pos2 {
+    let folder = h.get_by_label(&format!("Dossier du groupe {name}")).rect();
+    let frame = screen_of(h, h.state().world.project(&format!("p-{name}")).unwrap().rect);
+    pos2(frame.min.x + 12.0, folder.center().y)
+}
+
 #[test]
-fn clicking_a_wire_flies_to_its_far_end() {
+fn alt_dragging_a_group_label_onto_another_group_links_them() {
+    let dir = temp_dir("wire-draw");
+    let mut h = harness(&dir);
+    let (api, web) = two_linked_groups(&mut h);
+    let rect_before = h.state().world.project(&api).unwrap().rect;
+    let into_web = screen_of(&h, h.state().world.project(&web).unwrap().rect).center();
+
+    let label = label_of(&h, "api");
+    drag_with(&mut h, label, into_web, Modifiers::ALT);
+    let app = h.state();
+    assert_eq!(app.world.wires, vec![tcanvas::shell::world::Wire { from: api.clone(), to: web.clone() }]);
+    assert_eq!(app.world.project(&api).unwrap().rect, rect_before, "Alt + drag does not move the group");
+
+    // Released on empty canvas: no wire; a plain drag still moves the group.
+    h.state_mut().world.wires.clear();
+    let empty = screen_of(&h, Rect::from_min_size(pos2(-100.0, 400.0), Vec2::splat(10.0))).center();
+    drag_with(&mut h, label, empty, Modifiers::ALT);
+    assert!(h.state().world.wires.is_empty());
+    drag_with(&mut h, label, label + Vec2::new(0.0, 60.0), Modifiers::NONE);
+    assert_ne!(h.state().world.project(&api).unwrap().rect, rect_before, "plain drag moves the group");
+}
+
+#[test]
+fn clicking_a_wire_frames_the_far_group_and_right_click_deletes_it() {
     let dir = temp_dir("wire");
     let mut h = harness(&dir);
-    let a = add_card(&mut h, "a", pos2(-700.0, -150.0));
-    let b = add_card(&mut h, "b", pos2(300.0, -150.0));
-    h.state_mut().world.camera.zoom = 0.6;
-    h.state_mut().dispatch(vec![Event::AddWire(a.clone(), b.clone())]);
+    let (api, web) = two_linked_groups(&mut h);
+    h.state_mut().dispatch(vec![Event::AddWire(api.clone(), web.clone())]);
+    h.state_mut().world.camera.center = pos2(-600.0, 0.0);
     steps(&mut h, 2);
-    // Point on the wire right next to card A: the far end is B.
-    let app = h.state();
-    let ra = screen_of(&h, app.world.card(&a).unwrap().rect);
-    let near_a = ra.right_center() + Vec2::new(12.0, 0.0);
-    h.hover_at(near_a);
+    // Point on the wire right next to the api frame: the far end is web.
+    let near_api = screen_of(&h, h.state().world.project(&api).unwrap().rect).right_center() + Vec2::new(12.0, 0.0);
+    h.hover_at(near_api);
     h.step();
-    h.drag_at(near_a);
+    h.drag_at(near_api);
     h.step();
-    h.drop_at(near_a);
+    h.drop_at(near_api);
     steps(&mut h, 45);
-    assert_eq!(h.state().world.focused.as_deref(), Some(b.as_str()));
+    assert!(sees_whole(&h, h.state().world.project(&web).unwrap().rect), "the camera frames the other group");
+
+    let near_web = screen_of(&h, h.state().world.project(&web).unwrap().rect).left_center() - Vec2::new(12.0, 0.0);
+    h.hover_at(near_web);
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: near_web, button: egui::PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
+        h.step();
+    }
+    steps(&mut h, 2);
+    assert!(h.state().world.wires.is_empty(), "right-click deletes the wire");
+}
+
+#[test]
+fn a_project_space_shows_its_linked_groups_as_chips_that_open_them() {
+    let dir = temp_dir("wire-chip");
+    let mut h = harness(&dir);
+    let (api, web) = two_linked_groups(&mut h);
+    let db = add_project(&mut h, "db", Rect::from_min_size(pos2(1500.0, 900.0), Vec2::new(400.0, 300.0)));
+    h.state_mut().dispatch(vec![Event::AddWire(api.clone(), web.clone()), Event::AddWire(web.clone(), db.clone())]);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("→ web").is_none(), "no chips in \"All\": the wires are drawn");
+
+    ctrl_shift(&h, Key::Num1);
+    steps(&mut h, 3);
+    assert_eq!(h.state().world.space.as_deref(), Some(api.as_str()));
+    assert!(h.query_by_label("→ db").is_none(), "only the open group's links");
+    h.get_by_label("→ web").click();
+    steps(&mut h, 3);
+    assert_eq!(h.state().world.space.as_deref(), Some(web.as_str()));
+    assert!(h.query_by_label("← api").is_some() && h.query_by_label("→ db").is_some());
 }
 
 #[test]
@@ -620,7 +702,8 @@ fn closing_a_group_closes_its_terminals_after_confirmation() {
     let inside_a = add_card(&mut h, "a", pos2(-550.0, -250.0));
     let inside_b = add_card(&mut h, "b", pos2(100.0, -250.0));
     let outside = add_card(&mut h, "outside", pos2(-550.0, 400.0));
-    h.state_mut().dispatch(vec![Event::AddWire(inside_a.clone(), outside.clone())]);
+    let other = add_project(&mut h, "other", Rect::from_min_size(pos2(2000.0, 0.0), Vec2::splat(400.0)));
+    h.state_mut().dispatch(vec![Event::AddWire(group.clone(), other.clone())]);
     steps(&mut h, 2);
 
     h.get_by_label("Fermer le groupe disposable").click();
@@ -638,7 +721,7 @@ fn closing_a_group_closes_its_terminals_after_confirmation() {
     assert!(app.world.project(&group).is_none(), "frame removed");
     assert!(app.world.card(&inside_a).is_none() && app.world.card(&inside_b).is_none(), "group terminals closed");
     assert!(app.world.card(&outside).is_some(), "the terminal outside the group remains");
-    assert!(app.world.wires.is_empty(), "wires to closed terminals disappear");
+    assert!(app.world.wires.is_empty(), "the closed group's wires disappear");
 }
 
 fn cursor(h: &Harness<'_, App>) -> egui::CursorIcon {
@@ -1437,4 +1520,20 @@ fn a_new_group_from_the_overview_never_covers_an_existing_one() {
     let (a, b) = (w.projects[0].rect, w.projects[1].rect);
     assert!(!a.expand(20.0).intersects(b), "{a:?} / {b:?}");
     assert!(sees_whole(&h, b), "the new frame is on screen to name it");
+}
+
+#[test]
+fn a_canned_card_shows_fixed_output_and_ignores_typing() {
+    let dir = temp_dir("canned");
+    let mut h = harness(&dir);
+    let id = add_card(&mut h, "demo", Pos2::ZERO);
+    let app = h.state_mut();
+    app.cards.show_canned(&app.world, &id, b"\x1b[1mcargo test\x1b[0m\r\ntest result: ok");
+    steps(&mut h, 2);
+    h.state_mut().world.focused = Some(id.clone());
+    h.event(egui::Event::Text("ls".into()));
+    steps(&mut h, 2);
+    let text = h.state().cards.screen_text(&id).unwrap();
+    assert!(text.starts_with("cargo test\ntest result: ok"), "{text}");
+    assert!(h.state().cards.written(&id).is_empty(), "input goes to the (inert) terminal, not the test log");
 }

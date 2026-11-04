@@ -27,7 +27,8 @@ Cargo workspace (`Cargo.toml`, edition 2024, resolver 3):
   changes, session kill).
 - `crates/app` - package `tcanvas` (lib + Windows exe). `src/lib.rs` declares the modules;
   `build.rs` embeds `assets/icon.ico` into the Windows exe (needs mingw-w64 `windres`).
-- `scripts/` - `deploy.sh`, `watch.sh`, `test-windows.sh`.
+- `scripts/` - `deploy.sh`, `watch.sh`, `test-windows.sh`, `screenshots.sh`.
+- `docs/screenshots/` - README images, generated (see "Screenshots").
 - `assets/` - icons (SVG/PNG/ICO).
 
 ## App architecture: vertical slices
@@ -91,6 +92,7 @@ cargo clippy --workspace --all-targets
 cargo fmt --check
 cargo build --release --target x86_64-pc-windows-gnu -p tcanvas   # Windows cross-build
 ./scripts/test-windows.sh   # suite compiled for Windows: real ConPTY + wsl.exe
+./scripts/screenshots.sh    # only if the UI looks different: regenerate the README images
 ```
 
 - `test-windows.sh` needs `rustup target add x86_64-pc-windows-gnu` and `mingw-w64`; extra
@@ -100,6 +102,22 @@ cargo build --release --target x86_64-pc-windows-gnu -p tcanvas   # Windows cros
 - Formatting: there is no `rustfmt.toml` and existing code uses long lines, so
   `cargo fmt --check` may report pre-existing diffs. Do not reformat unrelated files in a
   feature change; keep new code consistent with its surroundings.
+
+## Screenshots
+
+- The README images (`docs/screenshots/*.png`) are **generated**, never hand-made:
+  `crates/app/tests/screenshots.rs` renders the real `App` headless with wgpu, with canned
+  terminal output (`TerminalCards::show_canned`, no PTY) and agent events dispatched by hand.
+  The scenes are `#[ignore]`d tests; `./scripts/screenshots.sh` runs them.
+- **Keep them current**: any change that alters what the UI looks like (layout, colors, texts,
+  new panel...) reruns `./scripts/screenshots.sh`; look at the PNGs, then commit them with the
+  change. A notable new screen gets its own scene and a README image.
+- Scenes use the English UI and fake but realistic content (`/home/me/...`, no real data).
+- The WSL GPU driver crashes in headless rendering: the script uses Mesa's lavapipe
+  (`VK_ICD_FILENAMES`, needs `mesa-vulkan-drivers`).
+- The harness loads Windows' Segoe UI Symbol from `/mnt/c/Windows/Fonts` (the app's fallback on
+  Windows): Linux fonts lack glyphs Claude Code draws (`⎿`, `⏵`), and a missing glyph fails the
+  render.
 
 ## Deploy and dev loop
 
@@ -127,7 +145,8 @@ cargo build --release --target x86_64-pc-windows-gnu -p tcanvas   # Windows cros
 - Copy/paste: **Ctrl+Shift+C** (selection is already copied by tmux on mouse release; must
   not send ^C) and **Ctrl+Shift+V** / **right-click** to paste (`terminal_card/input.rs`
   `clip_action`, `terminal_card/clipboard.rs` via `arboard`).
-- **Alt+right-click** goes to tmux (its menu); **Alt+drag** from a card draws a wire;
+- **Alt+right-click** goes to tmux (its menu); wires link **groups**, not terminals: **Alt+drag**
+  from a group's label onto another group (Alt+click in a card goes to the terminal);
   Shift+click belongs to the hand tool (pans the view), not the terminal.
 - Global shortcuts are Ctrl+Shift+<key> (`shortcut_of` in `shell/mod.rs`); digits use the
   physical key so they work on AZERTY layouts.

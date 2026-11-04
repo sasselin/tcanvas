@@ -15,6 +15,8 @@ for watching what Claude (or any other AI agent) is doing while it works.
   (set `TCANVAS_LANG=en` or `TCANVAS_LANG=fr` to override; any language other than French
   falls back to English).
 
+![The canvas: several projects, each a group linked to its folder with a Claude Code session and its tools; wires between related groups, statuses and the minimap](docs/screenshots/overview.png)
+
 ## Features
 
 - **Infinite canvas**: pan, zoom around the cursor, minimap, smooth camera flights. Zoomed out,
@@ -28,11 +30,21 @@ for watching what Claude (or any other AI agent) is doing while it works.
 - **Status and notifications**: stalled, waiting for input, failed, long command finished,
   terminal stopped, as Windows toasts and a pulsing border on the card.
 - **Status filters, text filter and a "go to" palette** across all projects.
-- **Wires** between cards to show how terminals relate, with a click to fly to the other end.
+- **Wires between groups** to show how projects relate (an API and its front end, the infra they
+  run on); a click flies to the other group. Inside a project's space, linked groups show as
+  chips on the side of the frame that open them.
 - **Clipboard** like Windows Terminal: selection copied on release, right-click or
   `Ctrl+Shift+V` to paste.
 - **Clean shutdown**: closing a terminal really stops its shell and every process it started.
 - **Persistent layout**: cards, groups, wires, the open project and the view are saved.
+
+![A project's space: Claude Code asking before running the tests, and chips to the linked groups](docs/screenshots/project.png)
+
+![Linking a folder to a new group: the WSL folder browser, git repositories marked](docs/screenshots/folder.png)
+
+![The "Changes" panel: uncommitted files, a live diff and the recent commits](docs/screenshots/changes.png)
+
+![The "go to" palette (Ctrl+Shift+K), across every project](docs/screenshots/jump.png)
 
 ## Installation
 
@@ -77,8 +89,9 @@ Agent commands: `tcanvas-agent` (server mode, used by the app), `tcanvas-agent i
 | **×** on the title bar | Close the terminal after confirmation: the shell and **all** its processes |
 | Right-click the title bar | Rename, delay before "stalled", center and zoom, move to, close |
 | Right-click inside a terminal · Alt + right-click | Paste · tmux's own menu |
-| **Alt + drag** from one card to another | Draw a **wire** |
-| Click a wire · right-click | Fly to the other end · delete the wire |
+| **Alt + drag** from a group's label onto another group | Link the two groups with a **wire** |
+| Click a wire · right-click | Fly to the other group · delete the wire |
+| Click a linked-group chip (`→ web`) in a project's space | Open that group's space |
 | Click the minimap | Go there |
 | Group label: drag · **double-click** · right-click | Move it with its cards · **rename in place** (Enter confirms, Esc cancels) · menu: new terminal here, rename, linked folder, color, remove the frame (keep the terminals), close the group |
 | **×** on a group's label | Close the group **and all its terminals**, after confirmation (lists the running commands) |
@@ -188,6 +201,16 @@ Keep everything in sync while you work:
 If the build fails, the running app is left untouched. Restarting the app costs nothing: the
 terminals live in tmux. Tip: run `watch.sh` in a tcanvas terminal itself; it survives the restarts
 it triggers.
+
+### Screenshots
+
+The images in this README are rendered by the real app, headless, from
+`crates/app/tests/screenshots.rs` (canned terminal output, no tmux needed). After any change that
+alters what the UI looks like, regenerate them and commit the PNGs with the change:
+
+```sh
+./scripts/screenshots.sh         # writes docs/screenshots/*.png (software Vulkan via Mesa lavapipe)
+```
 
 ## Tests
 

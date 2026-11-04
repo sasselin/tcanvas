@@ -257,6 +257,7 @@ pub struct Texts {
 
     // Links between terminals.
     pub wire_hint: fn(&str, &str) -> String,
+    pub linked_group_hint: fn(&str) -> String,
 }
 
 pub const EN: Texts = Texts {
@@ -381,7 +382,7 @@ pub const EN: Texts = Texts {
     group_changes_hint: "See modified files, recent commits and their diffs",
     group_changes_a11y: |n| format!("Changes of group {n}"),
     open_a_terminal: "+ Open a terminal",
-    group_header_hint: "Double-click: rename · drag: move with its terminals",
+    group_header_hint: "Double-click: rename · drag: move with its terminals · Alt + drag onto another group: link them",
     close_group_hint: "Close the group and all its terminals",
     close_group_a11y: |n| format!("Close group {n}"),
     drop_to_leave_group: "Release to take the terminal out of the group",
@@ -420,7 +421,8 @@ pub const EN: Texts = Texts {
     close_card_body: "The shell and all its processes will be closed. This cannot be undone.",
     ok: "OK",
 
-    wire_hint: |a, b| format!("{a}  ⇄  {b}\nclick: go to the other end · right-click: delete"),
+    wire_hint: |a, b| format!("{a}  ⇄  {b}\nclick: go to the other group · right-click: delete"),
+    linked_group_hint: |name| format!("Linked group: open “{name}”"),
 };
 
 pub const FR: Texts = Texts {
@@ -545,7 +547,7 @@ pub const FR: Texts = Texts {
     group_changes_hint: "Voir les fichiers modifiés, les commits récents et leurs diffs",
     group_changes_a11y: |n| format!("Changements du groupe {n}"),
     open_a_terminal: "+ Ouvrir un terminal",
-    group_header_hint: "Double-clic : renommer · glisser : déplacer avec ses terminaux",
+    group_header_hint: "Double-clic : renommer · glisser : déplacer avec ses terminaux · Alt + glisser sur un autre groupe : les relier",
     close_group_hint: "Fermer le groupe et tous ses terminaux",
     close_group_a11y: |n| format!("Fermer le groupe {n}"),
     drop_to_leave_group: "Relâcher pour sortir le terminal du groupe",
@@ -584,7 +586,8 @@ pub const FR: Texts = Texts {
     close_card_body: "Le shell et tous ses processus seront fermés. C'est définitif.",
     ok: "OK",
 
-    wire_hint: |a, b| format!("{a}  ⇄  {b}\nclic : aller au bout opposé · clic droit : supprimer"),
+    wire_hint: |a, b| format!("{a}  ⇄  {b}\nclic : aller à l'autre groupe · clic droit : supprimer"),
+    linked_group_hint: |name| format!("Groupe relié : ouvrir « {name} »"),
 };
 
 #[cfg(test)]

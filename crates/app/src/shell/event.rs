@@ -57,8 +57,9 @@ pub enum Event {
     AssignCard { card: CardId, project: Option<ProjectId>, relocate: bool },
     /// The terminal was just placed or resized: it keeps its spot, its group neighbors move aside.
     SettleCard(CardId),
-    AddWire(CardId, CardId),
-    RemoveWire(CardId, CardId),
+    /// Links two groups (undirected, at most one wire per pair).
+    AddWire(ProjectId, ProjectId),
+    RemoveWire(ProjectId, ProjectId),
     Agent(AgentEvent),
     /// Opens or closes the "Changes" panel.
     ToggleChanges,

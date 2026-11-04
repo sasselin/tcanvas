@@ -24,4 +24,6 @@ tauri-winrt-notification = "0.7"
 embed-resource = "3"
 
 [dev-dependencies]
-egui_kittest = { version = "0.37", features = ["eframe"] }
+egui_kittest = { version = "0.37", features = ["eframe", "wgpu"] }
+# PNG output for the README screenshots (tests/screenshots.rs).
+image = { version = "0.25", default-features = false, features = ["png"] }

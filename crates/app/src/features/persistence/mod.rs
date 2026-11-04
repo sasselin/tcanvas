@@ -72,7 +72,8 @@ impl Persistence {
             Ok(file) => {
                 world.camera = file.camera;
                 world.projects = file.projects;
-                world.wires = file.wires;
+                // Wires link groups; older layouts linked terminals: those are dropped.
+                world.wires = file.wires.into_iter().filter(|w| w.from != w.to && world.project(&w.from).is_some() && world.project(&w.to).is_some()).collect();
                 world.space = file.space.filter(|id| world.project(id).is_some());
                 world.space_cameras = file.space_cameras;
                 world.changes_open = file.changes_open;
@@ -165,8 +166,9 @@ mod tests {
         a.attention = true;
         a.project = Some("p1".into());
         let b = Card::new(Rect::from_min_size(pos2(400.0, 0.0), Vec2::new(300.0, 200.0)), None);
-        w.wires.push(Wire { from: a.id.clone(), to: b.id.clone() });
         w.projects.push(Project { id: "p1".into(), name: "API".into(), color: [1, 2, 3], rect: Rect::from_min_size(pos2(-50.0, -50.0), Vec2::splat(900.0)), cwd: Some("~/api".into()) });
+        w.projects.push(Project { id: "p2".into(), name: "Web".into(), color: [4, 5, 6], rect: Rect::from_min_size(pos2(2000.0, 0.0), Vec2::splat(400.0)), cwd: None });
+        w.wires.push(Wire { from: "p1".into(), to: "p2".into() });
         w.add_card(a);
         w.add_card(b);
         w.refit_projects();
@@ -195,6 +197,21 @@ mod tests {
         assert_eq!((a.project.as_deref(), loaded.cards[1].project.as_deref()), (Some("p1"), None));
         assert!(loaded.changes_open);
         assert!(!dir.join("layout.json.tmp").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Wires used to link terminals; now they link groups: old ones are dropped on load.
+    #[test]
+    fn wires_between_terminals_are_dropped_on_load() {
+        let dir = temp_dir("old-wires");
+        let mut w = sample_world();
+        let (a, b) = (w.cards[0].id.clone(), w.cards[1].id.clone());
+        w.wires.push(Wire { from: a, to: b });
+        w.wires.push(Wire { from: "p1".into(), to: "gone".into() });
+        Persistence::new(&dir).save_now(&w);
+        let mut loaded = World::default();
+        Persistence::new(&dir).load(&mut loaded);
+        assert_eq!(loaded.wires, vec![Wire { from: "p1".into(), to: "p2".into() }]);
         fs::remove_dir_all(dir).unwrap();
     }
 

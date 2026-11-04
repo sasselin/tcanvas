@@ -1,4 +1,4 @@
-//! Data shared by all slices: cards, projects, wires, camera.
+//! Data shared by all slices: cards, projects, wires between projects, camera.
 //! Every slice reads the world; cross-cutting changes go through `Event`.
 
 use std::collections::BTreeMap;
@@ -131,10 +131,11 @@ pub const PROJECT_COLORS: [[u8; 3]; 8] = [
     [160, 170, 70],
 ];
 
+/// A link between two groups (projects), drawn from frame to frame.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Wire {
-    pub from: CardId,
-    pub to: CardId,
+    pub from: ProjectId,
+    pub to: ProjectId,
 }
 
 impl Wire {
@@ -143,6 +144,10 @@ impl Wire {
     }
     pub fn same_as(&self, a: &str, b: &str) -> bool {
         (self.from == a && self.to == b) || (self.from == b && self.to == a)
+    }
+    /// The end that is not `id`.
+    pub fn other(&self, id: &str) -> &str {
+        if self.from == id { &self.to } else { &self.from }
     }
 }
 
@@ -211,7 +216,6 @@ impl World {
 
     pub fn remove_card(&mut self, id: &str) {
         self.cards.retain(|c| c.id != id);
-        self.wires.retain(|w| !w.touches(id));
         if self.focused.as_deref() == Some(id) {
             self.focused = None;
         }
@@ -739,16 +743,14 @@ mod tests {
     }
 
     #[test]
-    fn removing_a_card_drops_its_wires_and_focus() {
+    fn removing_a_card_drops_its_focus() {
         let mut w = World::default();
         let (a, b) = (card_at(0.0, 0.0), card_at(500.0, 0.0));
-        let (ia, ib) = (a.id.clone(), b.id.clone());
+        let ia = a.id.clone();
         w.add_card(a);
         w.add_card(b);
-        w.wires.push(Wire { from: ia.clone(), to: ib.clone() });
         w.focused = Some(ia.clone());
         w.remove_card(&ia);
-        assert!(w.wires.is_empty());
         assert_eq!(w.focused, None);
         assert_eq!(w.cards.len(), 1);
     }

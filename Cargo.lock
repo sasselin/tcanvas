@@ -905,10 +905,14 @@ checksum = "0979c2e37860fcf13a2bea77508607f067a9a6a84ba9bd47b5e298582fb59b86"
 dependencies = [
  "eframe",
  "egui",
+ "egui-wgpu",
+ "image",
  "kittest",
  "log",
+ "pollster",
  "serde",
  "toml",
+ "wgpu",
 ]
 
 [[package]]
@@ -2900,6 +2904,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "embed-resource",
+ "image",
  "nucleo-matcher",
  "protocol",
  "serde",

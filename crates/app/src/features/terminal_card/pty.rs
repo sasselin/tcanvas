@@ -12,6 +12,7 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty;
+use alacritty_terminal::vte::ansi::Processor;
 
 use crate::shell::launch;
 use crate::shell::world::CardId;
@@ -122,7 +123,8 @@ pub struct GridSize {
 
 pub struct TermRuntime {
     pub term: Arc<FairMutex<Term<Proxy>>>,
-    notifier: Notifier,
+    /// `None` for a canned terminal (fixed output, no PTY).
+    notifier: Option<Notifier>,
     size: GridSize,
     cell_px: (u16, u16),
     /// Fraction of a wheel line not yet sent.
@@ -150,13 +152,23 @@ impl TermRuntime {
         let event_loop = EventLoop::new(term.clone(), proxy, pty, true, false)?;
         let notifier = Notifier(event_loop.channel());
         event_loop.spawn();
-        Ok(Self { term, notifier, size, cell_px, wheel_acc: 0.0, mouse_down: None })
+        Ok(Self { term, notifier: Some(notifier), size, cell_px, wheel_acc: 0.0, mouse_down: None })
+    }
+
+    /// A terminal showing fixed output, without a PTY (screenshots, UI tests). Input is ignored.
+    pub fn canned(card: &CardId, size: GridSize, cell_px: (u16, u16), bytes: &[u8], tx: Sender<(CardId, TermEvent)>, ctx: egui::Context) -> Self {
+        let proxy = Proxy { card: card.clone(), tx, ctx };
+        let config = Config { scrolling_history: 2000, ..Config::default() };
+        let mut term = Term::new(config, &term_size(size), proxy);
+        let mut parser: Processor = Processor::new();
+        parser.advance(&mut term, bytes);
+        Self { term: Arc::new(FairMutex::new(term)), notifier: None, size, cell_px, wheel_acc: 0.0, mouse_down: None }
     }
 
     pub fn write(&self, bytes: impl Into<Vec<u8>>) {
         let bytes: Vec<u8> = bytes.into();
-        if !bytes.is_empty() {
-            self.notifier.notify(bytes);
+        if let Some(notifier) = self.notifier.as_ref().filter(|_| !bytes.is_empty()) {
+            notifier.notify(bytes);
         }
     }
 
@@ -175,7 +187,9 @@ impl TermRuntime {
         self.size = size;
         self.cell_px = cell_px;
         self.term.lock().resize(term_size(size));
-        self.notifier.on_resize(window_size(size, cell_px));
+        if let Some(notifier) = &mut self.notifier {
+            notifier.on_resize(window_size(size, cell_px));
+        }
     }
 
     pub fn scroll_display(&self, lines: i32) {
@@ -207,7 +221,9 @@ impl TermRuntime {
 
 impl Drop for TermRuntime {
     fn drop(&mut self) {
-        let _ = self.notifier.0.send(Msg::Shutdown);
+        if let Some(notifier) = &self.notifier {
+            let _ = notifier.0.send(Msg::Shutdown);
+        }
     }
 }
 
@@ -222,6 +238,17 @@ fn window_size(s: GridSize, cell_px: (u16, u16)) -> WindowSize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canned_terminal_shows_its_output_and_ignores_input() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let size = GridSize { cols: 20, rows: 3 };
+        let mut rt = TermRuntime::canned(&"c1".to_string(), size, (8, 16), b"\x1b[32mok\x1b[0m line\r\nsecond", tx, egui::Context::default());
+        assert_eq!(rt.screen_text(), "ok line\nsecond\n");
+        rt.write(b"ignored".to_vec());
+        rt.resize(GridSize { cols: 30, rows: 4 }, (8, 16));
+        assert_eq!(rt.size(), GridSize { cols: 30, rows: 4 });
+    }
 
     fn script(l: &Launch) -> &str {
         if cfg!(windows) {

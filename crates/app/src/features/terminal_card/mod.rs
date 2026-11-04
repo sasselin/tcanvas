@@ -78,8 +78,6 @@ pub struct TerminalCards {
     /// Close requested, awaiting confirmation.
     confirm_close: Option<CardId>,
     stall: Option<(CardId, String)>,
-    /// Alt drag in progress to pull a wire from this card.
-    wire_from: Option<CardId>,
     /// Sessions killed on purpose: no notification, no re-adoption.
     killed: HashSet<String>,
     viewport: Rect,
@@ -104,7 +102,6 @@ impl TerminalCards {
             rename: None,
             confirm_close: None,
             stall: None,
-            wire_from: None,
             killed: HashSet::new(),
             viewport: Rect::NOTHING,
             clipboard: match launcher {
@@ -118,6 +115,14 @@ impl TerminalCards {
     /// Replaces the clipboard (tests).
     pub fn set_clipboard(&mut self, clipboard: Box<dyn ClipboardSource>) {
         self.clipboard = clipboard;
+    }
+
+    /// Shows fixed terminal output in a card, without a PTY (screenshots, UI tests).
+    pub fn show_canned(&mut self, world: &World, id: &str, bytes: &[u8]) {
+        let Some(card) = world.card(id) else { return };
+        let cell = base_cell(&self.ctx);
+        let rt = TermRuntime::canned(&card.id, grid_for(card.rect, cell), cell_px(cell), bytes, self.tx.clone(), self.ctx.clone());
+        self.runtimes.insert(card.id.clone(), rt);
     }
 
     /// Bytes sent to a card without a real terminal (tests, `Launcher::Disabled`).
@@ -291,7 +296,6 @@ impl TerminalCards {
         if world.dragging.is_some() && !ui.input(|i| i.pointer.primary_down()) {
             world.dragging = None;
         }
-        self.wire_drag(ui, world, events);
         wheel_taken
     }
 
@@ -371,9 +375,7 @@ impl TerminalCards {
         let alt = ui.input(|inp| inp.modifiers.alt);
         // Right-click = paste, as in Windows Terminal (Alt+right-click: tmux menu).
         let paste_click = body_r.secondary_clicked() && !alt && !is_preview(zoom);
-        if body_r.drag_started_by(PointerButton::Primary) && alt {
-            self.wire_from = Some(id.clone());
-        } else if body_r.clicked() && is_preview(zoom) {
+        if body_r.clicked() && is_preview(zoom) {
             // A preview isn't usable: zoom in on it so the user can type.
             events.push(Event::FlyTo(id.clone()));
         } else if !focused && (body_r.clicked() || body_r.drag_started() || paste_click) {
@@ -543,13 +545,9 @@ impl TerminalCards {
                         PointerButton::Secondary => MouseButton::Right,
                         _ => continue,
                     };
-                    // Alt + drag pulls a wire; plain right-click = paste (Alt + right-click goes to
-                    // tmux: its menu). The release always follows the forwarded press.
-                    let ours = match b {
-                        MouseButton::Left => modifiers.alt,
-                        MouseButton::Right => !modifiers.alt,
-                        _ => false,
-                    };
+                    // Plain right-click = paste (Alt + right-click goes to tmux: its menu). The
+                    // release always follows the forwarded press.
+                    let ours = b == MouseButton::Right && !modifiers.alt;
                     if pressed && ours {
                         continue;
                     }
@@ -604,26 +602,6 @@ impl TerminalCards {
             }
         }
         rt.write(out);
-    }
-
-    fn wire_drag(&mut self, ui: &Ui, world: &World, events: &mut Vec<Event>) {
-        let Some(from) = self.wire_from.clone() else { return };
-        let Some(card) = world.card(&from) else {
-            self.wire_from = None;
-            return;
-        };
-        let vp = self.viewport;
-        let start = world.camera.to_screen(card.rect.center(), vp);
-        let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) else { return };
-        ui.painter_at(vp).line_segment([start, pointer], Stroke::new(2.0, theme::FOCUS));
-        if ui.input(|i| i.pointer.any_released()) {
-            self.wire_from = None;
-            let at = world.camera.to_world(pointer, vp);
-            let target = world.cards_by_z().into_iter().rev().map(|i| &world.cards[i]).find(|c| world.shows_card(c) && c.rect.contains(at));
-            if let Some(target) = target.filter(|t| t.id != from) {
-                events.push(Event::AddWire(from, target.id.clone()));
-            }
-        }
     }
 
     pub fn dialogs(&mut self, ctx: &egui::Context, world: &World, events: &mut Vec<Event>) {

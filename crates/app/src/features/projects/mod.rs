@@ -34,6 +34,19 @@ pub struct Projects {
     editing: Option<Editing>,
     /// Group close requested, awaiting confirmation.
     confirm_close: Option<ProjectId>,
+    /// Alt + drag in progress from this group's label: pulling a wire to another group.
+    wire_from: Option<ProjectId>,
+}
+
+/// Group (other than `from`) whose frame or label is under `at` (world units): the end of a
+/// wire pulled from `from`. `label_h` is the label height in world units.
+pub fn link_target(world: &World, from: &str, at: Pos2, label_h: f32) -> Option<ProjectId> {
+    world
+        .projects
+        .iter()
+        .filter(|p| p.id != from && world.shows_project(p))
+        .find(|p| Rect::from_min_max(p.rect.min - vec2(0.0, label_h), p.rect.max).contains(at))
+        .map(|p| p.id.clone())
 }
 
 /// Member terminals of the group.
@@ -251,7 +264,10 @@ impl Projects {
             if close.clicked() {
                 events.push(Event::RequestCloseProject(id.clone()));
             }
-            if head.dragged_by(PointerButton::Primary) {
+            if head.drag_started_by(PointerButton::Primary) && ui.input(|inp| inp.modifiers.alt) {
+                self.wire_from = Some(id.clone());
+            }
+            if head.dragged_by(PointerButton::Primary) && self.wire_from.as_deref() != Some(id.as_str()) {
                 move_project(world, &id, head.drag_delta() / cam.zoom);
             }
             if head.double_clicked() {
@@ -261,6 +277,33 @@ impl Projects {
             head.context_menu(|ui| pick = self.menu(ui, &world.projects[i], events));
             if pick {
                 self.open_picker(world, &id, events);
+            }
+        }
+        self.wire_drag(ui, world, vp, events);
+    }
+
+    /// Alt + drag from a label: a line follows the pointer; released over another group, it
+    /// links the two.
+    fn wire_drag(&mut self, ui: &Ui, world: &World, vp: Rect, events: &mut Vec<Event>) {
+        let Some(from) = self.wire_from.clone() else { return };
+        let Some(p) = world.project(&from) else {
+            self.wire_from = None;
+            return;
+        };
+        let cam = world.camera;
+        let Some(pointer) = ui.input(|i| i.pointer.interact_pos()) else { return };
+        let label_h = (HEADER_H + 4.0) / cam.zoom;
+        let target = link_target(world, &from, cam.to_world(pointer, vp), label_h);
+        let painter = ui.painter_at(vp);
+        if let Some(t) = target.as_deref().and_then(|t| world.project(t)) {
+            painter.rect_stroke(cam.rect_to_screen(t.rect, vp), CornerRadius::same(10), Stroke::new(3.0, theme::FOCUS), StrokeKind::Outside);
+        }
+        let start = cam.rect_to_screen(p.rect, vp).center_top() - vec2(0.0, HEADER_H / 2.0 + 4.0);
+        painter.line_segment([start, pointer], Stroke::new(2.5, theme::FOCUS));
+        if ui.input(|i| i.pointer.any_released()) {
+            self.wire_from = None;
+            if let Some(target) = target {
+                events.push(Event::AddWire(from, target));
             }
         }
     }
