@@ -47,6 +47,16 @@ impl Canvas {
     /// Background and interactions on empty space. Call before any other canvas element.
     pub fn background(&mut self, ui: &mut Ui, world: &mut World, events: &mut Vec<Event>) {
         let vp = ui.max_rect();
+        let old = self.viewport;
+        if old.is_positive() && old != vp {
+            // Resizing the Changes panel (or the window) must not slide the cards around.
+            world.camera.keep_anchor(old, vp);
+            if let Some(f) = &mut self.flight {
+                f.from.keep_anchor(old, vp);
+                f.to.keep_anchor(old, vp);
+            }
+            world.touch();
+        }
         self.viewport = vp;
         let painter = ui.painter_at(vp);
         painter.rect_filled(vp, CornerRadius::ZERO, theme::CANVAS_BG);

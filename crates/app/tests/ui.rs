@@ -919,10 +919,14 @@ fn changes_panel_follows_the_ai_and_shows_diffs() {
     steps(&mut h, 3);
     let now = tcanvas::shell::world::unix_now();
     h.state_mut().dispatch(vec![Event::Agent(changes("p-api", &[("src/old.rs", now - 600), ("src/main.rs", now - 1)]))]);
-    steps(&mut h, 2);
+    steps(&mut h, 40);
+    let card_rect = |h: &Harness<'_, App>| screen_of(h, h.state().world.cards[0].rect);
+    let before = card_rect(&h);
 
     h.get_by_label("Δ Changements (2)").click();
     steps(&mut h, 3);
+    let after = card_rect(&h);
+    assert!((after.min - before.min).length() < 0.5, "opening the panel does not move the cards: {before:?} -> {after:?}");
     assert!(h.query_by_label("Fichier modifié src/main.rs").is_some() && h.query_by_label("Fichier modifié src/old.rs").is_some());
     assert!(h.query_by_label("⎇ main").is_some());
     // "Follow": the last touched file is shown automatically.

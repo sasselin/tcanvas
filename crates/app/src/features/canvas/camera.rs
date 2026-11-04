@@ -37,6 +37,13 @@ impl Camera {
         self.center -= delta / self.zoom;
     }
 
+    /// Follows a viewport resize (side panel, window) so that content stays fixed relative
+    /// to the viewport's top-left corner instead of drifting with its center.
+    pub fn keep_anchor(&mut self, old_vp: Rect, new_vp: Rect) {
+        let delta = (new_vp.center() - old_vp.center()) - (new_vp.min - old_vp.min);
+        self.center += delta / self.zoom;
+    }
+
     /// Camera that shows all of `target` with a margin (screen pixels).
     pub fn fitting(target: Rect, vp: Rect, margin: f32, max_zoom: f32) -> Camera {
         let avail = (vp.size() - Vec2::splat(2.0 * margin)).max(Vec2::splat(1.0));
@@ -112,6 +119,21 @@ mod tests {
         let grabbed = cam.to_world(pos2(100.0, 100.0), vp());
         cam.pan_screen(Vec2::new(50.0, -20.0));
         assert!(close(cam.to_world(pos2(150.0, 80.0), vp()), grabbed));
+    }
+
+    #[test]
+    fn resizing_the_viewport_keeps_content_in_place() {
+        let mut cam = Camera { center: pos2(300.0, -80.0), zoom: 0.6 };
+        let p = pos2(512.0, 77.0);
+        let before = cam.to_screen(p, vp());
+        // A side panel widens on the right: the canvas loses 300 px.
+        let narrower = Rect::from_min_max(vp().min, vp().max - Vec2::new(300.0, 0.0));
+        cam.keep_anchor(vp(), narrower);
+        assert!(close(cam.to_screen(p, narrower), before));
+        // The top edge moves down: content follows the corner.
+        let lower = narrower.translate(Vec2::new(0.0, 20.0));
+        cam.keep_anchor(narrower, lower);
+        assert!(close(cam.to_screen(p, lower), before + Vec2::new(0.0, 20.0)));
     }
 
     #[test]
