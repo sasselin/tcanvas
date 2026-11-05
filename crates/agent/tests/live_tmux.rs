@@ -1,5 +1,5 @@
 //! End-to-end test: real throwaway tmux server + real `tcanvas-agent` binary.
-//! Skipped cleanly if tmux or zsh is not installed.
+//! Skipped cleanly if tmux (or the shell under test) is not installed.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use protocol::{AgentCmd, AgentEvent, SessionInfo, TermStatus};
+use protocol::{AgentCmd, AgentEvent, Hooks, SessionInfo, TermStatus};
 
 const AGENT: &str = env!("CARGO_BIN_EXE_tcanvas-agent");
 
@@ -50,8 +50,13 @@ struct Agent {
 
 impl Agent {
     fn spawn(socket: &str) -> Self {
+        Self::spawn_with(socket, &[])
+    }
+
+    fn spawn_with(socket: &str, env: &[(&str, &str)]) -> Self {
         let mut child = Command::new(AGENT)
             .env("TCANVAS_TMUX_SOCKET", socket)
+            .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -114,7 +119,7 @@ fn reports_running_stalled_failed_question_and_gone() {
 
     // Hooks in a temporary file. The socket name contains "tcanvas", which enables them.
     let hooks = std::env::temp_dir().join(format!("tcanvas-hooks-{}.zsh", std::process::id()));
-    let out = Command::new(AGENT).arg("hooks").output().unwrap();
+    let out = Command::new(AGENT).args(["hooks", "zsh"]).output().unwrap();
     std::fs::write(&hooks, &out.stdout).unwrap();
 
     server.tmux(&["new-session", "-d", "-s", session, "-x", "100", "-y", "20", "zsh -f -i"]);
@@ -195,4 +200,61 @@ fn kill_stops_every_process_even_stubborn_ones() {
     assert!(!has_session(session), "session removed");
     assert!(has_session("tc_neighbor"), "other sessions are untouched");
     assert!(proc_alive(&format!("sleep {}", base + 9)), "nor their processes");
+}
+
+#[test]
+fn bash_hooks_report_exit_code_and_duration() {
+    if !has("tmux") || !has("bash") {
+        eprintln!("tmux or bash missing: test skipped");
+        return;
+    }
+    let server = Server { socket: format!("tcanvas-bash-{}", std::process::id()) };
+    let session = "tc_bash";
+    let hooks = std::env::temp_dir().join(format!("tcanvas-hooks-{}.bash", std::process::id()));
+    let out = Command::new(AGENT).args(["hooks", "bash"]).output().unwrap();
+    std::fs::write(&hooks, &out.stdout).unwrap();
+
+    server.tmux(&["new-session", "-d", "-s", session, "-x", "100", "-y", "20", "bash --norc -i"]);
+    thread::sleep(Duration::from_millis(300));
+    // An existing PROMPT_COMMAND keeps running after the hooks.
+    server.type_line(session, &format!("PROMPT_COMMAND='touch {}.pc'; source {}", hooks.display(), hooks.display()));
+
+    let agent = Agent::spawn(&server.socket);
+    agent.wait_for("Hello", |ev| matches!(ev, AgentEvent::Hello { .. }));
+    agent.wait_status(session, "Idle", |i| i.status == TermStatus::Idle);
+
+    server.type_line(session, "sleep 2; false");
+    let failed = agent.wait_status(session, "Exited(1)", |i| i.status == TermStatus::Exited(1));
+    assert_eq!(failed.last_exit, Some(1));
+    assert!(matches!(failed.last_duration_secs, Some(1..=3)), "duration {:?}", failed.last_duration_secs);
+
+    // The user's $? is untouched by the hooks.
+    server.type_line(session, "(exit 7); echo \"code=$?\"");
+    let shown = agent.wait_status(session, "code=7 shown", |i| i.tail.iter().any(|l| l == "code=7"));
+    assert_eq!(shown.last_exit, Some(0), "echo succeeded");
+    assert!(std::path::Path::new(&format!("{}.pc", hooks.display())).exists(), "previous PROMPT_COMMAND still runs");
+
+    let _ = std::fs::remove_file(format!("{}.pc", hooks.display()));
+    let _ = std::fs::remove_file(hooks);
+}
+
+#[test]
+fn install_hooks_command_follows_the_users_shell() {
+    let home = std::env::temp_dir().join(format!("tcanvas-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).unwrap();
+    let socket = format!("tcanvas-nohooks-{}", std::process::id());
+    let home_str = home.to_str().unwrap();
+
+    let mut agent = Agent::spawn_with(&socket, &[("HOME", home_str), ("SHELL", "/bin/bash")]);
+    agent.wait_for("Hello without hooks", |ev| matches!(ev, AgentEvent::Hello { hooks: Hooks::Missing, .. }));
+    agent.send(&AgentCmd::InstallHooks);
+    agent.wait_for("hooks installed", |ev| matches!(ev, AgentEvent::HooksChanged { hooks: Hooks::Installed }));
+    assert!(std::fs::read_to_string(home.join(".bashrc")).unwrap().contains(".config/tcanvas/hooks.bash"));
+    drop(agent);
+
+    let agent = Agent::spawn_with(&socket, &[("HOME", home_str), ("SHELL", "/usr/bin/fish")]);
+    agent.wait_for("fish: nothing to offer", |ev| matches!(ev, AgentEvent::Hello { hooks: Hooks::Unsupported, .. }));
+    drop(agent);
+    let _ = std::fs::remove_dir_all(home);
 }

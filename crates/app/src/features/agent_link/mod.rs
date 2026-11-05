@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use egui::{RichText, Ui};
-use protocol::{AgentCmd, AgentEvent, DEFAULT_STALL_SECS, Problem};
+use protocol::{AgentCmd, AgentEvent, DEFAULT_STALL_SECS, Hooks, Problem};
 
 use crate::shell::event::Event;
 use crate::shell::i18n::t;
@@ -32,7 +32,7 @@ pub enum AgentMode {
 pub enum LinkState {
     Off,
     Starting,
-    Connected { hooks: bool },
+    Connected { hooks: Hooks },
     Failed(String),
 }
 
@@ -66,13 +66,16 @@ pub struct AgentLink {
     install: Install,
     /// Last `TmuxMissing` reported by the agent (detail, when).
     tmux_missing: Option<(String, Instant)>,
+    /// "Install" was clicked and the agent has not answered yet.
+    hooks_pending: bool,
+    hooks_error: Option<String>,
 }
 
 impl AgentLink {
     pub fn new(ctx: egui::Context, mode: AgentMode) -> Self {
         let (tx, rx) = mpsc::channel();
         let install = if install::embedded().is_some() && std::env::var_os("TCANVAS_AGENT").is_none() { Install::Needed } else { Install::Ready };
-        let mut link = Self { mode, ctx, state: LinkState::Off, child: None, stdin: None, tx, rx, retry_at: None, sent: Vec::new(), install, tmux_missing: None };
+        let mut link = Self { mode, ctx, state: LinkState::Off, child: None, stdin: None, tx, rx, retry_at: None, sent: Vec::new(), install, tmux_missing: None, hooks_pending: false, hooks_error: None };
         link.start();
         link
     }
@@ -165,21 +168,13 @@ impl AgentLink {
             }
     }
 
-    pub fn poll(&mut self, world: &World, events: &mut Vec<Event>) {
+    pub fn poll(&mut self, events: &mut Vec<Event>) {
         if self.retry_at.is_some_and(|t| Instant::now() >= t) {
             self.start();
         }
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Event(ev) => {
-                    if let AgentEvent::Hello { hooks_installed, .. } = &ev {
-                        self.state = LinkState::Connected { hooks: *hooks_installed };
-                        for card in world.cards.iter().filter(|c| c.stall_secs != DEFAULT_STALL_SECS) {
-                            self.send(&AgentCmd::SetStall { session: card.session(), secs: card.stall_secs });
-                        }
-                    }
-                    events.push(Event::Agent(ev));
-                }
+                Msg::Event(ev) => events.push(Event::Agent(ev)),
                 Msg::Closed(why) => self.fail(why),
                 Msg::Installed(Ok(())) => {
                     self.install = Install::Ready;
@@ -210,8 +205,17 @@ impl AgentLink {
             LinkState::Connected { hooks } => {
                 ui.label(RichText::new(t().agent_connected).color(theme::status_color(Some(protocol::TermStatus::Running))))
                     .on_hover_text(t().agent_connected_hint);
-                if !hooks {
-                    ui.label(RichText::new(t().hooks_missing).color(theme::status_color(Some(protocol::TermStatus::Stalled)))).on_hover_text(t().hooks_missing_hint);
+                if hooks == Hooks::Missing {
+                    let hint = match &self.hooks_error {
+                        Some(e) => format!("{}\n\n{}", t().hooks_missing_hint, (t().hooks_failed)(e)),
+                        None => t().hooks_missing_hint.to_string(),
+                    };
+                    ui.label(RichText::new(t().hooks_missing).color(theme::status_color(Some(protocol::TermStatus::Stalled)))).on_hover_text(&hint);
+                    if ui.add_enabled(!self.hooks_pending, egui::Button::new(t().install_hooks).small()).on_hover_text(&hint).clicked() {
+                        self.hooks_pending = true;
+                        self.hooks_error = None;
+                        self.send(&AgentCmd::InstallHooks);
+                    }
                 }
             }
             LinkState::Failed(why) => {
@@ -233,6 +237,23 @@ impl AgentLink {
                 }
             }
             Event::ToAgent(cmd) => self.send(cmd),
+            Event::Agent(AgentEvent::Hello { hooks, .. }) => {
+                self.state = LinkState::Connected { hooks: *hooks };
+                self.hooks_pending = false;
+                for card in world.cards.iter().filter(|c| c.stall_secs != DEFAULT_STALL_SECS) {
+                    self.send(&AgentCmd::SetStall { session: card.session(), secs: card.stall_secs });
+                }
+            }
+            Event::Agent(AgentEvent::HooksChanged { hooks }) => {
+                self.hooks_pending = false;
+                if let LinkState::Connected { hooks: h } = &mut self.state {
+                    *h = *hooks;
+                }
+            }
+            Event::Agent(AgentEvent::Error { problem: Problem::HooksFailed { detail } }) => {
+                self.hooks_pending = false;
+                self.hooks_error = Some(detail.clone());
+            }
             Event::Agent(AgentEvent::Error { problem: Problem::TmuxMissing { detail } }) => self.tmux_missing = Some((detail.clone(), Instant::now())),
             _ => {}
         }

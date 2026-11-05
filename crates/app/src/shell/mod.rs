@@ -201,7 +201,7 @@ impl App {
         self.world.window_focused = ctx.input(|i| i.focused);
         let mut events = Vec::new();
         self.run_shortcuts(&ctx, &mut events);
-        self.agent.poll(&self.world, &mut events);
+        self.agent.poll(&mut events);
         self.cards.poll(&mut self.world, &mut events);
         self.changes.poll(&self.world, &mut events);
         self.notifications.poll(&ctx, &mut events);

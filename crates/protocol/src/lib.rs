@@ -50,6 +50,18 @@ pub enum Problem {
     /// The file does not differ from HEAD.
     NoDiff,
     TmuxMissing { detail: String },
+    /// Installing the shell hooks failed (OS detail, not translated).
+    HooksFailed { detail: String },
+}
+
+/// Shell hooks (exit code and duration of each command) for the user's login shell.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Hooks {
+    Installed,
+    /// Supported shell (bash, zsh) without the hooks: `AgentCmd::InstallHooks` adds them.
+    Missing,
+    /// Another shell (fish, ...): nothing to offer.
+    Unsupported,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -159,7 +171,9 @@ pub struct DirListing {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(tag = "type")]
 pub enum AgentEvent {
-    Hello { version: String, hooks_installed: bool },
+    Hello { version: String, hooks: Hooks },
+    /// Hooks state after `AgentCmd::InstallHooks`.
+    HooksChanged { hooks: Hooks },
     Session(SessionInfo),
     Gone { session: String },
     Error { problem: Problem },
@@ -191,6 +205,9 @@ pub enum AgentCmd {
     ShowCommit { key: String, sha: String },
     /// Subfolders of `path` (`~` accepted), for the folder picker.
     ListDir { path: String },
+    /// Install the hooks for the user's shell; response: `AgentEvent::HooksChanged`, or
+    /// `AgentEvent::Error` with `Problem::HooksFailed`.
+    InstallHooks,
 }
 
 pub fn encode<T: Serialize>(msg: &T) -> String {
@@ -261,5 +278,18 @@ mod tests {
     fn roundtrip_cmd() {
         let cmd = AgentCmd::SetStall { session: "tc_x".into(), secs: 5 };
         assert_eq!(decode::<AgentCmd>(&encode(&cmd)).unwrap(), cmd);
+        assert_eq!(decode::<AgentCmd>(&encode(&AgentCmd::InstallHooks)).unwrap(), AgentCmd::InstallHooks);
+    }
+
+    #[test]
+    fn roundtrip_hooks() {
+        for hooks in [Hooks::Installed, Hooks::Missing, Hooks::Unsupported] {
+            let ev = AgentEvent::Hello { version: "1".into(), hooks };
+            assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+            let ev = AgentEvent::HooksChanged { hooks };
+            assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        }
+        let ev = AgentEvent::Error { problem: Problem::HooksFailed { detail: "read-only".into() } };
+        assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
     }
 }

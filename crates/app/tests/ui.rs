@@ -329,6 +329,41 @@ fn missing_tmux_is_shown_in_the_status_bar() {
 }
 
 #[test]
+fn missing_shell_hooks_can_be_installed_from_the_status_bar() {
+    let hello = |hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks });
+    let installs = |h: &Harness<'_, App>| h.state().agent_sent().iter().filter(|c| **c == protocol::AgentCmd::InstallHooks).count();
+    for (lang, label, button) in [(Lang::Fr, "⚠ hooks du shell", "Installer"), (Lang::En, "⚠ shell hooks", "Install")] {
+        let dir = temp_dir("hooks");
+        let mut h = harness_in(&dir, lang);
+        h.state_mut().dispatch(vec![hello(protocol::Hooks::Unsupported)]);
+        steps(&mut h, 2);
+        assert!(h.query_by_label(label).is_none(), "fish & co: nothing to offer");
+
+        h.state_mut().dispatch(vec![hello(protocol::Hooks::Missing)]);
+        steps(&mut h, 2);
+        h.get_by_label(label);
+        h.get_by_label(button).click();
+        steps(&mut h, 2);
+        assert_eq!(installs(&h), 1);
+        h.get_by_label(button).click();
+        steps(&mut h, 2);
+        assert_eq!(installs(&h), 1, "disabled while the agent works");
+
+        // A failure re-enables the button.
+        h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Error { problem: protocol::Problem::HooksFailed { detail: "read-only".into() } })]);
+        steps(&mut h, 2);
+        h.get_by_label(button).click();
+        steps(&mut h, 2);
+        assert_eq!(installs(&h), 2);
+
+        h.state_mut().dispatch(vec![Event::Agent(AgentEvent::HooksChanged { hooks: protocol::Hooks::Installed })]);
+        steps(&mut h, 2);
+        assert!(h.query_by_label(label).is_none());
+        assert!(h.query_by_label(button).is_none());
+    }
+}
+
+#[test]
 fn unknown_canvas_sessions_are_adopted() {
     let dir = temp_dir("adopt");
     let mut h = harness(&dir);

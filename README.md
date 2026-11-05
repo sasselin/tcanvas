@@ -53,11 +53,13 @@ into the default WSL distro on startup (`~/.local/bin/tcanvas-agent`), updating 
 exe changes. Sharing the exe alone is enough.
 
 Requirements on the machine running it: WSL with a Linux distribution (`wsl --install`), and in
-WSL `tmux` ≥ 3.0 (`sudo apt install tmux`; the app says so if it is missing). Optional: `zsh`
-and its hooks, for command exit codes and durations:
+WSL `tmux` ≥ 3.0 (`sudo apt install tmux`; the app says so if it is missing). Any shell works.
+
+Optional, for command exit codes and durations: the shell hooks, for **bash** (≥ 5.0) or
+**zsh**. Click **Install** next to "⚠ shell hooks" in the status bar, or in WSL:
 
 ```sh
-tcanvas-agent install-hooks      # in WSL: adds one line to ~/.zshrc
+tcanvas-agent install-hooks      # adds one line to ~/.bashrc or ~/.zshrc (following $SHELL)
 ```
 
 Building the exe (cross-compiled from WSL):
@@ -70,7 +72,7 @@ cargo build --release --target x86_64-pc-windows-gnu -p tcanvas
 ```
 
 Agent commands: `tcanvas-agent` (server mode, used by the app), `tcanvas-agent install-hooks`,
-`tcanvas-agent hooks` (print the hooks without installing them), and
+`tcanvas-agent hooks [bash|zsh]` (print the hooks without installing them), and
 `tcanvas-agent kill <session>` (stop every process of a session, then the session itself).
 
 ## Usage

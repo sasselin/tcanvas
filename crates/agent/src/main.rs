@@ -1,8 +1,9 @@
 //! `tcanvas-agent`: runs in WSL and reports the state of the terminals to the app.
 //!
 //! - `tcanvas-agent`               : server mode (JSON lines on stdin/stdout)
-//! - `tcanvas-agent install-hooks` : installs the zsh hooks (exit codes, durations)
-//! - `tcanvas-agent hooks`         : prints the hooks without installing anything
+//! - `tcanvas-agent install-hooks` : installs the hooks of the user's shell, bash or zsh
+//!   (exit codes, durations)
+//! - `tcanvas-agent hooks [bash|zsh]`: prints the hooks without installing anything
 //! - `tcanvas-agent kill <session>`: stops every process of the session, then the session
 
 mod features {
@@ -19,9 +20,14 @@ use features::{hooks, serve};
 fn main() -> std::io::Result<()> {
     match std::env::args().nth(1).as_deref() {
         None | Some("serve") => serve::run(),
-        Some("install-hooks") => hooks::install(),
+        Some("install-hooks") => hooks::install_cli(),
         Some("hooks") => {
-            print!("{}", hooks::ZSH_HOOKS);
+            let shell = std::env::args().nth(2).or_else(hooks::user_shell_path).unwrap_or_default();
+            let Some(shell) = hooks::Shell::from_path(&shell) else {
+                eprintln!("unsupported shell: {shell}\nusage: tcanvas-agent hooks [bash|zsh]");
+                std::process::exit(2);
+            };
+            print!("{}", shell.hooks());
             Ok(())
         }
         Some("kill") => {
@@ -38,7 +44,7 @@ fn main() -> std::io::Result<()> {
             Ok(())
         }
         Some(other) => {
-            eprintln!("unknown command: {other}\nusage: tcanvas-agent [serve|install-hooks|hooks|kill <session>]");
+            eprintln!("unknown command: {other}\nusage: tcanvas-agent [serve|install-hooks|hooks [bash|zsh]|kill <session>]");
             std::process::exit(2);
         }
     }

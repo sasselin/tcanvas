@@ -32,7 +32,7 @@ pub fn run() -> io::Result<()> {
         }
     });
     let cmds = spawn_stdin_reader(watcher);
-    send(&AgentEvent::Hello { version: env!("CARGO_PKG_VERSION").into(), hooks_installed: hooks::installed() })?;
+    send(&AgentEvent::Hello { version: env!("CARGO_PKG_VERSION").into(), hooks: hooks::state() })?;
 
     let mut tracked: HashMap<String, Tracked> = HashMap::new();
     loop {
@@ -43,6 +43,10 @@ pub fn run() -> io::Result<()> {
                     thread::spawn(move || kill::kill_session(&session));
                 }
                 // Forwarded straight to the changes thread by the stdin reader.
+                AgentCmd::InstallHooks => match hooks::install() {
+                    Ok(_) => send(&AgentEvent::HooksChanged { hooks: hooks::state() })?,
+                    Err(e) => send(&AgentEvent::Error { problem: Problem::HooksFailed { detail: e.to_string() } })?,
+                },
                 AgentCmd::Watch { .. } | AgentCmd::Unwatch { .. } | AgentCmd::Diff { .. } | AgentCmd::ShowCommit { .. } | AgentCmd::ListDir { .. } => {}
             }
         }

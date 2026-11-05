@@ -584,7 +584,7 @@ mod tests {
         let mut ev = vec![];
         c.poll(&w, &mut ev);
         assert_eq!(ev.len(), 1);
-        c.handle(&Event::Agent(AgentEvent::Hello { version: "x".into(), hooks_installed: true }), &mut world(), &mut vec![]);
+        c.handle(&Event::Agent(AgentEvent::Hello { version: "x".into(), hooks: protocol::Hooks::Installed }), &mut world(), &mut vec![]);
         let mut ev = vec![];
         c.poll(&w, &mut ev);
         assert!(matches!(ev.as_slice(), [Event::ToAgent(AgentCmd::Watch { .. })]));
