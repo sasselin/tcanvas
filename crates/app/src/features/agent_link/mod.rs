@@ -1,4 +1,6 @@
-//! Link to `tcanvas-agent` in WSL: launch, event reading, automatic restart.
+//! Link to `tcanvas-agent` in WSL: installation, launch, event reading, automatic restart.
+
+pub mod install;
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Stdio};
@@ -7,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use egui::{RichText, Ui};
-use protocol::{AgentCmd, AgentEvent, DEFAULT_STALL_SECS};
+use protocol::{AgentCmd, AgentEvent, DEFAULT_STALL_SECS, Problem};
 
 use crate::shell::event::Event;
 use crate::shell::i18n::t;
@@ -16,6 +18,9 @@ use crate::shell::theme;
 use crate::shell::world::World;
 
 const RETRY_AFTER: Duration = Duration::from_secs(10);
+/// The agent repeats `TmuxMissing` every second while tmux is absent: the warning goes away
+/// this long after the last one.
+const TMUX_WARNING_FOR: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AgentMode {
@@ -34,6 +39,17 @@ pub enum LinkState {
 enum Msg {
     Event(AgentEvent),
     Closed(String),
+    /// End of the self-installation (`Err`: why it failed).
+    Installed(Result<(), String>),
+}
+
+/// Where the agent comes from before it can be launched.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Install {
+    /// Nothing to install (Linux, `TCANVAS_AGENT`), or already checked this run.
+    Ready,
+    Needed,
+    Running,
 }
 
 pub struct AgentLink {
@@ -47,12 +63,16 @@ pub struct AgentLink {
     retry_at: Option<Instant>,
     /// Agent disabled (tests): commands are kept here instead of being sent.
     sent: Vec<AgentCmd>,
+    install: Install,
+    /// Last `TmuxMissing` reported by the agent (detail, when).
+    tmux_missing: Option<(String, Instant)>,
 }
 
 impl AgentLink {
     pub fn new(ctx: egui::Context, mode: AgentMode) -> Self {
         let (tx, rx) = mpsc::channel();
-        let mut link = Self { mode, ctx, state: LinkState::Off, child: None, stdin: None, tx, rx, retry_at: None, sent: Vec::new() };
+        let install = if install::embedded().is_some() && std::env::var_os("TCANVAS_AGENT").is_none() { Install::Needed } else { Install::Ready };
+        let mut link = Self { mode, ctx, state: LinkState::Off, child: None, stdin: None, tx, rx, retry_at: None, sent: Vec::new(), install, tmux_missing: None };
         link.start();
         link
     }
@@ -64,6 +84,11 @@ impl AgentLink {
     fn start(&mut self) {
         if self.mode == AgentMode::Disabled {
             return;
+        }
+        match self.install {
+            Install::Ready => {}
+            Install::Running => return,
+            Install::Needed => return self.start_install(),
         }
         self.stop();
         let spawned = launch::agent(&[]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
@@ -93,6 +118,21 @@ impl AgentLink {
         self.child = Some(child);
         self.state = LinkState::Starting;
         self.retry_at = None;
+    }
+
+    /// Copies the embedded agent into WSL in the background (the first `wsl.exe` call may
+    /// boot WSL), then launches it.
+    fn start_install(&mut self) {
+        let Some(agent) = install::embedded() else { return };
+        self.install = Install::Running;
+        self.state = LinkState::Starting;
+        self.retry_at = None;
+        let (tx, ctx) = (self.tx.clone(), self.ctx.clone());
+        thread::spawn(move || {
+            let result = install::ensure(agent.bytes, agent.id, None).map(|_| ());
+            let _ = tx.send(Msg::Installed(result));
+            ctx.request_repaint();
+        });
     }
 
     fn stop(&mut self) {
@@ -141,11 +181,27 @@ impl AgentLink {
                     events.push(Event::Agent(ev));
                 }
                 Msg::Closed(why) => self.fail(why),
+                Msg::Installed(Ok(())) => {
+                    self.install = Install::Ready;
+                    self.start();
+                }
+                Msg::Installed(Err(why)) => {
+                    self.install = Install::Needed;
+                    self.fail((t().agent_install_failed)(&why));
+                }
             }
         }
     }
 
     pub fn status_ui(&mut self, ui: &mut Ui) {
+        if let Some((detail, at)) = &self.tmux_missing {
+            if at.elapsed() < TMUX_WARNING_FOR {
+                ui.label(RichText::new(t().tmux_missing_label).color(theme::status_color(Some(protocol::TermStatus::Exited(1))))).on_hover_text((t().tmux_missing_hint)(detail));
+                ui.ctx().request_repaint_after(TMUX_WARNING_FOR);
+            } else {
+                self.tmux_missing = None;
+            }
+        }
         match self.state.clone() {
             LinkState::Off => {}
             LinkState::Starting => {
@@ -177,6 +233,7 @@ impl AgentLink {
                 }
             }
             Event::ToAgent(cmd) => self.send(cmd),
+            Event::Agent(AgentEvent::Error { problem: Problem::TmuxMissing { detail } }) => self.tmux_missing = Some((detail.clone(), Instant::now())),
             _ => {}
         }
     }

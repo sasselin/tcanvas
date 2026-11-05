@@ -1,7 +1,6 @@
 #!/bin/sh
-# Build and install everything, then restart the app:
-#   - the agent into ~/.local/bin (WSL)
-#   - tcanvas.exe into %USERPROFILE%\tcanvas (Windows)
+# Build and install tcanvas.exe into %USERPROFILE%\tcanvas, then restart the app.
+# The exe embeds the agent and updates ~/.local/bin/tcanvas-agent itself on startup.
 # The tmux terminals survive the app restart.
 #
 #   ./scripts/deploy.sh            # build, install, restart
@@ -19,11 +18,7 @@ dest=$(wslpath "$profile_win")/tcanvas
 
 # Build first: if it fails, the running app is left untouched.
 echo "→ build"
-cargo build -q --release -p tcanvas-agent
 cargo build -q --release --target x86_64-pc-windows-gnu -p tcanvas
-
-echo "→ agent"
-install -D target/release/tcanvas-agent "$HOME/.local/bin/tcanvas-agent"
 
 # Windows locks a running .exe: stop the running instance first.
 "$ps" -NoProfile -Command "Get-Process tcanvas -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Milliseconds 300" </dev/null

@@ -315,6 +315,20 @@ fn agent_status_changes_raise_a_clickable_toast() {
 }
 
 #[test]
+fn missing_tmux_is_shown_in_the_status_bar() {
+    let tmux_missing = || Event::Agent(AgentEvent::Error { problem: protocol::Problem::TmuxMissing { detail: "No such file or directory".into() } });
+    for (lang, label) in [(Lang::Fr, "✖ tmux absent"), (Lang::En, "✖ tmux missing")] {
+        let dir = temp_dir("tmux-missing");
+        let mut h = harness_in(&dir, lang);
+        steps(&mut h, 2);
+        assert!(h.query_by_label(label).is_none());
+        h.state_mut().dispatch(vec![tmux_missing()]);
+        steps(&mut h, 2);
+        h.get_by_label(label);
+    }
+}
+
+#[test]
 fn unknown_canvas_sessions_are_adopted() {
     let dir = temp_dir("adopt");
     let mut h = harness(&dir);

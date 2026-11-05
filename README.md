@@ -48,23 +48,26 @@ for watching what Claude (or any other AI agent) is doing while it works.
 
 ## Installation
 
-In WSL:
+`tcanvas.exe` is self-contained: it embeds a static Linux build of the agent and installs it
+into the default WSL distro on startup (`~/.local/bin/tcanvas-agent`), updating it whenever the
+exe changes. Sharing the exe alone is enough.
+
+Requirements on the machine running it: WSL with a Linux distribution (`wsl --install`), and in
+WSL `tmux` ≥ 3.0 (`sudo apt install tmux`; the app says so if it is missing). Optional: `zsh`
+and its hooks, for command exit codes and durations:
 
 ```sh
-# 1. The agent (required for statuses, notifications and changes)
-cargo install --path crates/agent --root ~/.local      # → ~/.local/bin/tcanvas-agent
-
-# 2. The zsh hooks (optional: command exit codes and durations)
-tcanvas-agent install-hooks                            # adds one line to ~/.zshrc
-
-# 3. The Windows app (cross-compiled from WSL)
-rustup target add x86_64-pc-windows-gnu
-sudo apt install mingw-w64
-cargo build --release --target x86_64-pc-windows-gnu -p tcanvas
-cp target/x86_64-pc-windows-gnu/release/tcanvas.exe /mnt/c/Users/<you>/Applications/
+tcanvas-agent install-hooks      # in WSL: adds one line to ~/.zshrc
 ```
 
-Requirements in WSL: `tmux` (≥ 3.0) and `zsh` (for the hooks).
+Building the exe (cross-compiled from WSL):
+
+```sh
+rustup target add x86_64-pc-windows-gnu x86_64-unknown-linux-musl
+sudo apt install mingw-w64
+cargo build --release --target x86_64-pc-windows-gnu -p tcanvas
+# → target/x86_64-pc-windows-gnu/release/tcanvas.exe (the musl agent is built and embedded by build.rs)
+```
 
 Agent commands: `tcanvas-agent` (server mode, used by the app), `tcanvas-agent install-hooks`,
 `tcanvas-agent hooks` (print the hooks without installing them), and
@@ -185,19 +188,21 @@ The canvas is saved to `%APPDATA%\tcanvas\config\layout.json` (atomic writes; an
 is set aside, never overwritten). Orphaned tmux sessions (`tc_*`) are adopted again automatically.
 
 Useful variables: `TCANVAS_TMUX_SOCKET` (tmux socket, default `tcanvas`), `TCANVAS_CONFIG_DIR`,
-`TCANVAS_AGENT` (path of the agent inside WSL), `TCANVAS_LANG` (`en` or `fr`).
+`TCANVAS_AGENT` (path of the agent inside WSL; disables the self-installation), `TCANVAS_AGENT_BIN`
+(build time: prebuilt agent to embed instead of building it), `TCANVAS_LANG` (`en` or `fr`).
 
 ## Development
 
 Keep everything in sync while you work:
 
 ```sh
-./scripts/deploy.sh              # once: build, install the agent + the Windows exe, restart the app
+./scripts/deploy.sh              # once: build and install the Windows exe, restart the app
 ./scripts/deploy.sh --no-start   # same, without restarting the app
 ./scripts/watch.sh               # continuously: rebuild and restart on every code change
 ```
 
-`deploy.sh` installs the agent to `~/.local/bin` and `tcanvas.exe` to `%USERPROFILE%\tcanvas`.
+`deploy.sh` installs `tcanvas.exe` to `%USERPROFILE%\tcanvas`; on startup the exe updates the
+agent in `~/.local/bin`.
 If the build fails, the running app is left untouched. Restarting the app costs nothing: the
 terminals live in tmux. Tip: run `watch.sh` in a tcanvas terminal itself; it survives the restarts
 it triggers.

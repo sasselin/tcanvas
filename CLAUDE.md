@@ -26,7 +26,11 @@ Cargo workspace (`Cargo.toml`, edition 2024, resolver 3):
   `src/features/*.rs` (serve loop, tmux access, status from tmux + /proc, zsh hooks, git
   changes, session kill).
 - `crates/app` - package `tcanvas` (lib + Windows exe). `src/lib.rs` declares the modules;
-  `build.rs` embeds `assets/icon.ico` into the Windows exe (needs mingw-w64 `windres`).
+  `build.rs` (Windows target only) embeds `assets/icon.ico` (needs mingw-w64 `windres`) and
+  builds `tcanvas-agent` for `x86_64-unknown-linux-musl` (static, any distro) in its own target
+  dir under `OUT_DIR`. `agent_link/install.rs` embeds it and, on startup, copies it to
+  `~/.local/bin/tcanvas-agent` in WSL when `~/.local/share/tcanvas/agent.id` holds another
+  build hash: the exe alone is the whole distribution. `TCANVAS_AGENT` skips this.
 - `scripts/` - `deploy.sh`, `watch.sh`, `test-windows.sh`, `screenshots.sh`.
 - `docs/screenshots/` - README images, generated (see "Screenshots").
 - `assets/` - icons (SVG/PNG/ICO).
@@ -95,8 +99,8 @@ cargo build --release --target x86_64-pc-windows-gnu -p tcanvas   # Windows cros
 ./scripts/screenshots.sh    # only if the UI looks different: regenerate the README images
 ```
 
-- `test-windows.sh` needs `rustup target add x86_64-pc-windows-gnu` and `mingw-w64`; extra
-  args go to `cargo test`.
+- Windows builds need `rustup target add x86_64-pc-windows-gnu x86_64-unknown-linux-musl` and
+  `mingw-w64`; `test-windows.sh` extra args go to `cargo test`.
 - The Windows e2e test can occasionally exceed its timeout: rerun it before concluding it
   fails.
 - Formatting: there is no `rustfmt.toml` and existing code uses long lines, so
@@ -122,7 +126,7 @@ cargo build --release --target x86_64-pc-windows-gnu -p tcanvas   # Windows cros
 ## Deploy and dev loop
 
 - `./scripts/deploy.sh` - builds first (a failed build leaves the running app untouched),
-  installs `tcanvas-agent` to `~/.local/bin`, copies `tcanvas.exe` to
+  copies `tcanvas.exe` (which updates the agent in WSL on startup) to
   `%USERPROFILE%\tcanvas`, stops and restarts the app. tmux terminals survive the restart.
   `--no-start` skips relaunching.
 - `./scripts/watch.sh` - dev mode: redeploys on every source change under `crates/`,
