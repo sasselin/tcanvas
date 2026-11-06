@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/sasselin/tcanvas/compare/v0.1.0...v0.1.1) - 2026-11-06
+
+### Added
+
+- Show commits since the last release in development builds
+- Show the running version in the toolbar and window title
+
 ## [0.1.0](https://github.com/sasselin/tcanvas/releases/tag/v0.1.0) - 2026-11-06
 
 First public release.
