@@ -1701,5 +1701,5 @@ fn the_toolbar_shows_the_running_version() {
     let dir = temp_dir("version");
     let mut h = harness(&dir);
     steps(&mut h, 2);
-    h.get_by_label(&format!("v{}", env!("CARGO_PKG_VERSION")));
+    h.get_by_label(&format!("v{}", tcanvas::shell::version::current()));
 }

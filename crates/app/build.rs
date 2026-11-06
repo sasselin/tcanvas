@@ -1,3 +1,6 @@
+//! Every build: records `git describe` in `TCANVAS_GIT_DESCRIBE`, so a build made after the
+//! last release tag shows it (`shell::version`).
+//!
 //! Windows build only:
 //! - embeds the icon (`assets/icon.ico`) in the executable's resources, so it shows up in
 //!   Explorer and the taskbar. When cross-compiling from WSL, `embed-resource` uses
@@ -15,6 +18,7 @@ fn main() {
     let ico = manifest_dir.join("../../assets/icon.ico");
     println!("cargo:rerun-if-changed={}", ico.display());
     println!("cargo:rerun-if-changed=build.rs");
+    record_git_describe(&manifest_dir);
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
@@ -28,6 +32,23 @@ fn main() {
     let rc = out_dir.join("tcanvas.rc");
     fs::write(&rc, format!("1 ICON \"{ico}\"\n")).expect("writing tcanvas.rc");
     embed_resource::compile(&rc, embed_resource::NONE).manifest_optional().expect("compiling Windows resources");
+}
+
+/// `git describe` against the release tags (`v0.1.0-3-gae43b4d`), empty outside a git checkout
+/// (source archive, shallow clone without tags). Reruns when HEAD moves or tags change.
+fn record_git_describe(manifest_dir: &std::path::Path) {
+    let git = |args: &[&str]| Command::new("git").current_dir(manifest_dir).args(args).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    if let Some(git_dir) = git(&["rev-parse", "--absolute-git-dir"]) {
+        // Only existing paths: a missing one would rerun the script on every build.
+        for watched in ["HEAD", "logs/HEAD", "packed-refs", "refs/tags"] {
+            let path = PathBuf::from(&git_dir).join(watched);
+            if path.exists() {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+    }
+    let describe = git(&["describe", "--tags", "--match", "v[0-9]*", "--long", "--abbrev=7"]).unwrap_or_default();
+    println!("cargo:rustc-env=TCANVAS_GIT_DESCRIBE={describe}");
 }
 
 /// Writes `OUT_DIR/tcanvas-agent` (the binary) and `OUT_DIR/tcanvas-agent.id` (its content hash).

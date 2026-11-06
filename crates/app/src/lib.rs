@@ -22,7 +22,7 @@ pub fn run() -> eframe::Result {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default()
-            .with_title(format!("tcanvas {}", shell::VERSION))
+            .with_title(format!("tcanvas {}", shell::version::current()))
             // Wayland and X11 match it with `tcanvas.desktop` (taskbar icon, grouping).
             .with_app_id("tcanvas")
             .with_icon(icon)

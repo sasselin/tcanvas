@@ -5,6 +5,7 @@ pub mod fonts;
 pub mod i18n;
 pub mod launch;
 pub mod theme;
+pub mod version;
 pub mod widgets;
 pub mod world;
 
@@ -27,9 +28,6 @@ use crate::features::wires::Wires;
 use event::Event;
 use i18n::t;
 use world::{Card, World};
-
-/// The running build's version (the workspace version, set by release-plz).
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub struct Config {
     pub launcher: Launcher,
@@ -91,7 +89,7 @@ pub struct App {
     agent: AgentLink,
     persistence: Persistence,
     shortcuts: Vec<Shortcut>,
-    /// Shown in the toolbar: `VERSION`, pinned by the screenshot scenes so the README
+    /// Shown in the toolbar: `version::current()`, pinned by the screenshot scenes so the README
     /// images don't change on every release.
     pub version: &'static str,
 }
@@ -119,7 +117,7 @@ impl App {
             agent: AgentLink::new(ctx.clone(), config.agent),
             persistence,
             shortcuts: Vec::new(),
-            version: VERSION,
+            version: version::current(),
         }
     }
 
