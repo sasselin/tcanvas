@@ -86,6 +86,15 @@ impl Spaces {
                 events.push(Event::EnterSpace(Some(p.id.clone())));
             }
         }
+        // Inside a group only: the "free grid" option (the group is the whole canvas).
+        if !all {
+            ui.separator();
+            let on = world.free_grid;
+            let chip = Button::selectable(on, RichText::new(t().free_grid).color(if on { theme::CARD_BG } else { theme::TEXT })).fill(if on { theme::TEXT } else { Color32::TRANSPARENT });
+            if ui.add(chip).on_hover_text(t().free_grid_hint).clicked() {
+                events.push(Event::ToggleFreeGrid);
+            }
+        }
         ui.separator();
     }
 
@@ -108,6 +117,10 @@ impl Spaces {
                     let target = world.project_of(card).map(|p| p.id.clone());
                     enter(world, target, vp);
                 }
+            }
+            Event::ToggleFreeGrid => {
+                world.free_grid = !world.free_grid;
+                world.touch();
             }
             Event::RemoveProject(id) => {
                 world.space_cameras.remove(id.as_str());
@@ -188,6 +201,17 @@ mod tests {
         handle(&mut s, &mut w, Event::EnterSpace(Some("api".into())));
         let out = handle(&mut s, &mut w, Event::EnterSpace(Some("api".into())));
         assert!(matches!(out.as_slice(), [Event::FitRect(r)] if r.contains_rect(w.projects[0].rect)));
+    }
+
+    #[test]
+    fn free_grid_toggles_and_is_saved() {
+        let mut w = world();
+        let mut s = Spaces::default();
+        let rev = w.revision;
+        handle(&mut s, &mut w, Event::ToggleFreeGrid);
+        assert!(w.free_grid && w.revision > rev);
+        handle(&mut s, &mut w, Event::ToggleFreeGrid);
+        assert!(!w.free_grid);
     }
 
     #[test]

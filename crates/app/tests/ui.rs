@@ -1586,3 +1586,82 @@ fn a_canned_card_shows_fixed_output_and_ignores_typing() {
     assert!(text.starts_with("cargo test\ntest result: ok"), "{text}");
     assert!(h.state().cards.written(&id).is_empty(), "input goes to the (inert) terminal, not the test log");
 }
+
+/// Screen rectangle of the widget with this accessible label.
+fn widget_rect(h: &Harness<'_, App>, label: &str) -> Rect {
+    h.get_by_label(label).rect()
+}
+
+#[test]
+fn free_grid_makes_the_open_group_the_whole_canvas() {
+    let dir = temp_dir("free-grid");
+    let mut h = harness(&dir);
+    add_project(&mut h, "api", Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 500.0)));
+    add_project(&mut h, "web", Rect::from_min_size(pos2(0.0, 1200.0), Vec2::new(800.0, 500.0)));
+    add_card(&mut h, "a", pos2(40.0, 40.0));
+    let b = add_card(&mut h, "b", pos2(700.0, 40.0));
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Grille libre").is_none(), "no option in \"All\"");
+
+    h.get_by_label("● api").click();
+    steps(&mut h, 45);
+    h.get_by_label("Grille libre").click();
+    steps(&mut h, 3);
+    assert!(h.state().world.free_grid);
+
+    // The label is a bar pinned at the top left of the canvas, whatever the camera.
+    let vp = h.state().viewport();
+    let pinned = |h: &Harness<'_, App>| {
+        let close = widget_rect(h, "Fermer le groupe api");
+        close.min.y < vp.min.y + 50.0 && close.min.x < vp.min.x + 400.0
+    };
+    assert!(pinned(&h));
+    h.state_mut().world.camera.center += Vec2::new(3000.0, 2000.0);
+    steps(&mut h, 2);
+    assert!(pinned(&h), "does not follow the camera");
+    h.state_mut().world.camera.center -= Vec2::new(3000.0, 2000.0);
+    steps(&mut h, 2);
+
+    // Dragged far below, way past the old frame: still in the group, the frame follows.
+    drag_card_by(&mut h, &b, Vec2::new(0.0, 600.0));
+    assert_eq!(group_of(&h, &b).as_deref(), Some("p-api"));
+    assert_eq!(project_rect(&h, "p-api"), members_fit(&h, "p-api"));
+
+    // The pinned bar still renames the group.
+    let title = widget_rect(&h, "Fermer le groupe api").min - Vec2::new(40.0, -8.0);
+    for _ in 0..2 {
+        h.drag_at(title);
+        h.step();
+        h.drop_at(title);
+        h.step();
+    }
+    steps(&mut h, 3);
+    h.event(egui::Event::Text("Backend".into()));
+    steps(&mut h, 2);
+    h.key_press(Key::Enter);
+    steps(&mut h, 3);
+    assert_eq!(project_name(&h, "p-api"), "Backend");
+
+    // Back to "All": same layout, the option is hidden, the label is on the frame again.
+    h.get_by_label("Tous").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Grille libre").is_none());
+    assert_eq!(group_of(&h, &b).as_deref(), Some("p-api"));
+    let frame = screen_of(&h, project_rect(&h, "p-api"));
+    let close = widget_rect(&h, "Fermer le groupe Backend");
+    assert!((close.max.y - frame.min.y).abs() < 10.0, "label above the frame: {close:?} vs {frame:?}");
+}
+
+#[test]
+fn free_grid_toggle_in_english() {
+    let dir = temp_dir("free-grid-en");
+    let mut h = harness_in(&dir, Lang::En);
+    add_project(&mut h, "api", Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 500.0)));
+    add_card(&mut h, "a", pos2(40.0, 40.0));
+    steps(&mut h, 2);
+    h.get_by_label("● api").click();
+    steps(&mut h, 3);
+    h.get_by_label("Free grid").click();
+    steps(&mut h, 3);
+    assert!(h.state().world.free_grid);
+}

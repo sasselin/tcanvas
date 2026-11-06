@@ -167,6 +167,9 @@ pub struct World {
     pub dragging: Option<CardId>,
     /// "Changes" panel open (saved).
     pub changes_open: bool,
+    /// Option "free grid" (saved): inside a group, the group is the whole canvas (no frame,
+    /// a terminal can't be dragged out of it).
+    pub free_grid: bool,
     /// Last file modification seen in each project's linked folder (Unix seconds).
     pub file_activity: BTreeMap<ProjectId, u64>,
     /// Number of uncommitted files in each project's linked folder (Δ badge).
@@ -279,17 +282,27 @@ impl World {
         moved
     }
 
+    /// A group is open with the "free grid" option: the group is the whole canvas.
+    pub fn free_grid_active(&self) -> bool {
+        self.free_grid && self.space.as_ref().is_some_and(|id| self.project(id).is_some())
+    }
+
     /// Visible group whose frame contains `at` (the smallest): a card dropped there joins it.
+    /// With the free grid, the open group everywhere.
     pub fn drop_target(&self, at: Pos2) -> Option<ProjectId> {
+        if self.free_grid_active() {
+            return self.space.clone();
+        }
         self.projects.iter().filter(|p| self.shows_project(p) && p.rect.contains(at)).min_by(|a, b| a.rect.area().total_cmp(&b.rect.area())).map(|p| p.id.clone())
     }
 
     /// Fits each frame to its terminals (plus a margin). While a terminal is dragged, its
     /// group's frame is frozen: it doesn't follow, so the terminal can be dragged out. An empty group
-    /// keeps a minimum size around its last center.
+    /// keeps a minimum size around its last center. With the free grid nothing is frozen: the
+    /// terminal can't leave its group, the frame just follows it.
     /// A frame that changes size pushes away what it touches (see `separate`).
     pub fn refit_projects(&mut self) {
-        let frozen = self.dragging.as_deref().and_then(|id| self.card(id)).and_then(|c| c.project.clone());
+        let frozen = self.dragging.as_deref().and_then(|id| self.card(id)).and_then(|c| c.project.clone()).filter(|_| !self.free_grid_active());
         let mut changed = Vec::new();
         for p in self.projects.iter_mut().filter(|p| frozen.as_ref() != Some(&p.id)) {
             let fit = self
@@ -593,6 +606,30 @@ mod tests {
         let rev = w.revision;
         w.refit_projects();
         assert_eq!(w.revision, rev, "stable: nothing to save");
+    }
+
+    #[test]
+    fn free_grid_keeps_dragged_cards_in_the_open_group() {
+        let mut w = World { projects: vec![project("api", Rect::from_center_size(pos2(50.0, 50.0), Vec2::splat(10.0))), project("web", Rect::from_min_size(pos2(5000.0, 0.0), Vec2::splat(400.0)))], ..Default::default() };
+        let (a, b) = (member(0.0, 0.0, "api"), member(200.0, 0.0, "api"));
+        let ib = b.id.clone();
+        w.add_card(a);
+        w.add_card(b);
+        w.refit_projects();
+        let before = w.projects[0].rect;
+        let far = pos2(-3000.0, 900.0);
+        assert_eq!(w.drop_target(far), None, "option off: outside any frame");
+        w.free_grid = true;
+        assert_eq!(w.drop_target(far), None, "option on but in 'All': unchanged");
+        w.space = Some("api".into());
+        assert!(w.free_grid_active());
+        assert_eq!(w.drop_target(far).as_deref(), Some("api"), "anywhere: the open group");
+        w.dragging = Some(ib.clone());
+        w.card_mut(&ib).unwrap().rect = w.card(&ib).unwrap().rect.translate(vec2(900.0, 0.0));
+        w.refit_projects();
+        assert!(w.projects[0].rect.width() > before.width(), "the frame follows the dragged card");
+        w.free_grid = false;
+        assert!(!w.free_grid_active());
     }
 
     #[test]

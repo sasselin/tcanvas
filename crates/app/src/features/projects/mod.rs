@@ -16,6 +16,8 @@ use crate::shell::world::{Body, CardId, EMPTY_PROJECT, PROJECT_COLORS, Project, 
 
 /// Height of the label above the frame, in screen pixels (readable at any zoom).
 const HEADER_H: f32 = 24.0;
+/// Distance between the pinned bar (free grid) and the canvas corner, in screen pixels.
+const PINNED_MARGIN: f32 = 12.0;
 /// Width of the × button at the end of the label.
 const CLOSE_W: f32 = 24.0;
 
@@ -149,8 +151,21 @@ impl Projects {
         self.editing = Some(Editing { id: p.id.clone(), text: p.name.clone(), fresh: true });
     }
 
-    /// Frames (below the cards) and their labels.
+    /// Frames (below the cards) and their labels. With the free grid, the open group has no
+    /// frame and its label is a bar pinned at the top left of the canvas, above the cards.
     pub fn ui(&mut self, ui: &mut Ui, world: &mut World, vp: Rect, events: &mut Vec<Event>) {
+        if world.free_grid_active() {
+            let Some(i) = world.projects.iter().position(|p| world.space.as_ref() == Some(&p.id)) else { return };
+            let id = Id::unique(("pinned-group", &world.projects[i].id));
+            // Above the cards (canvas layer), below menus and the palette.
+            egui::Area::new(id).order(egui::Order::Middle).fixed_pos(vp.min).show(ui.ctx(), |ui| {
+                ui.set_clip_rect(vp);
+                let bar = self.label(ui, world, i, vp.min + Vec2::splat(PINNED_MARGIN), vp, vp, true, events);
+                // The area must cover the bar for the pointer to reach it (no widget added).
+                ui.expand_to_include_rect(bar);
+            });
+            return;
+        }
         let painter = ui.painter_at(vp);
         let cam = world.camera;
         for i in 0..world.projects.len() {
@@ -167,119 +182,135 @@ impl Projects {
             painter.rect_filled(screen, CornerRadius::same(10), color.gamma_multiply(0.07));
             painter.rect_stroke(screen, CornerRadius::same(10), Stroke::new(1.5, color.gamma_multiply(0.6)), StrokeKind::Inside);
             self.drag_feedback(ui, world, &id, screen, color);
-            let p = &world.projects[i];
-
-            // The number recalls the Ctrl+Shift+<n> shortcut.
-            let number = if i < 9 { format!("{}  ", i + 1) } else { String::new() };
-            let label = format!("{number}{}", p.name);
-            let folder = folder_label(p.cwd.as_deref());
-            let font = FontId::proportional(14.0);
-            let measure = |text: &str, font: &FontId| ui.ctx().fonts_mut(|f| f.layout_no_wrap(text.to_string(), font.clone(), theme::TEXT).size().x);
-            let width = measure(&label, &font) + 20.0 + CLOSE_W;
-            let header = Rect::from_min_size(pos2(screen.min.x, screen.min.y - HEADER_H - 4.0), vec2(width, HEADER_H));
-            let folder_font = FontId::proportional(12.0);
-            let folder_rect = Rect::from_min_size(pos2(header.max.x + 6.0, header.min.y), vec2(measure(&folder, &folder_font) + 16.0, HEADER_H));
-            let add_label = t().new_terminal_button;
-            let add_rect = Rect::from_min_size(pos2(folder_rect.max.x + 6.0, header.min.y), vec2(measure(add_label, &folder_font) + 16.0, HEADER_H));
-            let eid = Id::unique(("project", &id));
-
-            if self.editing.as_ref().is_some_and(|e| e.id == id) {
-                let header = Rect::from_min_size(header.min, vec2(width.max(240.0), HEADER_H));
-                painter.rect_filled(header, CornerRadius::same(6), color.gamma_multiply(0.85));
-                painter.rect_stroke(header, CornerRadius::same(6), Stroke::new(1.5, theme::TEXT), StrokeKind::Outside);
-                self.edit_name(ui, header, font, events);
-                continue;
-            }
-
-            painter.rect_filled(header, CornerRadius::same(6), color.gamma_multiply(0.85));
-            painter.text(header.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, label, font, theme::CARD_BG);
-
-            // Linked folder, right of the label: click = change folder.
-            let folder_r = ui.interact(folder_rect, eid.with("folder"), Sense::click()).on_hover_text(match &p.cwd {
-                Some(_) => t().folder_linked_hint,
-                None => t().folder_unlinked_hint,
-            });
-            let a11y = (t().group_folder_a11y)(&p.name);
-            folder_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
-            let folder_bg = if folder_r.hovered() { color.gamma_multiply(0.5) } else { color.gamma_multiply(0.22) };
-            painter.rect_filled(folder_rect, CornerRadius::same(6), folder_bg);
-            let folder_color = if p.cwd.is_some() { theme::TEXT } else { theme::TEXT_DIM };
-            painter.text(folder_rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, folder, folder_font.clone(), folder_color);
-            if folder_r.clicked() {
-                self.open_picker(world, &id, events);
-            }
-
-            // New terminal in this group (in its linked folder), placed next to the others.
-            let add_r = ui.interact(add_rect, eid.with("add"), Sense::click()).on_hover_text(t().group_new_terminal_hint);
-            let a11y = (t().group_new_terminal_a11y)(&p.name);
-            add_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
-            painter.rect_filled(add_rect, CornerRadius::same(6), if add_r.hovered() { color.gamma_multiply(0.5) } else { color.gamma_multiply(0.22) });
-            painter.text(add_rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, add_label, folder_font.clone(), theme::TEXT);
-            if add_r.clicked() {
-                events.push(Event::NewCard { at: None, project: Some(id.clone()) });
-            }
-
-            // Linked-folder changes: number of uncommitted files; click = diff panel.
-            if p.cwd.is_some() {
-                let n = world.change_counts.get(&id).copied().unwrap_or(0);
-                let delta_label = format!("Δ {n}");
-                let delta_rect = Rect::from_min_size(pos2(add_rect.max.x + 6.0, header.min.y), vec2(measure(&delta_label, &folder_font) + 16.0, HEADER_H));
-                let delta_r = ui.interact(delta_rect, eid.with("changes"), Sense::click()).on_hover_text(t().group_changes_hint);
-                let a11y = (t().group_changes_a11y)(&p.name);
-                delta_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
-                let bg = if delta_r.hovered() { color.gamma_multiply(0.5) } else if n > 0 { color.gamma_multiply(0.35) } else { color.gamma_multiply(0.22) };
-                painter.rect_filled(delta_rect, CornerRadius::same(6), bg);
-                painter.text(delta_rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, delta_label, folder_font.clone(), if n > 0 { theme::TEXT } else { theme::TEXT_DIM });
-                if delta_r.clicked() {
-                    events.push(Event::ShowChanges(id.clone()));
-                }
-            }
-
-            // Empty group: the obvious action, in the middle of the frame.
-            if world.members(&id).next().is_none() && screen.width() > 220.0 && screen.height() > 80.0 {
-                let empty_rect = Rect::from_center_size(screen.center(), vec2(220.0, 44.0));
-                let empty_r = ui.interact(empty_rect, eid.with("empty-add"), Sense::click());
-                empty_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t().open_a_terminal));
-                painter.rect_filled(empty_rect, CornerRadius::same(8), if empty_r.hovered() { color.gamma_multiply(0.6) } else { color.gamma_multiply(0.35) });
-                painter.text(empty_rect.center(), Align2::CENTER_CENTER, t().open_a_terminal, FontId::proportional(16.0), theme::TEXT);
-                if empty_r.clicked() {
-                    events.push(Event::NewCard { at: None, project: Some(id.clone()) });
-                }
-            }
-
-            let head = ui.interact(header, eid.with("head"), Sense::click_and_drag()).on_hover_text(t().group_header_hint);
-            // × button at the end of the label, registered after: it wins the click.
-            let close_rect = Rect::from_min_size(pos2(header.max.x - CLOSE_W, header.min.y), vec2(CLOSE_W, HEADER_H));
-            let close = ui.interact(close_rect, eid.with("close"), Sense::click()).on_hover_text(t().close_group_hint);
-            let a11y = (t().close_group_a11y)(&world.projects[i].name);
-            close.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
-            let hot = close.hovered();
-            if hot {
-                painter.rect_filled(close_rect.shrink(3.0), CornerRadius::same(4), egui::Color32::from_rgb(190, 60, 60));
-            }
-            let c = close_rect.center();
-            let stroke = Stroke::new(1.5, if hot { egui::Color32::WHITE } else { theme::CARD_BG });
-            painter.line_segment([c - Vec2::splat(4.0), c + Vec2::splat(4.0)], stroke);
-            painter.line_segment([c + vec2(-4.0, 4.0), c + vec2(4.0, -4.0)], stroke);
-            if close.clicked() {
-                events.push(Event::RequestCloseProject(id.clone()));
-            }
-            if head.drag_started_by(PointerButton::Primary) && ui.input(|inp| inp.modifiers.alt) {
-                self.wire_from = Some(id.clone());
-            }
-            if head.dragged_by(PointerButton::Primary) && self.wire_from.as_deref() != Some(id.as_str()) {
-                move_project(world, &id, head.drag_delta() / cam.zoom);
-            }
-            if head.double_clicked() {
-                self.start_rename(&world.projects[i]);
-            }
-            let mut pick = false;
-            head.context_menu(|ui| pick = self.menu(ui, &world.projects[i], events));
-            if pick {
-                self.open_picker(world, &id, events);
-            }
+            self.label(ui, world, i, pos2(screen.min.x, screen.min.y - HEADER_H - 4.0), screen, vp, false, events);
         }
         self.wire_drag(ui, world, vp, events);
+    }
+
+    /// A group's label (name, folder, new terminal, changes, ×) from `header_min`, and the
+    /// empty-group button in the middle of `body`, clipped to `clip`. `pinned`: fixed bar of the
+    /// free grid. Returns the screen area covered by the label.
+    #[allow(clippy::too_many_arguments)]
+    fn label(&mut self, ui: &mut Ui, world: &mut World, i: usize, header_min: Pos2, body: Rect, clip: Rect, pinned: bool, events: &mut Vec<Event>) -> Rect {
+        let painter = ui.painter_at(clip);
+        let p = &world.projects[i];
+        let id = p.id.clone();
+        let color = theme::rgb(p.color);
+
+        // The number recalls the Ctrl+Shift+<n> shortcut.
+        let number = if i < 9 { format!("{}  ", i + 1) } else { String::new() };
+        let label = format!("{number}{}", p.name);
+        let folder = folder_label(p.cwd.as_deref());
+        let font = FontId::proportional(14.0);
+        let measure = |text: &str, font: &FontId| ui.ctx().fonts_mut(|f| f.layout_no_wrap(text.to_string(), font.clone(), theme::TEXT).size().x);
+        let width = measure(&label, &font) + 20.0 + CLOSE_W;
+        let header = Rect::from_min_size(header_min, vec2(width, HEADER_H));
+        let folder_font = FontId::proportional(12.0);
+        let folder_rect = Rect::from_min_size(pos2(header.max.x + 6.0, header.min.y), vec2(measure(&folder, &folder_font) + 16.0, HEADER_H));
+        let add_label = t().new_terminal_button;
+        let add_rect = Rect::from_min_size(pos2(folder_rect.max.x + 6.0, header.min.y), vec2(measure(add_label, &folder_font) + 16.0, HEADER_H));
+        let eid = Id::unique(("project", &id));
+
+        if self.editing.as_ref().is_some_and(|e| e.id == id) {
+            let header = Rect::from_min_size(header.min, vec2(width.max(240.0), HEADER_H));
+            painter.rect_filled(header, CornerRadius::same(6), color.gamma_multiply(0.85));
+            painter.rect_stroke(header, CornerRadius::same(6), Stroke::new(1.5, theme::TEXT), StrokeKind::Outside);
+            self.edit_name(ui, header, font, events);
+            return header;
+        }
+
+        painter.rect_filled(header, CornerRadius::same(6), color.gamma_multiply(0.85));
+        painter.text(header.left_center() + vec2(10.0, 0.0), Align2::LEFT_CENTER, label, font, theme::CARD_BG);
+
+        // Linked folder, right of the label: click = change folder.
+        let folder_r = ui.interact(folder_rect, eid.with("folder"), Sense::click()).on_hover_text(match &p.cwd {
+            Some(_) => t().folder_linked_hint,
+            None => t().folder_unlinked_hint,
+        });
+        let a11y = (t().group_folder_a11y)(&p.name);
+        folder_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
+        let folder_bg = if folder_r.hovered() { color.gamma_multiply(0.5) } else { color.gamma_multiply(0.22) };
+        painter.rect_filled(folder_rect, CornerRadius::same(6), folder_bg);
+        let folder_color = if p.cwd.is_some() { theme::TEXT } else { theme::TEXT_DIM };
+        painter.text(folder_rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, folder, folder_font.clone(), folder_color);
+        if folder_r.clicked() {
+            self.open_picker(world, &id, events);
+        }
+
+        // New terminal in this group (in its linked folder), placed next to the others.
+        let add_r = ui.interact(add_rect, eid.with("add"), Sense::click()).on_hover_text(t().group_new_terminal_hint);
+        let a11y = (t().group_new_terminal_a11y)(&p.name);
+        add_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
+        painter.rect_filled(add_rect, CornerRadius::same(6), if add_r.hovered() { color.gamma_multiply(0.5) } else { color.gamma_multiply(0.22) });
+        painter.text(add_rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, add_label, folder_font.clone(), theme::TEXT);
+        if add_r.clicked() {
+            events.push(Event::NewCard { at: None, project: Some(id.clone()) });
+        }
+
+        let mut bar = header.union(folder_rect).union(add_rect);
+        // Linked-folder changes: number of uncommitted files; click = diff panel.
+        if p.cwd.is_some() {
+            let n = world.change_counts.get(&id).copied().unwrap_or(0);
+            let delta_label = format!("Δ {n}");
+            let delta_rect = Rect::from_min_size(pos2(add_rect.max.x + 6.0, header.min.y), vec2(measure(&delta_label, &folder_font) + 16.0, HEADER_H));
+            let delta_r = ui.interact(delta_rect, eid.with("changes"), Sense::click()).on_hover_text(t().group_changes_hint);
+            let a11y = (t().group_changes_a11y)(&p.name);
+            delta_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
+            let bg = if delta_r.hovered() { color.gamma_multiply(0.5) } else if n > 0 { color.gamma_multiply(0.35) } else { color.gamma_multiply(0.22) };
+            painter.rect_filled(delta_rect, CornerRadius::same(6), bg);
+            painter.text(delta_rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, delta_label, folder_font.clone(), if n > 0 { theme::TEXT } else { theme::TEXT_DIM });
+            if delta_r.clicked() {
+                events.push(Event::ShowChanges(id.clone()));
+            }
+            bar = bar.union(delta_rect);
+        }
+
+        // Empty group: the obvious action, in the middle of the frame.
+        if world.members(&id).next().is_none() && body.width() > 220.0 && body.height() > 80.0 {
+            let empty_rect = Rect::from_center_size(body.center(), vec2(220.0, 44.0));
+            let empty_r = ui.interact(empty_rect, eid.with("empty-add"), Sense::click());
+            empty_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, t().open_a_terminal));
+            painter.rect_filled(empty_rect, CornerRadius::same(8), if empty_r.hovered() { color.gamma_multiply(0.6) } else { color.gamma_multiply(0.35) });
+            painter.text(empty_rect.center(), Align2::CENTER_CENTER, t().open_a_terminal, FontId::proportional(16.0), theme::TEXT);
+            if empty_r.clicked() {
+                events.push(Event::NewCard { at: None, project: Some(id.clone()) });
+            }
+        }
+
+        let head = ui.interact(header, eid.with("head"), Sense::click_and_drag()).on_hover_text(t().group_header_hint);
+        // × button at the end of the label, registered after: it wins the click.
+        let close_rect = Rect::from_min_size(pos2(header.max.x - CLOSE_W, header.min.y), vec2(CLOSE_W, HEADER_H));
+        let close = ui.interact(close_rect, eid.with("close"), Sense::click()).on_hover_text(t().close_group_hint);
+        let a11y = (t().close_group_a11y)(&world.projects[i].name);
+        close.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
+        let hot = close.hovered();
+        if hot {
+            painter.rect_filled(close_rect.shrink(3.0), CornerRadius::same(4), egui::Color32::from_rgb(190, 60, 60));
+        }
+        let c = close_rect.center();
+        let stroke = Stroke::new(1.5, if hot { egui::Color32::WHITE } else { theme::CARD_BG });
+        painter.line_segment([c - Vec2::splat(4.0), c + Vec2::splat(4.0)], stroke);
+        painter.line_segment([c + vec2(-4.0, 4.0), c + vec2(4.0, -4.0)], stroke);
+        if close.clicked() {
+            events.push(Event::RequestCloseProject(id.clone()));
+        }
+        // Pinned bar (free grid): the group is the whole canvas, there is nothing to move it
+        // against nor to link it to.
+        if !pinned && head.drag_started_by(PointerButton::Primary) && ui.input(|inp| inp.modifiers.alt) {
+            self.wire_from = Some(id.clone());
+        }
+        if !pinned && head.dragged_by(PointerButton::Primary) && self.wire_from.as_deref() != Some(id.as_str()) {
+            move_project(world, &id, head.drag_delta() / world.camera.zoom);
+        }
+        if head.double_clicked() {
+            self.start_rename(&world.projects[i]);
+        }
+        let mut pick = false;
+        head.context_menu(|ui| pick = self.menu(ui, &world.projects[i], events));
+        if pick {
+            self.open_picker(world, &id, events);
+        }
+        bar
     }
 
     /// Alt + drag from a label: a line follows the pointer; released over another group, it

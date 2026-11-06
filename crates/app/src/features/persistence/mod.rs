@@ -30,6 +30,8 @@ pub struct LayoutFile {
     pub space_cameras: BTreeMap<String, Camera>,
     #[serde(default)]
     pub changes_open: bool,
+    #[serde(default)]
+    pub free_grid: bool,
 }
 
 /// `%APPDATA%\tcanvas\config` on Windows, `~/.config/tcanvas` on Linux.
@@ -77,6 +79,7 @@ impl Persistence {
                 world.space = file.space.filter(|id| world.project(id).is_some());
                 world.space_cameras = file.space_cameras;
                 world.changes_open = file.changes_open;
+                world.free_grid = file.free_grid;
                 for mut card in file.cards {
                     // Version 1: a card belonged to the frame containing its center.
                     if file.version < 2 {
@@ -120,6 +123,7 @@ impl Persistence {
             space: world.space.clone(),
             space_cameras: world.space_cameras.clone(),
             changes_open: world.changes_open,
+            free_grid: world.free_grid,
         };
         match write_atomic(&self.path, &serde_json::to_vec_pretty(&file).expect("layout serializes")) {
             Ok(()) => {
@@ -173,6 +177,7 @@ mod tests {
         w.add_card(b);
         w.refit_projects();
         w.changes_open = true;
+        w.free_grid = true;
         w
     }
 
@@ -196,6 +201,7 @@ mod tests {
         assert!(!a.attention, "runtime state is not saved");
         assert_eq!((a.project.as_deref(), loaded.cards[1].project.as_deref()), (Some("p1"), None));
         assert!(loaded.changes_open);
+        assert!(loaded.free_grid);
         assert!(!dir.join("layout.json.tmp").exists());
         fs::remove_dir_all(dir).unwrap();
     }

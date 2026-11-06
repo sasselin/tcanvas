@@ -237,6 +237,8 @@ pub struct Texts {
     // Spaces.
     pub all_spaces: &'static str,
     pub all_spaces_hint: &'static str,
+    pub free_grid: &'static str,
+    pub free_grid_hint: &'static str,
     pub open_project: &'static str,
     pub open_project_shortcut: fn(usize) -> String,
 
@@ -409,6 +411,8 @@ pub const EN: Texts = Texts {
 
     all_spaces: "All",
     all_spaces_hint: "Overview: all projects",
+    free_grid: "Free grid",
+    free_grid_hint: "Inside a group, use the whole canvas: no frame, terminals stay in the group wherever they are dropped",
     open_project: "Open this project",
     open_project_shortcut: |n| format!("Open this project · Ctrl+Shift+{n}"),
 
@@ -579,6 +583,8 @@ pub const FR: Texts = Texts {
 
     all_spaces: "Tous",
     all_spaces_hint: "Vue d'ensemble : tous les projets",
+    free_grid: "Grille libre",
+    free_grid_hint: "Dans un groupe, utiliser tout le canevas : pas de cadre, les terminaux restent dans le groupe où qu'on les lâche",
     open_project: "Ouvrir ce projet",
     open_project_shortcut: |n| format!("Ouvrir ce projet · Ctrl+Maj+{n}"),
 
