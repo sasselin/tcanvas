@@ -1,18 +1,19 @@
 //! Wires between groups (projects), drawn from frame to frame in the "All" view. Clicking a
-//! wire flies the camera to the farther group; in a single project's space, linked groups
-//! show as chips beside the frame that open their space. Drawing one: Alt + drag from a
-//! group's label (see the `projects` slice).
+//! wire flies the camera to the farther group. In a single project's space, every group reachable
+//! through the wires (directly or through other groups) shows as a chip in one row under the
+//! group's label; a chip opens that group's space. Drawing one: Alt + drag from a group's label
+//! (see the `projects` slice).
 
+use egui::emath::GuiRounding as _;
 use egui::{Align2, CornerRadius, FontId, Id, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, epaint::CubicBezierShape, pos2, vec2};
 
 use crate::shell::event::Event;
 use crate::shell::i18n::t;
-use crate::shell::theme;
+use crate::shell::theme::{self, HEADER_H, LINKED_ROW_GAP, LINKED_ROW_H, PINNED_MARGIN};
 use crate::shell::world::{Wire, World};
 
 const SAMPLES: usize = 24;
 const HIT_PX: f32 = 6.0;
-const CHIP_H: f32 = 24.0;
 const CHIP_GAP: f32 = 8.0;
 
 /// Bezier curve between two frames, anchored on the sides that face each other. On the top and
@@ -59,67 +60,19 @@ pub fn distance_to_polyline(points: &[Pos2], p: Pos2) -> f32 {
         .fold(f32::INFINITY, f32::min)
 }
 
-/// Side of a frame, toward another group.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Side {
-    Left,
-    Right,
-    Top,
-    Bottom,
-}
-
-impl Side {
-    /// Side of `home` facing `other` (dominant axis between the centers).
-    pub fn facing(home: Rect, other: Rect) -> Side {
-        let d = other.center() - home.center();
-        match (d.x.abs() >= d.y.abs(), d.x >= 0.0, d.y >= 0.0) {
-            (true, true, _) => Side::Right,
-            (true, false, _) => Side::Left,
-            (false, _, true) => Side::Bottom,
-            (false, _, false) => Side::Top,
-        }
-    }
-
-    pub fn arrow(self) -> &'static str {
-        match self {
-            Side::Left => "←",
-            Side::Right => "→",
-            Side::Top => "↑",
-            Side::Bottom => "↓",
-        }
-    }
-}
-
-/// Screen rects of the "linked group" chips around the open group's frame `home`, outside the
-/// side facing each linked group: stacked downward from the top on the left and right sides,
-/// lined up leftward from the right end on top (the label sits at the top left) and rightward
-/// from the left end at the bottom. `others` gives each linked frame and its chip size.
-pub fn chip_rects(home: Rect, others: &[(Rect, Vec2)]) -> Vec<Rect> {
-    let (mut left_y, mut right_y) = (home.min.y + CHIP_GAP, home.min.y + CHIP_GAP);
-    let (mut top_x, mut bottom_x) = (home.max.x - CHIP_GAP, home.min.x + CHIP_GAP);
-    others
+/// Screen rects of the linked-group chips from `origin`, left to right, wrapping to a new line
+/// when a chip would pass `max_x`.
+pub fn row_rects(origin: Pos2, sizes: &[Vec2], max_x: f32) -> Vec<Rect> {
+    let mut at = origin;
+    sizes
         .iter()
-        .map(|&(other, size)| match Side::facing(home, other) {
-            Side::Right => {
-                let r = Rect::from_min_size(pos2(home.max.x + CHIP_GAP, right_y), size);
-                right_y = r.max.y + CHIP_GAP;
-                r
+        .map(|&size| {
+            if at.x > origin.x && at.x + size.x > max_x {
+                at = pos2(origin.x, at.y + LINKED_ROW_H + CHIP_GAP);
             }
-            Side::Left => {
-                let r = Rect::from_min_size(pos2(home.min.x - CHIP_GAP - size.x, left_y), size);
-                left_y = r.max.y + CHIP_GAP;
-                r
-            }
-            Side::Top => {
-                let r = Rect::from_min_size(pos2(top_x - size.x, home.min.y - CHIP_GAP - size.y), size);
-                top_x = r.min.x - CHIP_GAP;
-                r
-            }
-            Side::Bottom => {
-                let r = Rect::from_min_size(pos2(bottom_x, home.max.y + CHIP_GAP), size);
-                bottom_x = r.max.x + CHIP_GAP;
-                r
-            }
+            let r = Rect::from_min_size(at, size);
+            at.x = r.max.x + CHIP_GAP;
+            r
         })
         .collect()
 }
@@ -140,7 +93,7 @@ impl Wires {
     pub fn ui(&mut self, ui: &mut Ui, world: &World, vp: Rect, events: &mut Vec<Event>) {
         match &world.space {
             None => self.wires_ui(ui, world, vp, events),
-            Some(id) => self.chips_ui(ui, world, id, vp, events),
+            Some(id) => self.linked_row_ui(ui, world, id, vp, events),
         }
     }
 
@@ -182,39 +135,58 @@ impl Wires {
         }
     }
 
-    fn chips_ui(&mut self, ui: &mut Ui, world: &World, space: &str, vp: Rect, events: &mut Vec<Event>) {
+    /// The row of linked groups under the open group's label: under the pinned bar with the
+    /// free grid, otherwise between the label (lifted by `projects`) and the frame.
+    fn linked_row_ui(&mut self, ui: &mut Ui, world: &World, space: &str, vp: Rect, events: &mut Vec<Event>) {
         let Some(home) = world.project(space) else { return };
-        let cam = world.camera;
-        let home_screen = cam.rect_to_screen(home.rect, vp);
-        let linked: Vec<_> = world.wires.iter().filter(|w| w.touches(space)).filter_map(|w| world.project(w.other(space))).collect();
+        let linked = world.linked_groups(space);
+        if linked.is_empty() {
+            return;
+        }
+        let origin = if world.free_grid_active() {
+            vp.min + vec2(PINNED_MARGIN, PINNED_MARGIN + HEADER_H + LINKED_ROW_GAP)
+        } else {
+            let frame = world.camera.rect_to_screen(home.rect, vp);
+            pos2(frame.min.x, frame.min.y - 4.0 - LINKED_ROW_H)
+        };
         let font = FontId::proportional(13.0);
         let labels: Vec<(String, Vec2)> = linked
             .iter()
             .map(|other| {
-                let arrow = Side::facing(home.rect, other.rect).arrow();
-                let text = format!("{arrow} {}", other.name);
+                let text = format!("⇄ {}", other.name);
                 let w = ui.ctx().fonts_mut(|f| f.layout_no_wrap(text.clone(), font.clone(), theme::TEXT).size().x);
-                (text, vec2(w + 18.0, CHIP_H))
+                (text, vec2(w + 18.0, LINKED_ROW_H))
             })
             .collect();
-        let others: Vec<(Rect, Vec2)> = linked.iter().zip(&labels).map(|(o, (_, size))| (cam.rect_to_screen(o.rect, vp), *size)).collect();
-        let painter = ui.painter_at(vp);
-        for ((other, (text, _)), rect) in linked.iter().zip(&labels).zip(chip_rects(home_screen, &others)) {
-            // A frame filling the view would push its chips off screen: keep them inside.
-            let rect = keep_inside(rect, vp.shrink(CHIP_GAP));
-            let resp = ui.interact(rect, Id::unique(("wire-chip", space, &other.id)), Sense::click()).on_hover_text((t().linked_group_hint)(&other.name));
-            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, text));
-            let color = theme::rgb(other.color);
-            painter.rect_filled(rect, CornerRadius::same(6), if resp.hovered() { color.gamma_multiply(0.6) } else { color.gamma_multiply(0.3) });
-            painter.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, color), StrokeKind::Inside);
-            painter.text(rect.left_center() + vec2(9.0, 0.0), Align2::LEFT_CENTER, text, font.clone(), theme::TEXT);
-            if resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        let sizes: Vec<Vec2> = labels.iter().map(|(_, s)| *s).collect();
+        let area = vp.shrink(CHIP_GAP);
+        let rects = row_rects(origin, &sizes, area.max.x);
+        // A frame bigger than the view would push the row off screen: keep it inside.
+        let bounds = rects.iter().copied().reduce(|a, b| a.union(b)).unwrap_or(Rect::NOTHING);
+        let shift = keep_inside(bounds, area).min - bounds.min;
+        // Above the cards (canvas layer), like the pinned bar, below menus and the palette.
+        egui::Area::new(Id::unique(("linked-row", space))).order(egui::Order::Middle).fixed_pos(vp.min).show(ui.ctx(), |ui| {
+            ui.set_clip_rect(vp);
+            let painter = ui.painter_at(vp);
+            for ((other, (text, _)), rect) in linked.iter().zip(&labels).zip(rects) {
+                // Rounded to the UI grid, like egui's own widgets.
+                let rect = rect.translate(shift).round_ui();
+                let resp = ui.interact(rect, Id::unique(("wire-chip", space, &other.id)), Sense::click()).on_hover_text((t().linked_group_hint)(&other.name));
+                resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, text));
+                let color = theme::rgb(other.color);
+                painter.rect_filled(rect, CornerRadius::same(6), if resp.hovered() { color.gamma_multiply(0.6) } else { color.gamma_multiply(0.3) });
+                painter.rect_stroke(rect, CornerRadius::same(6), Stroke::new(1.0, color), StrokeKind::Inside);
+                painter.text(rect.left_center() + vec2(9.0, 0.0), Align2::LEFT_CENTER, text, font.clone(), theme::TEXT);
+                if resp.hovered() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                }
+                if resp.clicked() {
+                    events.push(Event::EnterSpace(Some(other.id.clone())));
+                }
+                // The area must cover the chips for the pointer to reach them.
+                ui.expand_to_include_rect(rect);
             }
-            if resp.clicked() {
-                events.push(Event::EnterSpace(Some(other.id.clone())));
-            }
-        }
+        });
     }
 
     pub fn handle(&mut self, ev: &Event, world: &mut World, _out: &mut Vec<Event>) {
@@ -318,21 +290,17 @@ mod tests {
     }
 
     #[test]
-    fn chips_sit_outside_the_side_facing_each_linked_group_without_overlapping() {
-        let home = Rect::from_min_size(pos2(100.0, 100.0), Vec2::new(400.0, 300.0));
-        let size = Vec2::new(80.0, CHIP_H);
-        let right_a = Rect::from_min_size(pos2(900.0, 0.0), Vec2::splat(100.0));
-        let right_b = Rect::from_min_size(pos2(1200.0, 400.0), Vec2::splat(100.0));
-        let left = Rect::from_min_size(pos2(-600.0, 200.0), Vec2::splat(100.0));
-        let below = Rect::from_min_size(pos2(200.0, 1500.0), Vec2::splat(100.0));
-        let above = Rect::from_min_size(pos2(300.0, -1500.0), Vec2::splat(100.0));
-        let chips = chip_rects(home, &[(right_a, size), (left, size), (right_b, size), (below, size), (above, size)]);
-        assert!(chips[0].min.x > home.max.x && chips[2].min.x > home.max.x, "right side");
-        assert!(chips[1].max.x < home.min.x, "left side");
-        assert!(!chips[0].intersects(chips[2]), "stacked");
-        assert_eq!(chips[0].min.y, chips[1].min.y, "each side starts at the top");
-        assert!(chips[3].min.y > home.max.y && chips[3].min.x >= home.min.x, "below, from the left");
-        assert!(chips[4].max.y < home.min.y && chips[4].max.x <= home.max.x, "above, from the right (the label is at the left)");
-        assert_eq!([Side::facing(home, below).arrow(), Side::facing(home, left).arrow()], ["↓", "←"]);
+    fn linked_chips_line_up_and_wrap_without_overlapping() {
+        let size = Vec2::new(80.0, LINKED_ROW_H);
+        let row = row_rects(pos2(100.0, 50.0), &[size, size], 1000.0);
+        assert_eq!(row[0].min, pos2(100.0, 50.0));
+        assert_eq!(row[1].min, pos2(100.0 + 80.0 + CHIP_GAP, 50.0), "same line, left to right");
+        let wrapped = row_rects(pos2(100.0, 50.0), &[size, size, size], 300.0);
+        assert_eq!(wrapped[1].min.y, 50.0);
+        assert_eq!(wrapped[2].min, pos2(100.0, 50.0 + LINKED_ROW_H + CHIP_GAP), "next line from the left");
+        assert!(!wrapped[0].intersects(wrapped[1]) && !wrapped[1].intersects(wrapped[2]));
+        // A chip wider than the space still goes on the first line.
+        let wide = row_rects(pos2(0.0, 0.0), &[Vec2::new(500.0, LINKED_ROW_H)], 300.0);
+        assert_eq!(wide[0].min, Pos2::ZERO);
     }
 }

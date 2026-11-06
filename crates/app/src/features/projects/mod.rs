@@ -10,14 +10,10 @@ mod folder_picker;
 use folder_picker::{Choice, FolderPicker};
 use crate::shell::event::{Event, Notice};
 use crate::shell::i18n::t;
-use crate::shell::theme;
+use crate::shell::theme::{self, HEADER_H, LINKED_ROW_GAP, LINKED_ROW_H, PINNED_MARGIN};
 use crate::shell::widgets::confirm;
 use crate::shell::world::{Body, CardId, EMPTY_PROJECT, PROJECT_COLORS, Project, ProjectId, World, new_id};
 
-/// Height of the label above the frame, in screen pixels (readable at any zoom).
-const HEADER_H: f32 = 24.0;
-/// Distance between the pinned bar (free grid) and the canvas corner, in screen pixels.
-const PINNED_MARGIN: f32 = 12.0;
 /// Width of the × button at the end of the label.
 const CLOSE_W: f32 = 24.0;
 
@@ -176,13 +172,16 @@ impl Projects {
             let id = p.id.clone();
             let color = theme::rgb(p.color);
             let screen = cam.rect_to_screen(p.rect, vp);
-            if !vp.intersects(screen.expand(HEADER_H)) {
+            if !vp.intersects(screen.expand(HEADER_H + LINKED_ROW_H + LINKED_ROW_GAP)) {
                 continue;
             }
             painter.rect_filled(screen, CornerRadius::same(10), color.gamma_multiply(0.07));
             painter.rect_stroke(screen, CornerRadius::same(10), Stroke::new(1.5, color.gamma_multiply(0.6)), StrokeKind::Inside);
             self.drag_feedback(ui, world, &id, screen, color);
-            self.label(ui, world, i, pos2(screen.min.x, screen.min.y - HEADER_H - 4.0), screen, vp, false, events);
+            // Open group with links: its label rises to leave room for the row of linked
+            // groups (see the `wires` slice) between the label and the frame.
+            let lift = if world.space.as_ref() == Some(&id) && !world.linked_groups(&id).is_empty() { LINKED_ROW_H + LINKED_ROW_GAP } else { 0.0 };
+            self.label(ui, world, i, pos2(screen.min.x, screen.min.y - HEADER_H - 4.0 - lift), screen, vp, false, events);
         }
         self.wire_drag(ui, world, vp, events);
     }

@@ -235,6 +235,26 @@ impl World {
         self.cards.iter().filter(move |c| c.project.as_deref() == Some(project))
     }
 
+    /// Every group reachable from `id` through the wires (directly or through other groups),
+    /// without `id` itself, sorted by name.
+    pub fn linked_groups(&self, id: &str) -> Vec<&Project> {
+        let mut seen: Vec<&str> = vec![id];
+        let mut next = 0;
+        while next < seen.len() {
+            let at = seen[next];
+            next += 1;
+            for w in self.wires.iter().filter(|w| w.touches(at)) {
+                let other = w.other(at);
+                if !seen.contains(&other) && self.project(other).is_some() {
+                    seen.push(other);
+                }
+            }
+        }
+        let mut out: Vec<&Project> = seen[1..].iter().filter_map(|p| self.project(p)).collect();
+        out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.id.cmp(&b.id)));
+        out
+    }
+
     /// The card is part of the displayed space (member of the open project, or anything in "All").
     pub fn shows_card(&self, card: &Card) -> bool {
         match &self.space {
@@ -520,6 +540,26 @@ mod tests {
 
     fn card_at(x: f32, y: f32) -> Card {
         Card::new(Rect::from_min_size(pos2(x, y), Vec2::new(100.0, 60.0)), None)
+    }
+
+    fn linked_names(w: &World, id: &str) -> Vec<String> {
+        w.linked_groups(id).into_iter().map(|p| p.name.clone()).collect()
+    }
+
+    #[test]
+    fn linked_groups_follow_the_whole_chain_sorted_by_name() {
+        let mut w = World::default();
+        for (id, name) in [("s", "shop"), ("w", "Wordpress"), ("o", "outils"), ("x", "alone")] {
+            w.projects.push(Project { id: id.into(), name: name.into(), color: [0; 3], rect: Rect::ZERO, cwd: None });
+        }
+        let wire = |a: &str, b: &str| Wire { from: a.into(), to: b.into() };
+        w.wires = vec![wire("s", "w"), wire("w", "o"), wire("o", "gone")];
+        assert_eq!(linked_names(&w, "s"), ["outils", "Wordpress"], "through wordpress, case-insensitive order");
+        assert_eq!(linked_names(&w, "o"), ["shop", "Wordpress"]);
+        assert!(linked_names(&w, "x").is_empty(), "isolated group");
+        // A cycle does not loop or repeat a group.
+        w.wires.push(wire("o", "s"));
+        assert_eq!(linked_names(&w, "w"), ["outils", "shop"]);
     }
 
     #[test]

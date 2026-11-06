@@ -1,4 +1,4 @@
-//! Colors shared by all slices.
+//! Colors and a few layout sizes shared by all slices.
 
 use egui::Color32;
 use protocol::TermStatus;
@@ -12,6 +12,15 @@ pub const FOCUS: Color32 = Color32::from_rgb(110, 160, 255);
 pub const TEXT: Color32 = Color32::from_rgb(220, 223, 228);
 pub const TEXT_DIM: Color32 = Color32::from_rgb(140, 146, 158);
 pub const WIRE: Color32 = Color32::from_rgb(120, 130, 150);
+
+/// Height of a group's label above its frame, in screen pixels (readable at any zoom).
+pub const HEADER_H: f32 = 24.0;
+/// Distance between the pinned group bar (free grid) and the canvas corner, in screen pixels.
+pub const PINNED_MARGIN: f32 = 12.0;
+/// Height of the row of linked groups under the open group's label, in screen pixels.
+pub const LINKED_ROW_H: f32 = 24.0;
+/// Gap between a group's label and the row of linked groups, in screen pixels.
+pub const LINKED_ROW_GAP: f32 = 6.0;
 
 pub fn status_color(status: Option<TermStatus>) -> Color32 {
     match status {

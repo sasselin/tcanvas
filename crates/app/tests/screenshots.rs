@@ -403,7 +403,7 @@ fn project() {
     demo_canvas(&mut h);
     ctrl_shift(&h, Key::Num1);
     steps(&mut h, 3);
-    assert!(h.query_by_label("→ shop-web").is_some() && h.query_by_label("↓ infra").is_some(), "linked groups shown as chips");
+    assert!(h.query_by_label("⇄ shop-web").is_some() && h.query_by_label("⇄ infra").is_some(), "linked groups shown as chips");
     save(&mut h, "project");
 }
 

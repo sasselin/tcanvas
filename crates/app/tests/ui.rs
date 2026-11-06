@@ -252,23 +252,53 @@ fn clicking_a_wire_frames_the_far_group_and_right_click_deletes_it() {
 }
 
 #[test]
-fn a_project_space_shows_its_linked_groups_as_chips_that_open_them() {
+fn a_project_space_shows_every_group_of_its_chain_in_one_row_under_its_label() {
     let dir = temp_dir("wire-chip");
     let mut h = harness(&dir);
     let (api, web) = two_linked_groups(&mut h);
     let db = add_project(&mut h, "db", Rect::from_min_size(pos2(1500.0, 900.0), Vec2::new(400.0, 300.0)));
+    add_project(&mut h, "alone", Rect::from_min_size(pos2(-900.0, 900.0), Vec2::new(400.0, 300.0)));
     h.state_mut().dispatch(vec![Event::AddWire(api.clone(), web.clone()), Event::AddWire(web.clone(), db.clone())]);
     steps(&mut h, 2);
-    assert!(h.query_by_label("→ web").is_none(), "no chips in \"All\": the wires are drawn");
+    assert!(h.query_by_label("⇄ web").is_none(), "no chips in \"All\": the wires are drawn");
 
     ctrl_shift(&h, Key::Num1);
-    steps(&mut h, 3);
+    steps(&mut h, 45);
     assert_eq!(h.state().world.space.as_deref(), Some(api.as_str()));
-    assert!(h.query_by_label("→ db").is_none(), "only the open group's links");
-    h.get_by_label("→ web").click();
+    // db is linked through web: it can be reached directly. Unlinked groups are not listed.
+    let (db_chip, web_chip) = (widget_rect(&h, "⇄ db"), widget_rect(&h, "⇄ web"));
+    assert!(h.query_by_label("⇄ alone").is_none());
+    assert!((db_chip.min.y - web_chip.min.y).abs() < 1.0 && db_chip.max.x < web_chip.min.x, "one row, by name: {db_chip:?} {web_chip:?}");
+    let label = widget_rect(&h, "Fermer le groupe api");
+    let frame = screen_of(&h, project_rect(&h, &api));
+    assert!(db_chip.min.y > label.max.y && db_chip.max.y <= frame.min.y + 1.0, "between the label and the frame: {label:?} {db_chip:?} {frame:?}");
+
+    h.get_by_label("⇄ db").click();
+    steps(&mut h, 3);
+    assert_eq!(h.state().world.space.as_deref(), Some(db.as_str()));
+    assert!(h.query_by_label("⇄ api").is_some() && h.query_by_label("⇄ web").is_some());
+}
+
+#[test]
+fn with_the_free_grid_the_linked_groups_sit_under_the_pinned_bar() {
+    let dir = temp_dir("wire-chip-grid");
+    let mut h = harness_in(&dir, Lang::En);
+    let (api, web) = two_linked_groups(&mut h);
+    h.state_mut().dispatch(vec![Event::AddWire(api.clone(), web.clone())]);
+    ctrl_shift(&h, Key::Num1);
+    steps(&mut h, 45);
+    h.get_by_label("Free grid").click();
+    steps(&mut h, 3);
+    let bar = widget_rect(&h, "Close group api");
+    let chip = widget_rect(&h, "⇄ web");
+    assert!(chip.min.y > bar.max.y && chip.min.y < bar.max.y + 20.0 && chip.min.x < bar.min.x + 200.0, "under the pinned bar: {bar:?} {chip:?}");
+    // Still there wherever the camera goes.
+    h.state_mut().world.camera.center += Vec2::new(3000.0, 2000.0);
+    steps(&mut h, 2);
+    assert_eq!(widget_rect(&h, "⇄ web"), chip);
+    h.get_by_label("⇄ web").click();
     steps(&mut h, 3);
     assert_eq!(h.state().world.space.as_deref(), Some(web.as_str()));
-    assert!(h.query_by_label("← api").is_some() && h.query_by_label("→ db").is_some());
 }
 
 #[test]
