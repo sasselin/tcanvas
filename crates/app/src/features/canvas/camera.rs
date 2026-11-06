@@ -60,10 +60,7 @@ impl Camera {
         if t >= 1.0 {
             return b;
         }
-        Camera {
-            center: a.center + (b.center - a.center) * t,
-            zoom: (a.zoom.ln() + (b.zoom.ln() - a.zoom.ln()) * t).exp(),
-        }
+        Camera { center: a.center + (b.center - a.center) * t, zoom: (a.zoom.ln() + (b.zoom.ln() - a.zoom.ln()) * t).exp() }
     }
 }
 

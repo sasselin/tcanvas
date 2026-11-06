@@ -171,9 +171,7 @@ pub fn scan(key: &str, path: &str, since: u64) -> ChangeSet {
 fn git_files(dir: &Path, repo: &Repo) -> Vec<FileChange> {
     let Some(status) = git(dir, &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."]) else { return Vec::new() };
     let entries = parse_porcelain(&String::from_utf8_lossy(&status.stdout));
-    let numstat = git(dir, &["diff", &repo.base, "--numstat", "-z", "-M", "--no-ext-diff", "--", "."])
-        .map(|o| parse_numstat(&String::from_utf8_lossy(&o.stdout)))
-        .unwrap_or_default();
+    let numstat = git(dir, &["diff", &repo.base, "--numstat", "-z", "-M", "--no-ext-diff", "--", "."]).map(|o| parse_numstat(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default();
     entries
         .into_iter()
         .map(|(path, kind)| {
@@ -206,12 +204,7 @@ pub fn parse_log(out: &str) -> Vec<CommitInfo> {
         .filter_map(|line| {
             let mut f = line.splitn(4, FIELD);
             let (sha, time, author, summary) = (f.next()?, f.next()?, f.next()?, f.next().unwrap_or_default());
-            (sha.len() >= 7 && sha.bytes().all(|b| b.is_ascii_hexdigit())).then(|| CommitInfo {
-                sha: sha.into(),
-                summary: summary.into(),
-                author: author.into(),
-                time: time.parse().unwrap_or(0),
-            })
+            (sha.len() >= 7 && sha.bytes().all(|b| b.is_ascii_hexdigit())).then(|| CommitInfo { sha: sha.into(), summary: summary.into(), author: author.into(), time: time.parse().unwrap_or(0) })
         })
         .collect()
 }

@@ -41,7 +41,6 @@ fn remove_socket_file(socket: &str) {
     let _ = std::fs::remove_file(format!("{tmp}/tmux-{uid}/{socket}"));
 }
 
-
 struct Agent {
     child: Child,
     stdin: ChildStdin,
@@ -54,13 +53,7 @@ impl Agent {
     }
 
     fn spawn_with(socket: &str, env: &[(&str, &str)]) -> Self {
-        let mut child = Command::new(AGENT)
-            .env("TCANVAS_TMUX_SOCKET", socket)
-            .envs(env.iter().copied())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = Command::new(AGENT).env("TCANVAS_TMUX_SOCKET", socket).envs(env.iter().copied()).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (tx, events) = mpsc::channel();

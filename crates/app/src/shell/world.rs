@@ -120,16 +120,7 @@ pub struct Project {
     pub cwd: Option<String>,
 }
 
-pub const PROJECT_COLORS: [[u8; 3]; 8] = [
-    [94, 129, 244],
-    [46, 170, 140],
-    [230, 150, 60],
-    [200, 90, 160],
-    [130, 110, 220],
-    [220, 80, 80],
-    [70, 160, 200],
-    [160, 170, 70],
-];
+pub const PROJECT_COLORS: [[u8; 3]; 8] = [[94, 129, 244], [46, 170, 140], [230, 150, 60], [200, 90, 160], [130, 110, 220], [220, 80, 80], [70, 160, 200], [160, 170, 70]];
 
 /// A link between two groups (projects), drawn from frame to frame.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -527,10 +518,7 @@ pub const EMPTY_PROJECT: Vec2 = Vec2::new(600.0, 400.0);
 
 /// Smallest frame containing the point (drop target, migration of old layouts).
 pub fn project_at(projects: &[Project], p: Pos2) -> Option<&Project> {
-    projects
-        .iter()
-        .filter(|pr| pr.rect.contains(p))
-        .min_by(|a, b| a.rect.area().total_cmp(&b.rect.area()))
+    projects.iter().filter(|pr| pr.rect.contains(p)).min_by(|a, b| a.rect.area().total_cmp(&b.rect.area()))
 }
 
 #[cfg(test)]
@@ -618,7 +606,10 @@ mod tests {
 
     #[test]
     fn a_project_space_shows_only_its_members() {
-        let mut w = World { projects: vec![project("api", Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0))), project("web", Rect::from_min_size(pos2(5000.0, 0.0), Vec2::splat(1000.0)))], ..Default::default() };
+        let mut w = World {
+            projects: vec![project("api", Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0))), project("web", Rect::from_min_size(pos2(5000.0, 0.0), Vec2::splat(1000.0)))],
+            ..Default::default()
+        };
         w.add_card(member(150.0, 150.0, "api"));
         w.add_card(member(5100.0, 100.0, "web"));
         w.add_card(card_at(-9000.0, 0.0));
@@ -650,7 +641,10 @@ mod tests {
 
     #[test]
     fn free_grid_keeps_dragged_cards_in_the_open_group() {
-        let mut w = World { projects: vec![project("api", Rect::from_center_size(pos2(50.0, 50.0), Vec2::splat(10.0))), project("web", Rect::from_min_size(pos2(5000.0, 0.0), Vec2::splat(400.0)))], ..Default::default() };
+        let mut w = World {
+            projects: vec![project("api", Rect::from_center_size(pos2(50.0, 50.0), Vec2::splat(10.0))), project("web", Rect::from_min_size(pos2(5000.0, 0.0), Vec2::splat(400.0)))],
+            ..Default::default()
+        };
         let (a, b) = (member(0.0, 0.0, "api"), member(200.0, 0.0, "api"));
         let ib = b.id.clone();
         w.add_card(a);

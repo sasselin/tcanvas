@@ -60,9 +60,11 @@ fn tmux_ok(socket: &str, args: &[&str]) -> bool {
 
 fn harness(dir: &std::path::Path) -> Harness<'static, App> {
     let dir = dir.to_path_buf();
-    Harness::builder().with_size(Vec2::new(1400.0, 900.0)).with_step_dt(1.0 / 60.0).allow_missing_glyphs().build_eframe(move |cc| {
-        App::new(&cc.egui_ctx, Config { launcher: Launcher::Tmux, agent: AgentMode::Spawn, config_dir: dir, os_toasts: false })
-    })
+    Harness::builder()
+        .with_size(Vec2::new(1400.0, 900.0))
+        .with_step_dt(1.0 / 60.0)
+        .allow_missing_glyphs()
+        .build_eframe(move |cc| App::new(&cc.egui_ctx, Config { launcher: Launcher::Tmux, agent: AgentMode::Spawn, config_dir: dir, os_toasts: false }))
 }
 
 /// Runs the app in real time until `cond` is true.
@@ -137,16 +139,12 @@ fn real_terminals_end_to_end() {
     wait(&mut h, "echo output", 15, |app| screen(app, &id).contains("tcanvas-42"));
 
     // 3. The agent is connected and describes the session.
-    wait(&mut h, "agent connected + idle status", 20, |app| {
-        matches!(app.agent_state(), LinkState::Connected { .. }) && app.world.card(&id).is_some_and(|c| c.status() == Some(TermStatus::Idle))
-    });
+    wait(&mut h, "agent connected + idle status", 20, |app| matches!(app.agent_state(), LinkState::Connected { .. }) && app.world.card(&id).is_some_and(|c| c.status() == Some(TermStatus::Idle)));
 
     // 4. A silent command becomes "stalled" and triggers a notification.
     type_line(&mut h, "export TCANVAS_X=persist; sleep 6");
     h.state_mut().dispatch(vec![Event::SetStall(id.clone(), 1), Event::Unfocus]);
-    wait(&mut h, "stalled status + alert", 15, |app| {
-        app.world.card(&id).is_some_and(|c| c.status() == Some(TermStatus::Stalled) && c.attention) && app.pending_toasts() == 1
-    });
+    wait(&mut h, "stalled status + alert", 15, |app| app.world.card(&id).is_some_and(|c| c.status() == Some(TermStatus::Stalled) && c.attention) && app.pending_toasts() == 1);
     wait(&mut h, "back to the prompt", 15, |app| app.world.card(&id).is_some_and(|c| c.status() == Some(TermStatus::Idle)));
 
     // 5. Close the app: the tmux session survives and is found again on reopen.
@@ -202,9 +200,7 @@ fn real_terminals_end_to_end() {
         id
     };
     let in_a = new_card(&mut h, egui::pos2(-2500.0, -2500.0), Some("group".into()));
-    wait(&mut h, "terminal opened in the linked folder", 15, |app| {
-        app.world.card(&in_a).and_then(|c| c.info.as_ref()).and_then(|i| i.cwd.as_deref()) == Some(linked.as_str())
-    });
+    wait(&mut h, "terminal opened in the linked folder", 15, |app| app.world.card(&in_a).and_then(|c| c.info.as_ref()).and_then(|i| i.cwd.as_deref()) == Some(linked.as_str()));
     if has_git {
         type_line(&mut h, "printf 'one\\ntwo\\n' > note.txt");
         wait(&mut h, "written file seen in the changes", 15, |app| {
@@ -285,4 +281,3 @@ impl Drop for Cleanup {
         let _ = std::fs::remove_dir_all(&self.1);
     }
 }
-

@@ -7,12 +7,12 @@ use egui::{Align2, CornerRadius, FontId, Id, Key, PointerButton, Pos2, Rect, Sen
 
 mod folder_picker;
 
-use folder_picker::{Choice, FolderPicker};
 use crate::shell::event::{Event, Notice};
 use crate::shell::i18n::t;
 use crate::shell::theme::{self, HEADER_H, LINKED_ROW_GAP, LINKED_ROW_H, PINNED_MARGIN};
 use crate::shell::widgets::confirm;
 use crate::shell::world::{Body, CardId, EMPTY_PROJECT, PROJECT_COLORS, Project, ProjectId, World, new_id};
+use folder_picker::{Choice, FolderPicker};
 
 /// Width of the × button at the end of the label.
 const CLOSE_W: f32 = 24.0;
@@ -39,12 +39,7 @@ pub struct Projects {
 /// Group (other than `from`) whose frame or label is under `at` (world units): the end of a
 /// wire pulled from `from`. `label_h` is the label height in world units.
 pub fn link_target(world: &World, from: &str, at: Pos2, label_h: f32) -> Option<ProjectId> {
-    world
-        .projects
-        .iter()
-        .filter(|p| p.id != from && world.shows_project(p))
-        .find(|p| Rect::from_min_max(p.rect.min - vec2(0.0, label_h), p.rect.max).contains(at))
-        .map(|p| p.id.clone())
+    world.projects.iter().filter(|p| p.id != from && world.shows_project(p)).find(|p| Rect::from_min_max(p.rect.min - vec2(0.0, label_h), p.rect.max).contains(at)).map(|p| p.id.clone())
 }
 
 /// Member terminals of the group.
@@ -255,7 +250,13 @@ impl Projects {
             let delta_r = ui.interact(delta_rect, eid.with("changes"), Sense::click()).on_hover_text(t().group_changes_hint);
             let a11y = (t().group_changes_a11y)(&p.name);
             delta_r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &a11y));
-            let bg = if delta_r.hovered() { color.gamma_multiply(0.5) } else if n > 0 { color.gamma_multiply(0.35) } else { color.gamma_multiply(0.22) };
+            let bg = if delta_r.hovered() {
+                color.gamma_multiply(0.5)
+            } else if n > 0 {
+                color.gamma_multiply(0.35)
+            } else {
+                color.gamma_multiply(0.22)
+            };
             painter.rect_filled(delta_rect, CornerRadius::same(6), bg);
             painter.text(delta_rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, delta_label, folder_font.clone(), if n > 0 { theme::TEXT } else { theme::TEXT_DIM });
             if delta_r.clicked() {
@@ -478,7 +479,9 @@ impl Projects {
         let spot = match (&project, relocate) {
             (Some(p), true) => arrival_spot(world, p, card),
             // Moved out of the group via the menu: placed away from the frame it leaves.
-            (None, true) => c.project.as_deref().and_then(|p| world.project(p)).map(|p| world.free_spot(pos2(p.rect.max.x + 80.0 + c.rect.width() / 2.0, p.rect.min.y + c.rect.height() / 2.0), c.rect.size())),
+            (None, true) => {
+                c.project.as_deref().and_then(|p| world.project(p)).map(|p| world.free_spot(pos2(p.rect.max.x + 80.0 + c.rect.width() / 2.0, p.rect.min.y + c.rect.height() / 2.0), c.rect.size()))
+            }
             _ => None,
         };
         let name = project.as_deref().and_then(|p| world.project(p)).map(|p| p.name.clone());
@@ -510,13 +513,8 @@ impl Projects {
                     None => world.camera.center,
                 };
                 let n = world.projects.len();
-                let p = Project {
-                    id: new_id(),
-                    name: (t().default_project_name)(n + 1),
-                    color: PROJECT_COLORS[n % PROJECT_COLORS.len()],
-                    rect: Rect::from_center_size(center, EMPTY_PROJECT),
-                    cwd: None,
-                };
+                let p =
+                    Project { id: new_id(), name: (t().default_project_name)(n + 1), color: PROJECT_COLORS[n % PROJECT_COLORS.len()], rect: Rect::from_center_size(center, EMPTY_PROJECT), cwd: None };
                 self.start_rename(&p);
                 let id = p.id.clone();
                 world.projects.push(p);
@@ -533,9 +531,10 @@ impl Projects {
             }
             Event::RenameProject(id, name) => {
                 if let Some(p) = world.projects.iter_mut().find(|p| &p.id == id)
-                    && !name.is_empty() {
-                        p.name = name.clone();
-                    }
+                    && !name.is_empty()
+                {
+                    p.name = name.clone();
+                }
                 world.touch();
             }
             Event::SetProjectCwd(id, cwd) => {

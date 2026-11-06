@@ -56,21 +56,11 @@ impl AsRef<str> for Item<'_> {
 }
 
 pub fn candidates(world: &World) -> Vec<Candidate> {
-    let projects = world.projects.iter().map(|p| Candidate {
-        target: Target::Project(p.id.clone()),
-        haystack: format!("{} {}", p.name, p.cwd.as_deref().unwrap_or_default()),
-        attention: false,
-        z: 0,
-    });
+    let projects = world.projects.iter().map(|p| Candidate { target: Target::Project(p.id.clone()), haystack: format!("{} {}", p.name, p.cwd.as_deref().unwrap_or_default()), attention: false, z: 0 });
     let cards = world.cards.iter().map(|c: &Card| {
         let project = world.project_of(c).map(|p| p.name.as_str()).unwrap_or_default();
         let cmd = c.info.as_ref().and_then(|i| i.command.as_deref()).unwrap_or_default();
-        Candidate {
-            target: Target::Card(c.id.clone()),
-            haystack: format!("{} {} {} {}", c.title(), project, c.current_cwd().unwrap_or_default(), cmd),
-            attention: c.attention,
-            z: c.z,
-        }
+        Candidate { target: Target::Card(c.id.clone()), haystack: format!("{} {} {} {}", c.title(), project, c.current_cwd().unwrap_or_default(), cmd), attention: c.attention, z: c.z }
     });
     projects.chain(cards).collect()
 }
@@ -106,13 +96,7 @@ impl Jump {
             return;
         }
         let results = rank(&self.query, &candidates(world));
-        let (down, up, enter) = ctx.input_mut(|i| {
-            (
-                i.consume_key(Modifiers::NONE, Key::ArrowDown),
-                i.consume_key(Modifiers::NONE, Key::ArrowUp),
-                i.consume_key(Modifiers::NONE, Key::Enter),
-            )
-        });
+        let (down, up, enter) = ctx.input_mut(|i| (i.consume_key(Modifiers::NONE, Key::ArrowDown), i.consume_key(Modifiers::NONE, Key::ArrowUp), i.consume_key(Modifiers::NONE, Key::Enter)));
         if down {
             self.selected = (self.selected + 1).min(results.len().saturating_sub(1));
         }
@@ -125,9 +109,7 @@ impl Jump {
         let area = egui::Area::new(Id::unique("jump-area")).anchor(Align2::CENTER_TOP, [0.0, 80.0]);
         let modal = Modal::new(Id::unique("jump")).area(area).show(ctx, |ui| {
             ui.set_width(520.0);
-            let edit = ui.add(
-                TextEdit::singleline(&mut self.query).id(Id::unique("jump-query")).hint_text(t().jump_hint).desired_width(f32::INFINITY),
-            );
+            let edit = ui.add(TextEdit::singleline(&mut self.query).id(Id::unique("jump-query")).hint_text(t().jump_hint).desired_width(f32::INFINITY));
             edit.request_focus();
             if edit.changed() {
                 self.selected = 0;
@@ -193,11 +175,7 @@ mod tests {
 
     #[test]
     fn fuzzy_query_ranks_best_match_first() {
-        let list = [
-            card("blog", "blog  /home/me/blog zola serve", false, 5),
-            card("api", "server Backend API /srv/api cargo watch", false, 1),
-            card("db", "psql  /srv/db psql", false, 3),
-        ];
+        let list = [card("blog", "blog  /home/me/blog zola serve", false, 5), card("api", "server Backend API /srv/api cargo watch", false, 1), card("db", "psql  /srv/db psql", false, 3)];
         assert_eq!(rank("api", &list)[0], c("api"));
         assert_eq!(rank("crgwtch", &list), vec![c("api")]);
         assert_eq!(rank("psql", &list), vec![c("db")]);

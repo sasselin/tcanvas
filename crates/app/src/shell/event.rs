@@ -10,7 +10,9 @@ pub enum Notice {
     Stalled,
     WaitingInput,
     Failed(i32),
-    Finished { secs: u64 },
+    Finished {
+        secs: u64,
+    },
     Stopped,
     /// The terminal was moved to this group (`None`: outside any group). Information only.
     Moved(Option<String>),
@@ -21,7 +23,10 @@ pub enum Notice {
 #[derive(Clone, Debug)]
 pub enum Event {
     /// New terminal; `at` in world coordinates (otherwise at the view center).
-    NewCard { at: Option<Pos2>, project: Option<ProjectId> },
+    NewCard {
+        at: Option<Pos2>,
+        project: Option<ProjectId>,
+    },
     FocusCard(CardId),
     Unfocus,
     /// Smoothly moves the camera to the card, then focuses it.
@@ -44,7 +49,9 @@ pub enum Event {
     RespawnCard(CardId),
     /// Removes the card without touching the tmux session.
     RemoveCard(CardId),
-    NewProject { at: Option<Pos2> },
+    NewProject {
+        at: Option<Pos2>,
+    },
     RenameProject(ProjectId, String),
     SetProjectCwd(ProjectId, Option<String>),
     SetProjectColor(ProjectId, [u8; 3]),
@@ -54,7 +61,11 @@ pub enum Event {
     RequestCloseProject(ProjectId),
     /// Changes a terminal's group (`None`: outside any group). `relocate`: place it next to the
     /// target group's members ("Move to" menu), otherwise it stays where it was dropped.
-    AssignCard { card: CardId, project: Option<ProjectId>, relocate: bool },
+    AssignCard {
+        card: CardId,
+        project: Option<ProjectId>,
+        relocate: bool,
+    },
     /// The terminal was just placed or resized: it keeps its spot, its group neighbors move aside.
     SettleCard(CardId),
     /// Links two groups (undirected, at most one wire per pair).

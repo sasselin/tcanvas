@@ -243,13 +243,7 @@ impl App {
             self.canvas.navigate(ui, &mut self.world, wheel_taken);
             self.canvas.animate(ui, &mut self.world, &mut events);
             if self.world.cards.is_empty() && self.world.projects.is_empty() {
-                ui.painter().text(
-                    vp.center(),
-                    Align2::CENTER_CENTER,
-                    t().empty_canvas,
-                    FontId::proportional(18.0),
-                    theme::TEXT_DIM,
-                );
+                ui.painter().text(vp.center(), Align2::CENTER_CENTER, t().empty_canvas, FontId::proportional(18.0), theme::TEXT_DIM);
             }
         });
 

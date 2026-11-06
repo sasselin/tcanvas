@@ -11,10 +11,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use alacritty_terminal::event::Event as TermEvent;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::Rgb;
-use egui::{
-    Align2, Color32, CornerRadius, CursorIcon, FontId, Id, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect, Sense, Stroke,
-    StrokeKind, Ui, Vec2, pos2, vec2,
-};
+use egui::{Align2, Color32, CornerRadius, CursorIcon, FontId, Id, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 use protocol::{AgentEvent, SESSION_PREFIX};
 
 use crate::shell::event::Event;
@@ -170,10 +167,7 @@ impl TerminalCards {
                 egui::Event::Key { modifiers, .. } => self.mods = *modifiers,
                 _ => {}
             }
-            let take = matches!(
-                ev,
-                egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Copy | egui::Event::Cut | egui::Event::Key { .. }
-            );
+            let take = matches!(ev, egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Copy | egui::Event::Cut | egui::Event::Key { .. });
             if take {
                 self.keys.push((ev.clone(), self.mods));
             }
@@ -779,13 +773,14 @@ fn paint_preview(painter: &egui::Painter, card: &Card, body: Rect, zoom: f32) {
     }
     let tail_px = 11.0 * zoom.max(0.0) * 2.0;
     if tail_px >= 6.0
-        && let Some(info) = &card.info {
-            let font = FontId::monospace(tail_px.min(14.0));
-            for (k, line) in info.tail.iter().rev().enumerate() {
-                let y = body.max.y - 6.0 - (k as f32 + 1.0) * tail_px * 1.3;
-                painter.text(pos2(body.min.x + 8.0, y), Align2::LEFT_TOP, line, font.clone(), theme::TEXT_DIM);
-            }
+        && let Some(info) = &card.info
+    {
+        let font = FontId::monospace(tail_px.min(14.0));
+        for (k, line) in info.tail.iter().rev().enumerate() {
+            let y = body.max.y - 6.0 - (k as f32 + 1.0) * tail_px * 1.3;
+            painter.text(pos2(body.min.x + 8.0, y), Align2::LEFT_TOP, line, font.clone(), theme::TEXT_DIM);
         }
+    }
 }
 
 #[cfg(test)]

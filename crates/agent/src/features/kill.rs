@@ -87,27 +87,17 @@ fn env_matches(procs: &[ProcInfo], socket_path: &str, panes: &[String]) -> Vec<u
     if socket_path.is_empty() || panes.is_empty() {
         return Vec::new();
     }
-    procs
-        .iter()
-        .filter(|p| fs::read(format!("/proc/{}/environ", p.pid)).is_ok_and(|env| env_belongs_to(&env, socket_path, panes)))
-        .map(|p| p.pid)
-        .collect()
+    procs.iter().filter(|p| fs::read(format!("/proc/{}/environ", p.pid)).is_ok_and(|env| env_belongs_to(&env, socket_path, panes))).map(|p| p.pid).collect()
 }
 
 fn all_procs() -> Vec<ProcInfo> {
     let Ok(dir) = fs::read_dir("/proc") else { return Vec::new() };
-    dir.filter_map(Result::ok)
-        .filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok())
-        .filter_map(|pid| parse_stat(pid, &fs::read_to_string(format!("/proc/{pid}/stat")).ok()?))
-        .collect()
+    dir.filter_map(Result::ok).filter_map(|e| e.file_name().to_str()?.parse::<u32>().ok()).filter_map(|pid| parse_stat(pid, &fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)).collect()
 }
 
 /// Alive = exists and is not a zombie (a zombie is dead, it is just waiting for its parent).
 fn alive(pid: u32) -> bool {
-    fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|s| s.get(s.rfind(')')? + 1..).and_then(|r| r.split_whitespace().next()).map(|st| st != "Z"))
-        .unwrap_or(false)
+    fs::read_to_string(format!("/proc/{pid}/stat")).ok().and_then(|s| s.get(s.rfind(')')? + 1..).and_then(|r| r.split_whitespace().next()).map(|st| st != "Z")).unwrap_or(false)
 }
 
 fn signal(pids: &[u32], sig: i32) {

@@ -60,8 +60,7 @@ pub fn looks_like_question(line: &str) -> bool {
     let l = line.trim_end().to_lowercase();
     const ENDINGS: [&str; 8] = ["[y/n]", "(y/n)", "[yes/no]", "(yes/no)", "[o/n]", "(o/n)", "?", "(yes/no/[fingerprint])?"];
     const KEYWORDS: [&str; 4] = ["password", "passphrase", "mot de passe", "username"];
-    ENDINGS.iter().any(|e| l.ends_with(e))
-        || (l.ends_with(':') && KEYWORDS.iter().any(|k| l.contains(k)))
+    ENDINGS.iter().any(|e| l.ends_with(e)) || (l.ends_with(':') && KEYWORDS.iter().any(|k| l.contains(k)))
 }
 
 /// Foreground process of the terminal whose shell is `shell_pid`.
@@ -81,12 +80,7 @@ pub fn foreground(shell_pid: u32) -> Option<Foreground> {
     let f = stat_fields(pid)?;
     let cpu_ticks = f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?;
     let raw = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let cmdline = raw
-        .split(|b| *b == 0)
-        .filter(|a| !a.is_empty())
-        .map(|a| String::from_utf8_lossy(a).into_owned())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let cmdline = raw.split(|b| *b == 0).filter(|a| !a.is_empty()).map(|a| String::from_utf8_lossy(a).into_owned()).collect::<Vec<_>>().join(" ");
     Some(Foreground { pid, cpu_ticks, cmdline })
 }
 

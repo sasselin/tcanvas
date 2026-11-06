@@ -37,10 +37,16 @@ pub enum TermStatus {
 #[serde(tag = "kind")]
 pub enum Problem {
     /// The path exists but is not a folder.
-    NotADir { path: String },
-    DirNotFound { path: String },
+    NotADir {
+        path: String,
+    },
+    DirNotFound {
+        path: String,
+    },
     /// The folder cannot be read (OS detail, not translated).
-    Unreadable { detail: String },
+    Unreadable {
+        detail: String,
+    },
     /// The requested sha does not look like a sha.
     CommitRefused,
     CommitNotFound,
@@ -49,9 +55,13 @@ pub enum Problem {
     NotAGitRepo,
     /// The file does not differ from HEAD.
     NoDiff,
-    TmuxMissing { detail: String },
+    TmuxMissing {
+        detail: String,
+    },
     /// Installing the shell hooks failed (OS detail, not translated).
-    HooksFailed { detail: String },
+    HooksFailed {
+        detail: String,
+    },
 }
 
 /// Shell hooks (exit code and duration of each command) for the user's login shell.
@@ -171,12 +181,21 @@ pub struct DirListing {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(tag = "type")]
 pub enum AgentEvent {
-    Hello { version: String, hooks: Hooks },
+    Hello {
+        version: String,
+        hooks: Hooks,
+    },
     /// Hooks state after `AgentCmd::InstallHooks`.
-    HooksChanged { hooks: Hooks },
+    HooksChanged {
+        hooks: Hooks,
+    },
     Session(SessionInfo),
-    Gone { session: String },
-    Error { problem: Problem },
+    Gone {
+        session: String,
+    },
+    Error {
+        problem: Problem,
+    },
     Changes(ChangeSet),
     /// `text` is empty when `problem` explains why there is no diff.
     Diff {
@@ -193,18 +212,36 @@ pub enum AgentEvent {
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(tag = "type")]
 pub enum AgentCmd {
-    SetStall { session: String, secs: u64 },
-    Kill { session: String },
+    SetStall {
+        session: String,
+        secs: u64,
+    },
+    Kill {
+        session: String,
+    },
     /// Watch the modified files of `path` (restarted if already watched with another path).
-    Watch { key: String, path: String },
-    Unwatch { key: String },
+    Watch {
+        key: String,
+        path: String,
+    },
+    Unwatch {
+        key: String,
+    },
     /// Diff of a file (relative path) in a watched folder.
-    Diff { key: String, file: String },
+    Diff {
+        key: String,
+        file: String,
+    },
     /// Contents of a commit (`git show`) in a watched folder; response: `AgentEvent::Diff`
     /// with `file` = `sha`.
-    ShowCommit { key: String, sha: String },
+    ShowCommit {
+        key: String,
+        sha: String,
+    },
     /// Subfolders of `path` (`~` accepted), for the folder picker.
-    ListDir { path: String },
+    ListDir {
+        path: String,
+    },
     /// Install the hooks for the user's shell; response: `AgentEvent::HooksChanged`, or
     /// `AgentEvent::Error` with `Problem::HooksFailed`.
     InstallHooks,

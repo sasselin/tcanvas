@@ -69,11 +69,7 @@ pub fn run() -> io::Result<()> {
             }
         }
 
-        let gone: Vec<String> = tracked
-            .iter()
-            .filter(|(s, t)| t.last_sent.is_some() && !rows.iter().any(|r| &r.session == *s))
-            .map(|(s, _)| s.clone())
-            .collect();
+        let gone: Vec<String> = tracked.iter().filter(|(s, t)| t.last_sent.is_some() && !rows.iter().any(|r| &r.session == *s)).map(|(s, _)| s.clone()).collect();
         for session in gone {
             tracked.remove(&session);
             send(&AgentEvent::Gone { session })?;

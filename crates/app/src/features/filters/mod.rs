@@ -25,8 +25,7 @@ pub enum StatusKind {
 }
 
 impl StatusKind {
-    pub const ALL: [StatusKind; 6] =
-        [StatusKind::Stalled, StatusKind::WaitingInput, StatusKind::Failed, StatusKind::Running, StatusKind::Idle, StatusKind::Dead];
+    pub const ALL: [StatusKind; 6] = [StatusKind::Stalled, StatusKind::WaitingInput, StatusKind::Failed, StatusKind::Running, StatusKind::Idle, StatusKind::Dead];
 
     pub fn of(s: Option<TermStatus>) -> Option<Self> {
         Some(match s? {
@@ -120,17 +119,12 @@ impl Filters {
         if query.is_empty() {
             return true;
         }
-        let haystack = [
-            Some(card.title()),
-            card.current_cwd().map(str::to_string),
-            card.info.as_ref().and_then(|i| i.command.clone()),
-            project.map(|p| p.name.clone()),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
+        let haystack = [Some(card.title()), card.current_cwd().map(str::to_string), card.info.as_ref().and_then(|i| i.command.clone()), project.map(|p| p.name.clone())]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
         query.split_whitespace().all(|word| haystack.contains(word))
     }
 
@@ -192,9 +186,10 @@ impl Filters {
             ui.separator();
 
             if ui.button(t().fit_all).on_hover_text(t().fit_all_hint).clicked()
-                && let Some(r) = self.fit_target(world) {
-                    events.push(Event::FitRect(r));
-                }
+                && let Some(r) = self.fit_target(world)
+            {
+                events.push(Event::FitRect(r));
+            }
             let attention: Vec<&Card> = world.cards.iter().filter(|c| c.attention).collect();
             if !attention.is_empty() {
                 let label = RichText::new(format!("🔔 {}", attention.len())).color(theme::status_color(Some(TermStatus::Stalled)));

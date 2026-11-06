@@ -5,7 +5,8 @@ use std::process::{Command, Output};
 
 use protocol::SESSION_PREFIX;
 
-const FORMAT: &str = "#{session_name}\t#{pane_active}\t#{window_active}\t#{pane_pid}\t#{pane_dead}\t#{alternate_on}\t#{window_activity}\t#{@tc_started}\t#{@tc_ended}\t#{@tc_exit}\t#{pane_current_path}";
+const FORMAT: &str =
+    "#{session_name}\t#{pane_active}\t#{window_active}\t#{pane_pid}\t#{pane_dead}\t#{alternate_on}\t#{window_activity}\t#{@tc_started}\t#{@tc_ended}\t#{@tc_exit}\t#{pane_current_path}";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneRow {
@@ -63,11 +64,7 @@ pub fn capture_tail(session: &str, n: usize) -> Vec<String> {
         return Vec::new();
     };
     let text = String::from_utf8_lossy(&out.stdout);
-    let mut lines: Vec<String> = text
-        .lines()
-        .map(|l| l.trim_end().to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
+    let mut lines: Vec<String> = text.lines().map(|l| l.trim_end().to_string()).filter(|l| !l.is_empty()).collect();
     let skip = lines.len().saturating_sub(n);
     lines.drain(..skip);
     lines

@@ -28,7 +28,15 @@ pub enum LineKind {
 }
 
 pub fn classify(line: &str) -> LineKind {
-    if line.starts_with("+++") || line.starts_with("---") || line.starts_with("diff ") || line.starts_with("index ") || line.starts_with("new file") || line.starts_with("deleted file") || line.starts_with("similarity") || line.starts_with("rename ") {
+    if line.starts_with("+++")
+        || line.starts_with("---")
+        || line.starts_with("diff ")
+        || line.starts_with("index ")
+        || line.starts_with("new file")
+        || line.starts_with("deleted file")
+        || line.starts_with("similarity")
+        || line.starts_with("rename ")
+    {
         LineKind::Meta
     } else if line.starts_with('+') {
         LineKind::Add
@@ -325,7 +333,8 @@ impl Changes {
                         events.push(Event::ToggleChanges);
                     }
                     let follow = ui.checkbox(&mut self.follow, t().follow).on_hover_text(t().follow_hint);
-                    if follow.changed() && self.follow
+                    if follow.changed()
+                        && self.follow
                         && let Some(n) = self.sets.get(&project.id).and_then(newest)
                     {
                         self.select(&project.id, n, events);
@@ -549,10 +558,12 @@ mod tests {
     }
 
     fn diff_requests(out: &[Event]) -> Vec<String> {
-        out.iter().filter_map(|e| match e {
-            Event::ToAgent(AgentCmd::Diff { file, .. }) => Some(file.clone()),
-            _ => None,
-        }).collect()
+        out.iter()
+            .filter_map(|e| match e {
+                Event::ToAgent(AgentCmd::Diff { file, .. }) => Some(file.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]
@@ -634,10 +645,12 @@ mod tests {
     }
 
     fn requests(out: &[Event]) -> Vec<AgentCmd> {
-        out.iter().filter_map(|e| match e {
-            Event::ToAgent(c @ (AgentCmd::Diff { .. } | AgentCmd::ShowCommit { .. })) => Some(c.clone()),
-            _ => None,
-        }).collect()
+        out.iter()
+            .filter_map(|e| match e {
+                Event::ToAgent(c @ (AgentCmd::Diff { .. } | AgentCmd::ShowCommit { .. })) => Some(c.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]

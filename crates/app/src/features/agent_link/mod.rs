@@ -75,7 +75,8 @@ impl AgentLink {
     pub fn new(ctx: egui::Context, mode: AgentMode) -> Self {
         let (tx, rx) = mpsc::channel();
         let install = if install::embedded().is_some() && std::env::var_os("TCANVAS_AGENT").is_none() { Install::Needed } else { Install::Ready };
-        let mut link = Self { mode, ctx, state: LinkState::Off, child: None, stdin: None, tx, rx, retry_at: None, sent: Vec::new(), install, tmux_missing: None, hooks_pending: false, hooks_error: None };
+        let mut link =
+            Self { mode, ctx, state: LinkState::Off, child: None, stdin: None, tx, rx, retry_at: None, sent: Vec::new(), install, tmux_missing: None, hooks_pending: false, hooks_error: None };
         link.start();
         link
     }
@@ -163,9 +164,10 @@ impl AgentLink {
             return;
         }
         if let Some(stdin) = &mut self.stdin
-            && stdin.write_all(protocol::encode(cmd).as_bytes()).and_then(|_| stdin.flush()).is_err() {
-                self.stdin = None;
-            }
+            && stdin.write_all(protocol::encode(cmd).as_bytes()).and_then(|_| stdin.flush()).is_err()
+        {
+            self.stdin = None;
+        }
     }
 
     pub fn poll(&mut self, events: &mut Vec<Event>) {
@@ -203,8 +205,7 @@ impl AgentLink {
                 ui.label(RichText::new(t().agent_starting).color(theme::TEXT_DIM));
             }
             LinkState::Connected { hooks } => {
-                ui.label(RichText::new(t().agent_connected).color(theme::status_color(Some(protocol::TermStatus::Running))))
-                    .on_hover_text(t().agent_connected_hint);
+                ui.label(RichText::new(t().agent_connected).color(theme::status_color(Some(protocol::TermStatus::Running)))).on_hover_text(t().agent_connected_hint);
                 if hooks == Hooks::Missing {
                     let hint = match &self.hooks_error {
                         Some(e) => format!("{}\n\n{}", t().hooks_missing_hint, (t().hooks_failed)(e)),

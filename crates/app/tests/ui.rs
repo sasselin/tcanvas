@@ -27,9 +27,10 @@ fn harness(dir: &std::path::Path) -> Harness<'static, App> {
 fn harness_in(dir: &std::path::Path, lang: Lang) -> Harness<'static, App> {
     i18n::set(lang);
     let dir = dir.to_path_buf();
-    Harness::builder().with_size(Vec2::new(1400.0, 900.0)).with_step_dt(1.0 / 60.0).build_eframe(move |cc| {
-        App::new(&cc.egui_ctx, Config { launcher: Launcher::Disabled, agent: AgentMode::Disabled, config_dir: dir, os_toasts: false })
-    })
+    Harness::builder()
+        .with_size(Vec2::new(1400.0, 900.0))
+        .with_step_dt(1.0 / 60.0)
+        .build_eframe(move |cc| App::new(&cc.egui_ctx, Config { launcher: Launcher::Disabled, agent: AgentMode::Disabled, config_dir: dir, os_toasts: false }))
 }
 
 fn steps(h: &mut Harness<'_, App>, n: usize) {
@@ -1553,7 +1554,6 @@ fn terminal_clipboard_shortcuts_and_right_click_paste() {
     steps(&mut h, 2);
     assert_eq!(h.state().cards.written(&id), b"echo one\recho twoecho one\recho two");
 }
-
 
 #[test]
 fn the_changes_badge_shows_diffs_and_commits_from_the_overview() {

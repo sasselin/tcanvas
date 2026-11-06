@@ -9,11 +9,7 @@ use egui::{FontData, FontDefinitions, FontFamily};
 pub const UI_SYMBOLS: &str = "+●○■×◆⇄·—…⏸⌨✖✔⚠🔔";
 
 /// System fonts tried as a last resort (symbols and rare scripts in terminals).
-const SYSTEM_FALLBACKS: &[&str] = &[
-    r"C:\Windows\Fonts\seguisym.ttf",
-    r"C:\Windows\Fonts\msgothic.ttc",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-];
+const SYSTEM_FALLBACKS: &[&str] = &[r"C:\Windows\Fonts\seguisym.ttf", r"C:\Windows\Fonts\msgothic.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"];
 
 pub fn install(ctx: &egui::Context) {
     let mut defs = FontDefinitions::default();

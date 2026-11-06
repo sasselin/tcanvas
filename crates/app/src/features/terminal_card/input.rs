@@ -20,12 +20,8 @@ pub fn key_bytes(key: Key, m: Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
             format!("\x1b[{c}").into_bytes()
         }
     };
-    let tilde = |n: u8| -> Vec<u8> {
-        if modded { format!("\x1b[{n};{}~", xterm_mod(m)).into_bytes() } else { format!("\x1b[{n}~").into_bytes() }
-    };
-    let alt_prefix = |bytes: &[u8]| -> Vec<u8> {
-        if m.alt { [b"\x1b".as_slice(), bytes].concat() } else { bytes.to_vec() }
-    };
+    let tilde = |n: u8| -> Vec<u8> { if modded { format!("\x1b[{n};{}~", xterm_mod(m)).into_bytes() } else { format!("\x1b[{n}~").into_bytes() } };
+    let alt_prefix = |bytes: &[u8]| -> Vec<u8> { if m.alt { [b"\x1b".as_slice(), bytes].concat() } else { bytes.to_vec() } };
 
     let bytes = match key {
         Key::ArrowUp => csi_letter('A', true),

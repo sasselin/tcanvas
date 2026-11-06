@@ -24,12 +24,7 @@ struct Agent {
 impl Agent {
     fn spawn() -> Self {
         // Nonexistent tmux socket: no sessions, nothing gets touched.
-        let mut child = Command::new(AGENT)
-            .env("TCANVAS_TMUX_SOCKET", format!("tcanvas-changes-test-{}", std::process::id()))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
+        let mut child = Command::new(AGENT).env("TCANVAS_TMUX_SOCKET", format!("tcanvas-changes-test-{}", std::process::id())).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (tx, events) = mpsc::channel();
@@ -88,15 +83,7 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 fn git(dir: &Path, args: &[&str]) {
-    let ok = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"])
-        .args(args)
-        .stdout(Stdio::null())
-        .status()
-        .unwrap()
-        .success();
+    let ok = Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]).args(args).stdout(Stdio::null()).status().unwrap().success();
     assert!(ok, "git {args:?}");
 }
 

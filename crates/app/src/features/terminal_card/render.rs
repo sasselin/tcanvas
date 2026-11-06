@@ -150,9 +150,7 @@ pub fn paint_grid(painter: &Painter, term: &Term<Proxy>, m: &GridMetrics, focuse
         }
         let ascii = c.is_ascii();
         match runs.last_mut() {
-            Some(r) if ascii && r.line == line && r.col + r.text.len() == col && r.fg == fg && r.underline == underline && r.strike == strike && r.text.is_ascii() => {
-                r.text.push(c)
-            }
+            Some(r) if ascii && r.line == line && r.col + r.text.len() == col && r.fg == fg && r.underline == underline && r.strike == strike && r.text.is_ascii() => r.text.push(c),
             _ => runs.push(Run { line, col, fg, underline, strike, text: c.to_string() }),
         }
         if !ascii {
@@ -160,9 +158,10 @@ pub fn paint_grid(painter: &Painter, term: &Term<Proxy>, m: &GridMetrics, focuse
             runs.push(Run { line, col: usize::MAX, fg, underline: false, strike: false, text: String::new() });
         }
         if let Some(zw) = cell.zerowidth()
-            && let Some(r) = runs.iter_mut().rev().find(|r| !r.text.is_empty()) {
-                r.text.extend(zw);
-            }
+            && let Some(r) = runs.iter_mut().rev().find(|r| !r.text.is_empty())
+        {
+            r.text.extend(zw);
+        }
     }
     flush_bg(bg_run.take());
 

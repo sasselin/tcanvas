@@ -7,10 +7,8 @@ use std::path::{Path, PathBuf};
 
 const ACCENTED: &str = "àâäéèêëîïôöùûüçœÀÂÄÉÈÊËÎÏÔÖÙÛÜÇŒ";
 /// Common French words that carry no accent, checked in comments and prose.
-const FRENCH_WORDS: &[&str] = &[
-    "les", "des", "pour", "avec", "dans", "une", "est", "sont", "sinon", "quand", "aussi", "mais",
-    "donc", "chaque", "selon", "sans", "fichier", "dossier", "carte", "cartes",
-];
+const FRENCH_WORDS: &[&str] =
+    &["les", "des", "pour", "avec", "dans", "une", "est", "sont", "sinon", "quand", "aussi", "mais", "donc", "chaque", "selon", "sans", "fichier", "dossier", "carte", "cartes"];
 
 fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -33,8 +31,7 @@ fn has_accent(s: &str) -> bool {
 }
 
 fn french_word(s: &str) -> Option<&'static str> {
-    s.split(|c: char| !c.is_alphanumeric())
-        .find_map(|w| FRENCH_WORDS.iter().copied().find(|f| w.eq_ignore_ascii_case(f)))
+    s.split(|c: char| !c.is_alphanumeric()).find_map(|w| FRENCH_WORDS.iter().copied().find(|f| w.eq_ignore_ascii_case(f)))
 }
 
 /// Splits a Rust line into (code-string contents, trailing `//` comment).
@@ -95,11 +92,7 @@ fn check_prose(rel: &str, text: &str, bad: &mut Vec<String>) {
 #[test]
 fn the_repository_is_written_in_english() {
     let root = root();
-    let mut files: Vec<PathBuf> = ["README.md", "CLAUDE.md", "Cargo.toml"]
-        .iter()
-        .map(|f| root.join(f))
-        .filter(|p| p.exists())
-        .collect();
+    let mut files: Vec<PathBuf> = ["README.md", "CLAUDE.md", "Cargo.toml"].iter().map(|f| root.join(f)).filter(|p| p.exists()).collect();
     for dir in ["crates", "scripts", "assets"] {
         collect(&root.join(dir), &mut files);
     }
