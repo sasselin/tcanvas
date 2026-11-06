@@ -22,6 +22,8 @@ struct Tracked {
     /// (foreground pid, CPU ticks) at the previous observation.
     prev_cpu: Option<(u32, u64)>,
     last_sent: Option<SessionInfo>,
+    /// Start of the current run of screen output (no pause over `BUSY_GAP_SECS`).
+    busy_since: Option<u64>,
 }
 
 pub fn run() -> io::Result<()> {
@@ -92,6 +94,12 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64) -> SessionInfo {
     });
     t.prev_cpu = fg.as_ref().map(|f| (f.pid, f.cpu_ticks));
 
+    if now.saturating_sub(row.activity) > status::BUSY_GAP_SECS {
+        t.busy_since = None;
+    } else {
+        t.busy_since.get_or_insert(now);
+    }
+
     let obs = status::Observation {
         now,
         dead: row.dead,
@@ -104,6 +112,11 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64) -> SessionInfo {
         hook_ended: row.ended,
         hook_exit: row.exit,
         stall_secs: if t.stall_secs == 0 { DEFAULT_STALL_SECS } else { t.stall_secs },
+        // A mark left by an agent that has since quit names other processes: ignored.
+        agent: row.agent.as_ref().filter(|m| fg.as_ref().is_some_and(|f| m.pids.contains(&f.pid))).map(|m| m.state),
+        coding_agent: fg.as_ref().is_some_and(|f| status::is_coding_agent(&f.cmdline)),
+        busy_secs: t.busy_since.map_or(0, |since| now - since),
+        was_waiting: t.last_sent.as_ref().is_some_and(|i| i.status == TermStatus::WaitingInput),
     };
     let status = status::classify(&obs);
     let (last_exit, last_duration_secs) = status::last_command(&obs);

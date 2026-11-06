@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use protocol::Hooks;
 
+use super::agent_hooks;
+
 pub const ZSH_HOOKS: &str = r#"# tcanvas: command status (installed by `tcanvas-agent install-hooks`)
 if [[ -n "$TMUX" && "$TMUX" == *tcanvas* ]]; then
   zmodload zsh/datetime 2>/dev/null
@@ -122,9 +124,20 @@ pub fn state_in(home: &Path, shell: Option<Shell>) -> Hooks {
     if installed { Hooks::Installed } else { Hooks::Missing }
 }
 
-/// Hooks state for the current user.
+/// Hooks state for the current user: the shell's, plus the coding agents' (see
+/// `agent_hooks`).
 pub fn state() -> Hooks {
-    state_in(&home(), user_shell_path().as_deref().and_then(Shell::from_path))
+    let home = home();
+    combine(state_in(&home, user_shell_path().as_deref().and_then(Shell::from_path)), agent_hooks::all_installed(&home, &agent_hooks::current_exe()))
+}
+
+/// `agents`: `None` when no coding agent is installed, else whether all have our hooks.
+pub fn combine(shell: Hooks, agents: Option<bool>) -> Hooks {
+    match (shell, agents) {
+        (Hooks::Unsupported, None) => Hooks::Unsupported,
+        (Hooks::Missing, _) | (_, Some(false)) => Hooks::Missing,
+        _ => Hooks::Installed,
+    }
 }
 
 /// Writes the hooks file and adds its source line to the rc file exactly once.
@@ -146,23 +159,52 @@ pub fn install_in(home: &Path, shell: Shell) -> io::Result<(PathBuf, PathBuf, bo
     Ok((path, rc_path, true))
 }
 
-/// Installs the hooks for the current user's shell.
-pub fn install() -> io::Result<(PathBuf, PathBuf, bool)> {
+pub struct Installed {
+    /// Hooks file, rc file, whether the rc file changed; `None` for an unsupported shell.
+    pub shell: Option<(PathBuf, PathBuf, bool)>,
+    /// Coding agents whose config changed.
+    pub agents: Vec<&'static str>,
+}
+
+/// Installs the hooks of the current user's shell and of every coding agent found.
+pub fn install() -> io::Result<Installed> {
+    let home = home();
     let path = user_shell_path().unwrap_or_default();
-    let Some(shell) = Shell::from_path(&path) else {
+    let shell = Shell::from_path(&path);
+    if shell.is_none() && agent_hooks::detected(&home).next().is_none() {
         return Err(io::Error::new(io::ErrorKind::Unsupported, format!("unsupported shell: {path} (bash or zsh only)")));
-    };
-    install_in(&home(), shell)
+    }
+    let shell = shell.map(|s| install_in(&home, s)).transpose()?;
+    let agents = agent_hooks::install_all(&home, &agent_hooks::current_exe())?;
+    Ok(Installed { shell, agents })
 }
 
 /// `tcanvas-agent install-hooks`.
 pub fn install_cli() -> io::Result<()> {
-    let (hooks, rc, changed) = install()?;
-    println!("Hooks written to {}", hooks.display());
-    if changed {
-        println!("Line added to {}. New terminals will pick it up.", rc.display());
-    } else {
-        println!("{} already sources the hooks.", rc.display());
+    let done = install()?;
+    if let Some((hooks, rc, changed)) = done.shell {
+        println!("Hooks written to {}", hooks.display());
+        if changed {
+            println!("Line added to {}. New terminals will pick it up.", rc.display());
+        } else {
+            println!("{} already sources the hooks.", rc.display());
+        }
+    }
+    for agent in done.agents {
+        println!("Hooks added to the {agent} settings.");
+    }
+    Ok(())
+}
+
+/// `tcanvas-agent uninstall-hooks`: removes the coding agents' hooks (the shell hooks only
+/// act inside tcanvas and stay).
+pub fn uninstall_cli() -> io::Result<()> {
+    let removed = agent_hooks::uninstall_all(&home())?;
+    if removed.is_empty() {
+        println!("No coding agent hooks to remove.");
+    }
+    for agent in removed {
+        println!("Hooks removed from the {agent} settings.");
     }
     Ok(())
 }
@@ -211,6 +253,18 @@ mod tests {
         assert_eq!(fs::read_to_string(home.join(".zshrc")).unwrap(), "[ -f ~/.config/tcanvas/hooks.zsh ] && source ~/.config/tcanvas/hooks.zsh\n");
         assert_eq!(state_in(&home, Some(Shell::Zsh)), Hooks::Installed);
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn coding_agents_count_in_the_hooks_state() {
+        use Hooks::*;
+        assert_eq!(combine(Installed, None), Installed);
+        assert_eq!(combine(Installed, Some(true)), Installed);
+        assert_eq!(combine(Installed, Some(false)), Missing, "an agent without its hooks");
+        assert_eq!(combine(Missing, Some(true)), Missing);
+        assert_eq!(combine(Unsupported, None), Unsupported);
+        assert_eq!(combine(Unsupported, Some(false)), Missing, "fish user with Claude Code");
+        assert_eq!(combine(Unsupported, Some(true)), Installed);
     }
 
     #[test]

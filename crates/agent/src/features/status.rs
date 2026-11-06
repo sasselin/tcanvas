@@ -4,8 +4,21 @@ use std::fs;
 
 use protocol::TermStatus;
 
+use super::agent_hooks::AgentState;
+
 /// Quiet time before assuming a question is waiting for an answer.
 const PROMPT_QUIET_SECS: u64 = 2;
+/// Quiet time before assuming a coding agent without hooks waits for the user. Their
+/// spinners and timers redraw the screen every second while they work.
+const AGENT_QUIET_SECS: u64 = 5;
+/// Output needed, without a pause, before such an agent counts as working again: a redraw
+/// (focus, resize) is a short burst, a spinner never stops.
+const AGENT_BUSY_SECS: u64 = 3;
+/// Longest pause between two outputs of one continuous run.
+pub const BUSY_GAP_SECS: u64 = 2;
+
+/// Coding agent CLIs, by program name.
+const CODING_AGENTS: [&str; 10] = ["claude", "codex", "gemini", "agy", "opencode", "aider", "copilot", "cursor-agent", "qwen", "droid"];
 
 #[derive(Clone, Debug, Default)]
 pub struct Observation<'a> {
@@ -23,6 +36,15 @@ pub struct Observation<'a> {
     pub hook_ended: Option<u64>,
     pub hook_exit: Option<i32>,
     pub stall_secs: u64,
+    /// State published by the hooks of the coding agent in the foreground (already checked
+    /// to belong to that process).
+    pub agent: Option<AgentState>,
+    /// The foreground program is a known coding agent.
+    pub coding_agent: bool,
+    /// For how long the screen has kept changing (see `BUSY_GAP_SECS`).
+    pub busy_secs: u64,
+    /// The previous status was `WaitingInput`.
+    pub was_waiting: bool,
 }
 
 pub fn classify(o: &Observation) -> TermStatus {
@@ -30,10 +52,19 @@ pub fn classify(o: &Observation) -> TermStatus {
         return TermStatus::Dead;
     }
     if o.fg_running {
+        match o.agent {
+            Some(AgentState::Waiting) => return TermStatus::WaitingInput,
+            Some(AgentState::Working) => return TermStatus::Running,
+            None => {}
+        }
+        let quiet = o.now.saturating_sub(o.activity);
+        if o.coding_agent {
+            let waiting = quiet >= AGENT_QUIET_SECS || (o.was_waiting && o.busy_secs < AGENT_BUSY_SECS);
+            return if waiting { TermStatus::WaitingInput } else { TermStatus::Running };
+        }
         if o.alternate {
             return TermStatus::Running;
         }
-        let quiet = o.now.saturating_sub(o.activity);
         if quiet >= PROMPT_QUIET_SECS && o.last_line.is_some_and(looks_like_question) {
             return TermStatus::WaitingInput;
         }
@@ -61,6 +92,21 @@ pub fn looks_like_question(line: &str) -> bool {
     const ENDINGS: [&str; 8] = ["[y/n]", "(y/n)", "[yes/no]", "(yes/no)", "[o/n]", "(o/n)", "?", "(yes/no/[fingerprint])?"];
     const KEYWORDS: [&str; 4] = ["password", "passphrase", "mot de passe", "username"];
     ENDINGS.iter().any(|e| l.ends_with(e)) || (l.ends_with(':') && KEYWORDS.iter().any(|k| l.contains(k)))
+}
+
+/// Whether `cmdline` runs a coding agent: the program, or the script a runtime runs
+/// (`node .../codex.js`, `python -m aider`...).
+pub fn is_coding_agent(cmdline: &str) -> bool {
+    cmdline.split_whitespace().take(3).any(|arg| {
+        let name = arg.rsplit('/').next().unwrap_or(arg);
+        let name = name.split_once('.').map_or(name, |(stem, _)| stem);
+        CODING_AGENTS.contains(&name)
+    })
+}
+
+/// Parent pid, from /proc.
+pub fn parent_of(pid: u32) -> Option<u32> {
+    stat_fields(pid)?.get(1)?.parse().ok()
 }
 
 /// Foreground process of the terminal whose shell is `shell_pid`.
@@ -144,6 +190,43 @@ mod tests {
         let o = Observation { hook_started: Some(50), ..o };
         assert_eq!(classify(&o), TermStatus::Idle);
         assert_eq!(last_command(&o), (None, None));
+    }
+
+    #[test]
+    fn agent_hooks_decide_while_the_agent_runs() {
+        let waiting = Observation { agent: Some(AgentState::Waiting), alternate: true, ..running(1000, 1000) };
+        assert_eq!(classify(&waiting), TermStatus::WaitingInput, "right away, even on the alternate screen");
+        // A long silent tool run is not stalled while the hooks say "working".
+        let working = Observation { agent: Some(AgentState::Working), ..running(5000, 1000) };
+        assert_eq!(classify(&working), TermStatus::Running);
+        // Back at the shell prompt, a leftover mark means nothing.
+        let shell = Observation { agent: Some(AgentState::Waiting), stall_secs: 60, ..Default::default() };
+        assert_eq!(classify(&shell), TermStatus::Idle);
+    }
+
+    #[test]
+    fn coding_agents_without_hooks_wait_once_the_screen_is_quiet() {
+        let agent = |now| Observation { coding_agent: true, alternate: true, cpu_delta: Some(3), ..running(now, 1000) };
+        assert_eq!(classify(&agent(1004)), TermStatus::Running);
+        assert_eq!(classify(&agent(1005)), TermStatus::WaitingInput);
+        // Other full-screen apps stay "running".
+        // Waiting survives a short redraw (focus, resize), not a run of output.
+        let redraw = Observation { was_waiting: true, busy_secs: 2, ..agent(1000) };
+        assert_eq!(classify(&redraw), TermStatus::WaitingInput);
+        let working = Observation { was_waiting: true, busy_secs: 3, ..agent(1000) };
+        assert_eq!(classify(&working), TermStatus::Running);
+        let vim = Observation { alternate: true, ..running(5000, 1000) };
+        assert_eq!(classify(&vim), TermStatus::Running);
+    }
+
+    #[test]
+    fn coding_agents_are_recognized() {
+        for c in ["claude", "/home/me/.local/bin/claude --resume", "node /usr/lib/node_modules/@openai/codex/bin/codex.js", "gemini", "cursor-agent", "python3 -m aider"] {
+            assert!(is_coding_agent(c), "{c}");
+        }
+        for c in ["vim notes.md", "sleep 4", "node server.js", "claude-squad"] {
+            assert!(!is_coding_agent(c), "{c}");
+        }
     }
 
     #[test]

@@ -248,7 +248,7 @@ impl App {
             self.projects.ui(ui, &mut self.world, vp, &mut events);
             self.wires.ui(ui, &self.world, vp, &mut events);
             let filters = &self.filters;
-            let dimmed = |w: &World, c: &Card| filters.is_active() && !filters.matches(w, c);
+            let dimmed = |w: &World, c: &Card| filters.dims(w, c);
             let wheel_taken = self.cards.ui(ui, &mut self.world, &dimmed, &mut events);
             self.canvas.minimap(ui, &mut self.world);
             self.canvas.hand_tool(ui, &mut self.world);

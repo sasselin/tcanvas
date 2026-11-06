@@ -5,8 +5,10 @@ use std::process::{Command, Output};
 
 use protocol::SESSION_PREFIX;
 
+use super::agent_hooks::{self, AgentMark};
+
 const FORMAT: &str =
-    "#{session_name}\t#{pane_active}\t#{window_active}\t#{pane_pid}\t#{pane_dead}\t#{alternate_on}\t#{window_activity}\t#{@tc_started}\t#{@tc_ended}\t#{@tc_exit}\t#{pane_current_path}";
+    "#{session_name}\t#{pane_active}\t#{window_active}\t#{pane_pid}\t#{pane_dead}\t#{alternate_on}\t#{window_activity}\t#{@tc_started}\t#{@tc_ended}\t#{@tc_exit}\t#{@tc_agent}\t#{pane_current_path}";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneRow {
@@ -20,6 +22,8 @@ pub struct PaneRow {
     pub started: Option<u64>,
     pub ended: Option<u64>,
     pub exit: Option<i32>,
+    /// Value set by a coding agent's hooks (`@tc_agent`).
+    pub agent: Option<AgentMark>,
     pub path: String,
 }
 
@@ -41,8 +45,8 @@ pub fn parse_rows(out: &str) -> Vec<PaneRow> {
 }
 
 fn parse_row(line: &str) -> Option<PaneRow> {
-    let f: Vec<&str> = line.splitn(11, '\t').collect();
-    if f.len() != 11 || !f[0].starts_with(SESSION_PREFIX) || f[1] != "1" || f[2] != "1" {
+    let f: Vec<&str> = line.splitn(12, '\t').collect();
+    if f.len() != 12 || !f[0].starts_with(SESSION_PREFIX) || f[1] != "1" || f[2] != "1" {
         return None;
     }
     Some(PaneRow {
@@ -54,7 +58,8 @@ fn parse_row(line: &str) -> Option<PaneRow> {
         started: f[7].parse().ok(),
         ended: f[8].parse().ok(),
         exit: f[9].parse().ok(),
-        path: f[10].to_string(),
+        agent: agent_hooks::parse_mark(f[10]),
+        path: f[11].to_string(),
     })
 }
 
@@ -80,16 +85,18 @@ mod tests {
 
     #[test]
     fn parses_active_canvas_panes_only() {
-        let out = "tc_a\t1\t1\t42\t0\t0\t1700\t1690\t1695\t3\t/home/me/my\tdir\n\
-                   tc_a\t0\t1\t43\t0\t0\t1700\t\t\t\t/tmp\n\
-                   personal\t1\t1\t44\t0\t0\t1700\t\t\t\t/tmp\n\
-                   tc_b\t1\t1\t45\t1\t1\t1600\t\t\t\t/\n";
+        let out = "tc_a\t1\t1\t42\t0\t0\t1700\t1690\t1695\t3\twaiting 50,42\t/home/me/my\tdir\n\
+                   tc_a\t0\t1\t43\t0\t0\t1700\t\t\t\t\t/tmp\n\
+                   personal\t1\t1\t44\t0\t0\t1700\t\t\t\t\t/tmp\n\
+                   tc_b\t1\t1\t45\t1\t1\t1600\t\t\t\t\t/\n";
         let rows = parse_rows(out);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].session, "tc_a");
         assert_eq!(rows[0].exit, Some(3));
         assert_eq!(rows[0].path, "/home/me/my\tdir");
+        assert_eq!(rows[0].agent, Some(AgentMark { state: agent_hooks::AgentState::Waiting, pids: vec![50, 42] }));
         assert_eq!(rows[1].started, None);
+        assert_eq!(rows[1].agent, None);
         assert!(rows[1].dead && rows[1].alternate);
     }
 }

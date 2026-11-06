@@ -25,9 +25,15 @@ Cargo workspace (`Cargo.toml`, edition 2024, resolver 3):
   `Problem`, ...), JSON lines via `encode`/`decode`. Also owns the tmux socket name and the
   session prefix (`SESSION_PREFIX = "tc_"`).
 - `crates/agent` - binary `tcanvas-agent` (runs in WSL). Subcommands:
-  `serve` (default), `install-hooks`, `hooks [bash|zsh]`, `kill <session>`. Code in
-  `src/features/*.rs` (serve loop, tmux access, status from tmux + /proc, shell hooks for
-  bash and zsh following `$SHELL`, git changes, session kill).
+  `serve` (default), `install-hooks`, `uninstall-hooks`, `hook <event>`, `hooks [bash|zsh]`,
+  `kill <session>`. Code in `src/features/*.rs` (serve loop, tmux access, status from tmux +
+  /proc, shell hooks for bash and zsh following `$SHELL`, coding agent hooks in
+  `agent_hooks.rs`, git changes, session kill).
+- Coding agents (Claude Code, Codex, Gemini CLI, Copilot CLI, Qwen Code) report "working" /
+  "waiting" through their own hooks: `install-hooks` merges `tcanvas-agent hook <event>` into
+  their settings, the hook sets the pane option `@tc_agent` (state + its ancestor pids), and
+  the status loop trusts it only while one of those pids is in the foreground. Without
+  hooks, a known agent CLI quiet for 5 s counts as waiting.
 - `crates/app` - package `tcanvas` (lib + Windows exe). `src/lib.rs` declares the modules;
   `build.rs` (Windows target only) embeds `assets/icon.ico` (needs mingw-w64 `windres`) and
   builds `tcanvas-agent` for `x86_64-unknown-linux-musl` (static, any distro) in its own target

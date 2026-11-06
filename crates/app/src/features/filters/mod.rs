@@ -110,6 +110,11 @@ impl Filters {
         !self.text.trim().is_empty() || !self.statuses.is_empty()
     }
 
+    /// Whether `card` is drawn dimmed. The focused card never is: you are working in it.
+    pub fn dims(&self, world: &World, card: &Card) -> bool {
+        self.is_active() && world.focused.as_ref() != Some(&card.id) && !self.matches(world, card)
+    }
+
     pub fn matches(&self, world: &World, card: &Card) -> bool {
         let project = world.project_of(card);
         if !self.statuses.is_empty() && !StatusKind::of(card.status()).is_some_and(|s| self.statuses.contains(&s)) {
@@ -237,6 +242,18 @@ mod tests {
 
     fn matching(f: &Filters, w: &World) -> Vec<usize> {
         w.cards.iter().enumerate().filter(|(_, c)| f.matches(w, c)).map(|(i, _)| i).collect()
+    }
+
+    #[test]
+    fn the_focused_card_is_never_dimmed() {
+        let mut w = world();
+        let mut f = Filters::default();
+        assert!(!f.dims(&w, &w.cards[1]), "no filter, nothing dimmed");
+        f.statuses.insert(StatusKind::WaitingInput);
+        assert!(f.dims(&w, &w.cards[1]));
+        w.focused = Some(w.cards[1].id.clone());
+        assert!(!f.dims(&w, &w.cards[1]));
+        assert!(f.dims(&w, &w.cards[0]), "other cards still follow the filter");
     }
 
     #[test]

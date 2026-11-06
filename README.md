@@ -110,14 +110,25 @@ Every release file is built by this repository's CI, with a build attestation an
 gh attestation verify tcanvas-<version>-setup-x64.exe -R sasselin/tcanvas
 ```
 
-### Shell hooks
+### Hooks
 
-Optional, for command exit codes and durations: the shell hooks, for **bash** (≥ 5.0) or
-**zsh**. Click **Install** next to "⚠ shell hooks" in the status bar, or in a terminal (in WSL on Windows):
+Optional. Click **Install** next to "⚠ hooks" in the status bar, or in a terminal (in WSL on Windows):
 
 ```sh
-tcanvas-agent install-hooks      # adds one line to ~/.bashrc or ~/.zshrc (following $SHELL)
+tcanvas-agent install-hooks      # shell hooks + coding agent hooks
+tcanvas-agent uninstall-hooks    # removes the coding agent hooks
 ```
+
+- **Shell hooks**, for **bash** (≥ 5.0) or **zsh**: command exit codes and durations. One line
+  is added to `~/.bashrc` or `~/.zshrc` (following `$SHELL`).
+- **Coding agent hooks**, for the agents found in your home: Claude Code
+  (`~/.claude/settings.json`), Codex (`~/.codex/hooks.json`, approve them once with `/hooks`),
+  Gemini CLI (`~/.gemini/settings.json`), Copilot CLI (`~/.copilot/hooks/tcanvas.json`) and
+  Qwen Code (`~/.qwen/settings.json`). They run `tcanvas-agent hook <event>`, so a card shows
+  "waiting for input" as soon as the agent finishes its turn or asks for a permission. Your
+  own settings and hooks are kept, and the original file is saved as `*.tcanvas.bak`. Outside
+  tcanvas the hook exits at once and does nothing. Without these hooks, a known coding agent
+  is shown as waiting after a few seconds without screen output.
 
 ### Building from source
 
@@ -140,6 +151,7 @@ cargo build --release -p tcanvas -p tcanvas-agent
 ```
 
 Agent commands: `tcanvas-agent` (server mode, used by the app), `tcanvas-agent install-hooks`,
+`tcanvas-agent uninstall-hooks`, `tcanvas-agent hook <event>` (called by coding agent hooks),
 `tcanvas-agent hooks [bash|zsh]` (print the hooks without installing them), and
 `tcanvas-agent kill <session>` (stop every process of a session, then the session itself).
 
@@ -253,7 +265,7 @@ The workspace is organized in **vertical slices**:
 
 ```
 crates/protocol   app ⇄ agent messages (serde, one JSON line per message)
-crates/agent      features/{tmux, status, hooks, kill, changes, serve}
+crates/agent      features/{tmux, status, hooks, agent_hooks, kill, changes, serve}
 crates/app        shell/ (world, event bus, i18n, agent launch, theme, fonts, widgets, version)
                   features/{canvas, terminal_card, projects, spaces, changes, wires,
                             filters, jump, notifications, agent_link, persistence, updates}

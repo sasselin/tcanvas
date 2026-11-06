@@ -363,7 +363,7 @@ fn missing_tmux_is_shown_in_the_status_bar() {
 fn missing_shell_hooks_can_be_installed_from_the_status_bar() {
     let hello = |hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks });
     let installs = |h: &Harness<'_, App>| h.state().agent_sent().iter().filter(|c| **c == protocol::AgentCmd::InstallHooks).count();
-    for (lang, label, button) in [(Lang::Fr, "⚠ hooks du shell", "Installer"), (Lang::En, "⚠ shell hooks", "Install")] {
+    for (lang, label, button) in [(Lang::Fr, "⚠ hooks", "Installer"), (Lang::En, "⚠ hooks", "Install")] {
         let dir = temp_dir("hooks");
         let mut h = harness_in(&dir, lang);
         h.state_mut().dispatch(vec![hello(protocol::Hooks::Unsupported)]);
