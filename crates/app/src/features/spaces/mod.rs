@@ -1,6 +1,7 @@
 //! Spaces: each project is a separate canvas, only one is visible at a time. "All" remains
 //! available as an overview for organizing. Each space remembers its own camera. The group
-//! chips of the top bar can be dragged to reorder them (the order is saved).
+//! chips of the top bar can be dragged to reorder them, or sorted by name from their
+//! right-click menu (the order is saved).
 
 use egui::{Button, Color32, CursorIcon, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
 
@@ -48,6 +49,24 @@ pub fn move_project(projects: &mut Vec<Project>, id: &str, to: usize) -> bool {
     }
     let p = projects.remove(from);
     projects.insert(to, p);
+    true
+}
+
+/// Sort key: by name ignoring case, then as written (stable for equal names).
+fn name_key(p: &Project) -> (String, &str) {
+    (p.name.to_lowercase(), p.name.as_str())
+}
+
+pub fn is_sorted_by_name(projects: &[Project]) -> bool {
+    projects.windows(2).all(|w| name_key(&w[0]) <= name_key(&w[1]))
+}
+
+/// Sorts the projects by name. Returns `false` if they already were.
+pub fn sort_by_name(projects: &mut [Project]) -> bool {
+    if is_sorted_by_name(projects) {
+        return false;
+    }
+    projects.sort_by(|a, b| name_key(a).cmp(&name_key(b)));
     true
 }
 
@@ -116,6 +135,12 @@ impl Spaces {
             if resp.clicked() {
                 events.push(Event::EnterSpace(Some(p.id.clone())));
             }
+            resp.context_menu(|ui| {
+                if ui.add_enabled(!is_sorted_by_name(&world.projects), Button::new(t().sort_projects)).clicked() {
+                    events.push(Event::SortProjects);
+                    ui.close();
+                }
+            });
             chips.push(resp.rect);
         }
         if let Some((n, released)) = dragged {
@@ -175,6 +200,11 @@ impl Spaces {
             }
             Event::MoveProject(id, to) => {
                 if move_project(&mut world.projects, id, *to) {
+                    world.touch();
+                }
+            }
+            Event::SortProjects => {
+                if sort_by_name(&mut world.projects) {
                     world.touch();
                 }
             }
@@ -301,6 +331,22 @@ mod tests {
         assert_eq!(order(&w), ["api", "web", "db"], "to the left: first");
         handle(&mut s, &mut w, Event::MoveProject("db".into(), 1));
         assert_eq!(order(&w), ["api", "db", "web"], "between two");
+    }
+
+    #[test]
+    fn sorting_orders_the_groups_by_name_ignoring_case() {
+        let mut w = World::default();
+        for name in ["web", "Api", "db", "api"] {
+            w.projects.push(Project { id: name.into(), name: name.into(), color: [0; 3], rect: Rect::ZERO, cwd: None });
+        }
+        let mut s = Spaces::default();
+        let rev = w.revision;
+        handle(&mut s, &mut w, Event::SortProjects);
+        assert_eq!(order(&w), ["Api", "api", "db", "web"]);
+        assert!(w.revision > rev, "saved");
+        let rev = w.revision;
+        handle(&mut s, &mut w, Event::SortProjects);
+        assert_eq!(w.revision, rev, "already sorted: nothing to save");
     }
 
     #[test]

@@ -538,6 +538,28 @@ fn dragging_a_project_chip_reorders_the_groups() {
 }
 
 #[test]
+fn right_clicking_a_project_chip_sorts_the_groups_by_name() {
+    for (lang, item) in [(Lang::Fr, "Trier les groupes de A à Z"), (Lang::En, "Sort groups A to Z")] {
+        let dir = temp_dir("project-chip-sort");
+        let mut h = harness_in(&dir, lang);
+        for (n, name) in ["web", "db", "api"].into_iter().enumerate() {
+            add_project(&mut h, name, Rect::from_min_size(pos2(n as f32 * 2000.0, 0.0), Vec2::new(600.0, 400.0)));
+        }
+        steps(&mut h, 2);
+        let chip = widget_rect(&h, "● db").center();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: chip, button: egui::PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
+        }
+        steps(&mut h, 2);
+        h.get_by_label(item).click();
+        steps(&mut h, 2);
+        let order: Vec<_> = h.state().world.projects.iter().map(|p| p.name.clone()).collect();
+        assert_eq!(order, ["api", "db", "web"], "{lang:?}");
+        assert_eq!(h.state().world.space, None, "sorting does not open a space");
+    }
+}
+
+#[test]
 fn clicking_a_project_chip_opens_that_project_alone() {
     let dir = temp_dir("project-chip");
     let mut h = harness(&dir);

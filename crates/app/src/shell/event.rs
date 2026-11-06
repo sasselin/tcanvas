@@ -57,6 +57,8 @@ pub enum Event {
     SetProjectColor(ProjectId, [u8; 3]),
     /// Moves a group to this position in the top bar order (and its Ctrl+Shift+<n> shortcut).
     MoveProject(ProjectId, usize),
+    /// Sorts the groups by name (A to Z, ignoring case), once: they can still be dragged after.
+    SortProjects,
     /// Deletes the frame; the terminals remain.
     RemoveProject(ProjectId),
     /// Asks for confirmation before closing the group and all its terminals.
