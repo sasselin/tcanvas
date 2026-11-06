@@ -9,7 +9,17 @@ use egui::{FontData, FontDefinitions, FontFamily};
 pub const UI_SYMBOLS: &str = "+●○■×◆⇄·—…⏸⌨✖✔⚠🔔";
 
 /// System fonts tried as a last resort (symbols and rare scripts in terminals).
-const SYSTEM_FALLBACKS: &[&str] = &[r"C:\Windows\Fonts\seguisym.ttf", r"C:\Windows\Fonts\msgothic.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"];
+const SYSTEM_FALLBACKS: &[&str] = &[
+    r"C:\Windows\Fonts\seguisym.ttf",
+    r"C:\Windows\Fonts\msgothic.ttc",
+    // Linux (Debian/Ubuntu paths, then Fedora/Arch ones): symbols Claude Code draws (`⎿`, `⏵`).
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+    "/usr/share/fonts/truetype/noto/NotoSansMath-Regular.ttf",
+    "/usr/share/fonts/google-noto/NotoSansSymbols2-Regular.ttf",
+    "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
+];
 
 pub fn install(ctx: &egui::Context) {
     let mut defs = FontDefinitions::default();

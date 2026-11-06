@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Tests, clippy, fmt (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y tmux libxkbcommon-dev libwayland-dev
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # Includes the language rule (english_only.rs) and the tmux end-to-end test; the screenshot
+      # scenes are #[ignore]d.
+      - run: cargo test --workspace
+
+  windows:
+    name: Windows cross-build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu, x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64 musl-tools nsis
+      - run: cargo build --release --target x86_64-pc-windows-gnu -p tcanvas
+      - name: Installer
+        run: makensis -V2 -DVERSION=0.0.0 -DEXE="$PWD/target/x86_64-pc-windows-gnu/release/tcanvas.exe" -DOUTFILE="$PWD/setup.exe" installer/tcanvas.nsi
+
+  # Release notes come from commit messages: PR titles (squash merge) must be Conventional Commits.
+  pr-title:
+    name: Conventional PR title
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            perf
+            refactor
+            docs
+            test
+            style
+            build
+            ci
+            chore
+            revert
+          requireScope: false
+          subjectPattern: ^[A-Z].+$
+          subjectPatternError: 'The subject must start with a capital letter, e.g. "feat: Add wires between groups".'

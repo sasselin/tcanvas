@@ -67,6 +67,24 @@ impl Texts {
         }
     }
 
+    /// Why the agent could not start, with what to install on this platform.
+    pub fn agent_missing_help(&self, why: &str) -> String {
+        self.agent_missing_help_for(cfg!(windows), why)
+    }
+
+    fn agent_missing_help_for(&self, windows: bool, why: &str) -> String {
+        if windows { (self.agent_missing_hint)(why) } else { (self.agent_missing_hint_linux)(why) }
+    }
+
+    /// Placeholder of the folder picker's path field.
+    pub fn folder_path_hint(&self) -> &'static str {
+        self.folder_path_hint_for(cfg!(windows))
+    }
+
+    fn folder_path_hint_for(&self, windows: bool) -> &'static str {
+        if windows { self.wsl_path_hint } else { self.path_hint }
+    }
+
     pub fn problem(&self, p: &Problem) -> String {
         match p {
             Problem::NotADir { path } => (self.not_a_dir)(path),
@@ -112,7 +130,10 @@ pub struct Texts {
     pub install_hooks: &'static str,
     pub hooks_failed: fn(&str) -> String,
     pub agent_missing: &'static str,
+    /// Windows: the agent runs in WSL.
     pub agent_missing_hint: fn(&str) -> String,
+    /// Native Linux: the agent sits next to the app.
+    pub agent_missing_hint_linux: fn(&str) -> String,
     pub retry: &'static str,
     pub agent_launch_failed: fn(&str) -> String,
     pub agent_stopped: &'static str,
@@ -192,6 +213,7 @@ pub struct Texts {
     pub home_folder: &'static str,
     pub parent_folder: &'static str,
     pub wsl_path_hint: &'static str,
+    pub path_hint: &'static str,
     pub recent_folders: &'static str,
     pub filter_folders_hint: &'static str,
     pub loading: &'static str,
@@ -240,6 +262,8 @@ pub struct Texts {
     pub free_grid: &'static str,
     pub free_grid_hint: &'static str,
     pub open_project: &'static str,
+    /// Button of a desktop notification (Linux) that brings the terminal back.
+    pub show_terminal: &'static str,
     pub open_project_shortcut: fn(usize) -> String,
 
     // Terminal cards.
@@ -295,6 +319,7 @@ pub const EN: Texts = Texts {
     hooks_failed: |e| format!("cannot install the hooks: {e}"),
     agent_missing: "✖ agent missing",
     agent_missing_hint: |why| format!("{why}\n\ntcanvas needs WSL with a Linux distribution (wsl --install in PowerShell).\nRetrying automatically every 10 s."),
+    agent_missing_hint_linux: |why| format!("{why}\n\ntcanvas needs tmux and tcanvas-agent (next to the tcanvas executable or in the PATH).\nRetrying automatically every 10 s."),
     retry: "Retry",
     agent_launch_failed: |e| format!("cannot launch: {e}"),
     agent_stopped: "the agent stopped",
@@ -368,6 +393,7 @@ pub const EN: Texts = Texts {
     home_folder: "Home folder",
     parent_folder: "Parent folder",
     wsl_path_hint: "WSL path, e.g. ~/code/api",
+    path_hint: "Path, e.g. ~/code/api",
     recent_folders: "Recent:",
     filter_folders_hint: "Filter folders… (Enter: open the only match)",
     loading: "Loading…",
@@ -414,6 +440,7 @@ pub const EN: Texts = Texts {
     free_grid: "Free grid",
     free_grid_hint: "Inside a group, use the whole canvas: no frame, terminals stay in the group wherever they are dropped",
     open_project: "Open this project",
+    show_terminal: "Show",
     open_project_shortcut: |n| format!("Open this project · Ctrl+Shift+{n}"),
 
     spawn_failed: |p, e| format!("Cannot launch {p}: {e}"),
@@ -467,6 +494,7 @@ pub const FR: Texts = Texts {
     hooks_failed: |e| format!("installation des hooks impossible : {e}"),
     agent_missing: "✖ agent absent",
     agent_missing_hint: |why| format!("{why}\n\ntcanvas a besoin de WSL avec une distribution Linux (wsl --install dans PowerShell).\nNouvel essai automatique toutes les 10 s."),
+    agent_missing_hint_linux: |why| format!("{why}\n\ntcanvas a besoin de tmux et de tcanvas-agent (à côté de l'exécutable tcanvas ou dans le PATH).\nNouvel essai automatique toutes les 10 s."),
     retry: "Réessayer",
     agent_launch_failed: |e| format!("lancement impossible : {e}"),
     agent_stopped: "l'agent s'est arrêté",
@@ -540,6 +568,7 @@ pub const FR: Texts = Texts {
     home_folder: "Dossier personnel",
     parent_folder: "Dossier parent",
     wsl_path_hint: "Chemin WSL, ex. ~/code/api",
+    path_hint: "Chemin, ex. ~/code/api",
     recent_folders: "Récents :",
     filter_folders_hint: "Filtrer les dossiers… (Entrée : ouvrir le seul résultat)",
     loading: "Chargement…",
@@ -586,6 +615,7 @@ pub const FR: Texts = Texts {
     free_grid: "Grille libre",
     free_grid_hint: "Dans un groupe, utiliser tout le canevas : pas de cadre, les terminaux restent dans le groupe où qu'on les lâche",
     open_project: "Ouvrir ce projet",
+    show_terminal: "Afficher",
     open_project_shortcut: |n| format!("Ouvrir ce projet · Ctrl+Maj+{n}"),
 
     spawn_failed: |p, e| format!("Impossible de lancer {p} : {e}"),
@@ -648,6 +678,17 @@ mod tests {
         assert_eq!(texts(Lang::En).problem(&p), "folder not found: ~/x");
         assert_eq!(texts(Lang::Fr).problem(&p), "dossier introuvable : ~/x");
         assert!(texts(Lang::En).problem(&Problem::NotAGitRepo).starts_with("Not a git repository"));
+    }
+
+    #[test]
+    fn platform_texts_mention_wsl_only_on_windows() {
+        let (fr, en) = (texts(Lang::Fr), texts(Lang::En));
+        assert!(fr.agent_missing_help_for(true, "x").contains("WSL"));
+        let linux = fr.agent_missing_help_for(false, "x");
+        assert!(linux.starts_with("x\n") && linux.contains("tmux") && !linux.contains("WSL"), "{linux}");
+        assert!(en.agent_missing_help_for(false, "x").contains("needs tmux and tcanvas-agent"));
+        assert_eq!((fr.folder_path_hint_for(true), fr.folder_path_hint_for(false)), ("Chemin WSL, ex. ~/code/api", "Chemin, ex. ~/code/api"));
+        assert_eq!(en.folder_path_hint_for(false), "Path, e.g. ~/code/api");
     }
 
     #[test]

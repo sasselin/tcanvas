@@ -1,17 +1,20 @@
 # CLAUDE.md
 
-Guide for Claude sessions working on **tcanvas**, an open-source native Windows app that shows
-WSL terminals as cards on an infinite canvas (egui/eframe + wgpu, `alacritty_terminal` for
-emulation). Every card is a tmux session inside WSL; a Linux companion binary,
+Guide for Claude sessions working on **tcanvas**, an open-source native Windows app (also built
+as a native Linux app) that shows WSL terminals as cards on an infinite canvas (egui/eframe +
+wgpu, `alacritty_terminal` for emulation). Every card is a tmux session inside WSL; a Linux companion binary,
 `tcanvas-agent`, watches those sessions and talks to the app over stdin/stdout.
 
 ## Working with the maintainer
 
 - The maintainer writes in French: **answer them in French**, but write **everything that
   lands in the repo in English** (see "Language rule").
-- Commit or push **only when asked**. Commit messages: English subject line, blank line, then
-  `- ` bullets describing the change per area. Older pushed commits written in French stay as
-  they are; never rewrite history to translate them.
+- Commit or push **only when asked**. Commit messages are **Conventional Commits** (CHANGELOG
+  and versions are generated from them): `<type>: <Capitalized English subject>`, type in
+  `feat fix perf refactor docs test style build ci chore revert` (optional scope:
+  `fix(agent): ...`, breaking: `feat!:`), blank line, then `- ` bullets describing the change per
+  area. `scripts/git-hooks/commit-msg` checks it (`git config core.hooksPath scripts/git-hooks`).
+  Older pushed commits (some in French, no type) stay as they are; never rewrite history.
 - "Done" means tested and working on both Linux and Windows (see "Verification").
 
 ## Workspace layout
@@ -31,7 +34,11 @@ Cargo workspace (`Cargo.toml`, edition 2024, resolver 3):
   dir under `OUT_DIR`. `agent_link/install.rs` embeds it and, on startup, copies it to
   `~/.local/bin/tcanvas-agent` in WSL when `~/.local/share/tcanvas/agent.id` holds another
   build hash: the exe alone is the whole distribution. `TCANVAS_AGENT` skips this.
-- `scripts/` - `deploy.sh`, `watch.sh`, `test-windows.sh`, `screenshots.sh`.
+- `scripts/` - `deploy.sh`, `watch.sh`, `test-windows.sh`, `screenshots.sh`, `git-hooks/`.
+- `installer/` - `tcanvas.nsi` (Windows installer, NSIS, built on Linux with `makensis`) and
+  `install.sh` (Linux archive installer, into `~/.local`).
+- `.github/workflows/` - `ci.yml` (tests, clippy, fmt, Windows cross-build, PR title check) and
+  `release.yml` (release-plz, then builds attached to the GitHub release; see "Releases").
 - `docs/screenshots/` - README images, generated (see "Screenshots").
 - `assets/` - icons (SVG/PNG/ICO).
 
@@ -69,8 +76,9 @@ Cargo workspace (`Cargo.toml`, edition 2024, resolver 3):
 Everything in the repo is English: code, identifiers, comments, doc comments, README,
 tests, scripts, SVG comments, commit messages. **Sole exceptions:** the `pub const FR: Texts`
 table in `shell/i18n.rs`, and string literals in test code asserting those French strings.
-`crates/app/tests/english_only.rs` scans `README.md`, `CLAUDE.md`, `Cargo.toml` and every
-`.rs/.sh/.svg/.toml/.md` under `crates/`, `scripts/`, `assets/`; it fails on accented letters
+`crates/app/tests/english_only.rs` scans the root docs and TOML files and every
+`.rs/.sh/.svg/.toml/.md/.yml/.nsi/.desktop` under `crates/`, `scripts/`, `assets/`, `installer/`,
+`.github/`; it fails on accented letters
 or common French words (its word list includes short words, so check comments and examples).
 
 ## Tests
@@ -103,9 +111,20 @@ cargo build --release --target x86_64-pc-windows-gnu -p tcanvas   # Windows cros
   `mingw-w64`; `test-windows.sh` extra args go to `cargo test`.
 - The Windows e2e test can occasionally exceed its timeout: rerun it before concluding it
   fails.
-- Formatting: there is no `rustfmt.toml` and existing code uses long lines, so
-  `cargo fmt --check` may report pre-existing diffs. Do not reformat unrelated files in a
-  feature change; keep new code consistent with its surroundings.
+- Formatting: `rustfmt.toml` keeps the long-line style (`max_width = 200`); run `cargo fmt`
+  before committing, CI fails on `cargo fmt --check`.
+
+## Releases
+
+- Never bump versions, tag or edit `CHANGELOG.md` by hand. release-plz (`release-plz.toml`) keeps
+  a `chore: Release vX.Y.Z` PR up to date on every push to `main`; merging it tags `vX.Y.Z`
+  and creates the GitHub release, then `release.yml` attaches `tcanvas.exe`,
+  `tcanvas-vX.Y.Z-setup-x64.exe`, `tcanvas-vX.Y.Z-linux-x86_64.tar.gz`, `SHA256SUMS` and build
+  attestations, and updates winget (`sasselin.tcanvas`) when `vars.WINGET_ENABLED` is set.
+- The whole workspace shares one version (`version.workspace`), released as `tcanvas`.
+- Native Linux: same app, `cfg(not(windows))` paths run tmux and the agent directly (agent next
+  to the exe or in the `PATH`), notifications through D-Bus (`notify-rust`). Texts that mention
+  WSL have a Linux variant (`Texts::agent_missing_help`, `Texts::folder_path_hint`).
 
 ## Screenshots
 

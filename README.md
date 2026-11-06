@@ -6,7 +6,8 @@ the one you need, and get notified when one of them gets stuck.
 A project linked to a folder shows **changed files and their diffs live**, which makes it ideal
 for watching what Claude (or any other AI agent) is doing while it works.
 
-- Native Windows app (`tcanvas.exe`, Rust + egui/wgpu, terminal emulation by `alacritty_terminal`).
+- Native Windows app (`tcanvas.exe`, Rust + egui/wgpu, terminal emulation by `alacritty_terminal`),
+  also available as a native Linux app (tmux runs locally, no WSL involved).
 - Every card is a **tmux** session inside WSL: close the app and your terminals keep running;
   reopen it and everything is still there.
 - A small Linux agent (`tcanvas-agent`) watches the terminals and reports when one is "stalled",
@@ -46,29 +47,76 @@ for watching what Claude (or any other AI agent) is doing while it works.
 
 ![The "go to" palette (Ctrl+Shift+P), across every project](docs/screenshots/jump.png)
 
-## Installation
+## Install
 
-`tcanvas.exe` is self-contained: it embeds a static Linux build of the agent and installs it
-into the default WSL distro on startup (`~/.local/bin/tcanvas-agent`), updating it whenever the
-exe changes. Sharing the exe alone is enough.
+### Windows
 
-Requirements on the machine running it: WSL with a Linux distribution (`wsl --install`), and in
-WSL `tmux` ≥ 3.0 (`sudo apt install tmux`; the app says so if it is missing). Any shell works.
+Requires WSL with a Linux distribution (`wsl --install` in PowerShell) and, inside it,
+`tmux` ≥ 3.0 (`sudo apt install tmux`; the app says so if it is missing). Any shell works.
+
+- **winget** (recommended; `winget upgrade` keeps it up to date):
+  ```powershell
+  winget install sasselin.tcanvas
+  ```
+- **Installer**: download `tcanvas-<version>-setup-x64.exe` from the
+  [latest release](https://github.com/sasselin/tcanvas/releases/latest). It installs for the
+  current user (no admin rights), adds a Start menu entry and an uninstaller. The installer is not
+  signed yet, so SmartScreen may warn: **More info** > **Run anyway**.
+- **Portable**: `tcanvas.exe` from the same page, run it from anywhere.
+
+The exe is self-contained: it embeds a static Linux build of the agent and installs it into the
+default WSL distro on startup (`~/.local/bin/tcanvas-agent`), updating it whenever the exe
+changes.
+
+### Linux
+
+Requires `tmux` ≥ 3.0 and a Wayland or X11 desktop (X11 also needs `libxkbcommon-x11`).
+Download `tcanvas-<version>-linux-x86_64.tar.gz` from the
+[latest release](https://github.com/sasselin/tcanvas/releases/latest), then:
+
+```sh
+tar xzf tcanvas-*-linux-x86_64.tar.gz && cd tcanvas-*-linux-x86_64 && ./install.sh
+```
+
+It copies `tcanvas` and `tcanvas-agent` to `~/.local/bin` and adds a menu entry;
+`./install.sh --uninstall` removes them. Running `./tcanvas` from the extracted folder works too.
+
+### Verify a download (optional)
+
+Every release file is built by this repository's CI, with a build attestation and a line in
+`SHA256SUMS`:
+
+```sh
+gh attestation verify tcanvas-<version>-setup-x64.exe -R sasselin/tcanvas
+```
+
+### Shell hooks
 
 Optional, for command exit codes and durations: the shell hooks, for **bash** (≥ 5.0) or
-**zsh**. Click **Install** next to "⚠ shell hooks" in the status bar, or in WSL:
+**zsh**. Click **Install** next to "⚠ shell hooks" in the status bar, or in a terminal (in WSL on Windows):
 
 ```sh
 tcanvas-agent install-hooks      # adds one line to ~/.bashrc or ~/.zshrc (following $SHELL)
 ```
 
-Building the exe (cross-compiled from WSL):
+### Building from source
+
+Windows exe (cross-compiled from WSL or Linux):
 
 ```sh
 rustup target add x86_64-pc-windows-gnu x86_64-unknown-linux-musl
 sudo apt install mingw-w64
 cargo build --release --target x86_64-pc-windows-gnu -p tcanvas
 # → target/x86_64-pc-windows-gnu/release/tcanvas.exe (the musl agent is built and embedded by build.rs)
+sudo apt install nsis              # optional: the installer
+makensis -DVERSION=0.0.0 -DEXE="$PWD/target/x86_64-pc-windows-gnu/release/tcanvas.exe" installer/tcanvas.nsi
+```
+
+Linux app (the agent must sit next to it or be in the `PATH`):
+
+```sh
+cargo build --release -p tcanvas -p tcanvas-agent
+./target/release/tcanvas
 ```
 
 Agent commands: `tcanvas-agent` (server mode, used by the app), `tcanvas-agent install-hooks`,
@@ -233,3 +281,15 @@ notification, **closes and reopens the app** and checks that it is the same shel
 the terminal. It also links a group to a temporary git repository, checks that a terminal from
 the group opens there and that a file written from that terminal shows up in the changes. It uses
 a throwaway tmux server and never touches your sessions.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Releases and the [changelog](CHANGELOG.md) are generated
+from Conventional Commit messages.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. Unless you explicitly state otherwise, any
+contribution intentionally submitted for inclusion in tcanvas by you, as defined in the Apache-2.0
+license, shall be dual licensed as above, without any additional terms or conditions.

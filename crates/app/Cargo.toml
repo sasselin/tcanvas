@@ -1,7 +1,12 @@
 [package]
 name = "tcanvas"
+description = "WSL terminals as cards on an infinite canvas"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
 
 [dependencies]
 protocol.workspace = true
@@ -19,6 +24,10 @@ sys-locale = "0.3"
 
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.7"
+
+# Desktop notifications on native Linux (freedesktop D-Bus, pure Rust).
+[target.'cfg(target_os = "linux")'.dependencies]
+notify-rust = "4"
 
 [build-dependencies]
 embed-resource = "3"

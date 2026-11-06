@@ -1,14 +1,15 @@
-//! System toasts. Windows: notification center, click → back to the terminal.
-//! Elsewhere (development on Linux): nothing, the in-app toasts are enough.
+//! System toasts, click → back to the terminal. Windows: notification center. Linux: the
+//! desktop's notification daemon (freedesktop D-Bus). Elsewhere: nothing, the in-app toasts
+//! are enough.
 
 use std::sync::mpsc::Sender;
 
 use crate::shell::world::CardId;
 
 pub struct OsToaster {
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     ctx: egui::Context,
-    #[cfg_attr(not(windows), allow(dead_code))]
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     clicked: Sender<CardId>,
     enabled: bool,
 }
@@ -39,7 +40,26 @@ impl OsToaster {
                 eprintln!("Windows toast failed: {e}");
             }
         }
-        #[cfg(not(windows))]
+        #[cfg(target_os = "linux")]
+        {
+            // The language is per thread: read the label here.
+            let (title, body, label) = (title.to_owned(), body.to_owned(), crate::shell::i18n::t().show_terminal);
+            let (ctx, tx, card) = (self.ctx.clone(), self.clicked.clone(), card.clone());
+            // Waiting for the click blocks: one short-lived thread per notification.
+            std::thread::spawn(move || {
+                let shown = notify_rust::Notification::new().appname("tcanvas").summary(&title).body(&body).action("default", label).show();
+                match shown {
+                    Ok(handle) => handle.wait_for_action(|action| {
+                        if action == "default" {
+                            let _ = tx.send(card);
+                            ctx.request_repaint();
+                        }
+                    }),
+                    Err(e) => eprintln!("desktop notification failed: {e}"),
+                }
+            });
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
         let _ = (title, body, card);
     }
 }

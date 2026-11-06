@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=tcanvas
+Comment=Terminals as cards on an infinite canvas
+Exec=tcanvas
+Icon=tcanvas
+Terminal=false
+Categories=Development;System;TerminalEmulator;
+Keywords=terminal;tmux;canvas;
+StartupWMClass=tcanvas

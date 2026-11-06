@@ -221,7 +221,7 @@ impl AgentLink {
             }
             LinkState::Failed(why) => {
                 let label = ui.label(RichText::new(t().agent_missing).color(theme::status_color(Some(protocol::TermStatus::Exited(1)))));
-                label.on_hover_text((t().agent_missing_hint)(&why));
+                label.on_hover_text(t().agent_missing_help(&why));
                 if ui.small_button(t().retry).clicked() {
                     self.start();
                 }

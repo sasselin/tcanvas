@@ -20,7 +20,7 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) {
         let path = entry.path();
         if path.is_dir() {
             collect(&path, out);
-        } else if matches!(path.extension().and_then(|e| e.to_str()), Some("rs" | "sh" | "svg" | "toml" | "md")) {
+        } else if matches!(path.extension().and_then(|e| e.to_str()), Some("rs" | "sh" | "svg" | "toml" | "md" | "yml" | "nsi" | "desktop")) {
             out.push(path);
         }
     }
@@ -92,8 +92,9 @@ fn check_prose(rel: &str, text: &str, bad: &mut Vec<String>) {
 #[test]
 fn the_repository_is_written_in_english() {
     let root = root();
-    let mut files: Vec<PathBuf> = ["README.md", "CLAUDE.md", "Cargo.toml"].iter().map(|f| root.join(f)).filter(|p| p.exists()).collect();
-    for dir in ["crates", "scripts", "assets"] {
+    let mut files: Vec<PathBuf> =
+        ["README.md", "CLAUDE.md", "CONTRIBUTING.md", "SECURITY.md", "Cargo.toml", "release-plz.toml", "rustfmt.toml"].iter().map(|f| root.join(f)).filter(|p| p.exists()).collect();
+    for dir in ["crates", "scripts", "assets", "installer", ".github"] {
         collect(&root.join(dir), &mut files);
     }
     let mut bad = Vec::new();

@@ -128,7 +128,7 @@ impl FolderPicker {
             {
                 *choice = Some(Choice::Navigate(p));
             }
-            let edit = ui.add(TextEdit::singleline(&mut self.input).id(Id::unique("folder-picker-path")).desired_width(f32::INFINITY).hint_text(t().wsl_path_hint));
+            let edit = ui.add(TextEdit::singleline(&mut self.input).id(Id::unique("folder-picker-path")).desired_width(f32::INFINITY).hint_text(t().folder_path_hint()));
             if edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                 *choice = Some(Choice::Navigate(self.input.trim().to_string()));
             }

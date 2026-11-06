@@ -1,0 +1,16 @@
+#!/bin/sh
+# Git hook: commit subjects must be Conventional Commits, since CHANGELOG.md and version bumps
+# are generated from them (release-plz). Enable once per clone:
+#   git config core.hooksPath scripts/git-hooks
+subject="$(head -n1 "$1")"
+types='feat|fix|perf|refactor|docs|test|style|build|ci|chore|revert'
+case "$subject" in
+    Merge\ *|Revert\ *|fixup!\ *|squash!\ *) exit 0 ;;
+esac
+if printf '%s' "$subject" | grep -Eq "^($types)(\([a-z0-9_-]+\))?!?: [A-Z]"; then
+    exit 0
+fi
+echo "commit-msg: \"$subject\"" >&2
+echo "  expected \"<type>: <Subject>\", type in: $(echo "$types" | tr '|' ' ')" >&2
+echo "  e.g. \"feat: Add wires between groups\", \"fix(agent): Keep the socket on restart\"" >&2
+exit 1

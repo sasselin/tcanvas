@@ -1,0 +1,23 @@
+# release-plz: on every push to main, keeps a "chore: release" PR up to date (version bump in
+# Cargo.toml + CHANGELOG.md from Conventional Commits). Merging it tags `vX.Y.Z` and creates the
+# GitHub release; .github/workflows/release.yml then builds and attaches the binaries.
+# Nothing goes to crates.io: versions come from git tags.
+
+[workspace]
+git_only = true
+publish = false
+semver_check = false
+release = false
+pr_labels = ["release"]
+# Capitalized like every other subject (checked by ci.yml and scripts/git-hooks).
+pr_name = "chore: Release v{{ version }}"
+
+# The whole workspace shares one version (`version.workspace`): it is released as `tcanvas`.
+[[package]]
+name = "tcanvas"
+release = true
+changelog_path = "CHANGELOG.md"
+changelog_include = ["tcanvas-agent", "protocol"]
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
+git_release_enable = true

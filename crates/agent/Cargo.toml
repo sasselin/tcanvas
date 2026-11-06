@@ -1,7 +1,12 @@
 [package]
 name = "tcanvas-agent"
+description = "Companion agent of tcanvas: watches its tmux sessions"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish.workspace = true
 
 [dependencies]
 protocol.workspace = true

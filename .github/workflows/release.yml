@@ -1,0 +1,167 @@
+name: Release
+
+# On every push to main, release-plz keeps the release PR up to date. Merging that PR bumps the
+# version: release-plz then tags `vX.Y.Z` and creates the GitHub release, and the jobs below build
+# the binaries and attach them to it. Everything runs in this one workflow because a tag pushed
+# with GITHUB_TOKEN does not trigger other workflows.
+
+on:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-pr:
+    name: Release PR
+    if: github.repository_owner == 'sasselin'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    concurrency:
+      group: release-plz-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release:
+    name: Tag and GitHub release
+    if: github.repository_owner == 'sasselin'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      created: ${{ steps.plz.outputs.releases_created }}
+      tag: ${{ steps.plz.outputs.releases_created == 'true' && fromJSON(steps.plz.outputs.releases)[0].tag || '' }}
+      version: ${{ steps.plz.outputs.releases_created == 'true' && fromJSON(steps.plz.outputs.releases)[0].version || '' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - id: plz
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  windows:
+    name: Windows exe and installer
+    needs: release
+    if: needs.release.outputs.created == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ needs.release.outputs.tag }}
+      VERSION: ${{ needs.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu, x86_64-unknown-linux-musl
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64 musl-tools nsis
+      # build.rs builds the static Linux agent and embeds it in the exe.
+      - run: cargo build --release --target x86_64-pc-windows-gnu -p tcanvas
+      - name: Installer
+        run: |
+          mkdir dist
+          cp target/x86_64-pc-windows-gnu/release/tcanvas.exe dist/tcanvas.exe
+          makensis -V2 -DVERSION="$VERSION" -DEXE="$PWD/dist/tcanvas.exe" -DOUTFILE="$PWD/dist/tcanvas-$TAG-setup-x64.exe" installer/tcanvas.nsi
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*
+      - name: Upload
+        run: gh release upload "$TAG" dist/* --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  linux:
+    name: Linux archive
+    needs: release
+    if: needs.release.outputs.created == 'true'
+    # Oldest supported runner: the glibc the app links against stays compatible with more distros.
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      TAG: ${{ needs.release.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release.outputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libxkbcommon-dev libwayland-dev
+      - run: cargo build --release -p tcanvas
+      - run: cargo build --release -p tcanvas-agent --target x86_64-unknown-linux-musl
+      - name: Archive
+        run: |
+          name="tcanvas-$TAG-linux-x86_64"
+          mkdir -p "dist/$name"
+          cp target/release/tcanvas target/x86_64-unknown-linux-musl/release/tcanvas-agent "dist/$name/"
+          cp installer/install.sh assets/tcanvas.desktop LICENSE-MIT LICENSE-APACHE "dist/$name/"
+          cp assets/icon-256.png "dist/$name/tcanvas.png"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*.tar.gz
+      - name: Upload
+        run: gh release upload "$TAG" dist/*.tar.gz --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+  checksums:
+    name: SHA256SUMS
+    needs: [release, windows, linux]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ needs.release.outputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - run: |
+          mkdir dist && cd dist
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" --pattern 'tcanvas*'
+          sha256sum tcanvas* > SHA256SUMS
+          gh release upload "$TAG" SHA256SUMS -R "$GITHUB_REPOSITORY" --clobber
+
+  # Opens the update PR in microsoft/winget-pkgs. Needs the package to exist there already (first
+  # submission by hand), a fork of winget-pkgs, the repository variable WINGET_ENABLED=true and a
+  # classic PAT with `public_repo` in the WINGET_TOKEN secret.
+  winget:
+    name: winget
+    needs: [release, windows]
+    if: vars.WINGET_ENABLED == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: sasselin.tcanvas
+          installers-regex: '-setup-x64\.exe$'
+          release-tag: ${{ needs.release.outputs.tag }}
+          token: ${{ secrets.WINGET_TOKEN }}
