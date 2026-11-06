@@ -64,7 +64,7 @@ fn harness(dir: &std::path::Path) -> Harness<'static, App> {
         .with_size(Vec2::new(1400.0, 900.0))
         .with_step_dt(1.0 / 60.0)
         .allow_missing_glyphs()
-        .build_eframe(move |cc| App::new(&cc.egui_ctx, Config { launcher: Launcher::Tmux, agent: AgentMode::Spawn, config_dir: dir, os_toasts: false }))
+        .build_eframe(move |cc| App::new(&cc.egui_ctx, Config { launcher: Launcher::Tmux, agent: AgentMode::Spawn, config_dir: dir, os_toasts: false, update_check: false }))
 }
 
 /// Runs the app in real time until `cond` is true.

@@ -38,6 +38,10 @@ for watching what Claude (or any other AI agent) is doing while it works.
   `Ctrl+Shift+V` to paste.
 - **Clean shutdown**: closing a terminal really stops its shell and every process it started.
 - **Persistent layout**: cards, groups, wires, the open project and the view are saved.
+- **Updates from the app**: a new release shows a toast and an **Update** button with its
+  release notes; one click downloads it, checks it against `SHA256SUMS`, swaps the binaries and
+  restarts (terminals keep running). After an update, "What's new" lists the changes. Click the
+  version in the toolbar to read them again. `TCANVAS_NO_UPDATE_CHECK=1` turns the check off.
 
 ![A project's space: Claude Code asking before running the tests, and chips to the linked groups](docs/screenshots/project.png)
 
@@ -46,6 +50,8 @@ for watching what Claude (or any other AI agent) is doing while it works.
 ![The "Changes" panel: uncommitted files, a live diff and the recent commits](docs/screenshots/changes.png)
 
 ![The "go to" palette (Ctrl+Shift+P), across every project](docs/screenshots/jump.png)
+
+![An update is out: the toolbar button, the toast and the release notes before updating](docs/screenshots/update.png)
 
 ## Install
 

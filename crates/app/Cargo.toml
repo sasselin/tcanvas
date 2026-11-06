@@ -12,7 +12,7 @@ publish.workspace = true
 protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu", "accesskit", "clipboard"] }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "wgpu", "accesskit", "clipboard", "links"] }
 egui = { version = "0.37", features = ["serde", "monochrome_emoji_fonts"] }
 alacritty_terminal = "0.26"
 uuid = { version = "1", features = ["v4"] }
@@ -21,6 +21,10 @@ nucleo-matcher = "0.3"
 # Clipboard reading for Ctrl+Shift+V and right-click paste (egui only reads it for Ctrl+V).
 arboard = { version = "3.6", default-features = false }
 sys-locale = "0.3"
+# Update check and download from GitHub releases (rustls, no system TLS needed).
+ureq = "3"
+# Checks downloaded updates against the release's SHA256SUMS.
+sha2 = "0.11"
 
 [target.'cfg(windows)'.dependencies]
 tauri-winrt-notification = "0.7"

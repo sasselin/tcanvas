@@ -255,7 +255,7 @@ fn harness_sized(name: &str, size: Vec2, pixels_per_point: f32) -> Harness<'stat
     let dir = std::env::temp_dir().join(format!("tcanvas-shot-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     Harness::builder().with_size(size).with_pixels_per_point(pixels_per_point).with_step_dt(1.0 / 60.0).wgpu().build_eframe(move |cc| {
-        let mut app = App::new(&cc.egui_ctx, Config { launcher: Launcher::Disabled, agent: AgentMode::Disabled, config_dir: dir, os_toasts: false });
+        let mut app = App::new(&cc.egui_ctx, Config { launcher: Launcher::Disabled, agent: AgentMode::Disabled, config_dir: dir, os_toasts: false, update_check: false });
         // A fixed version: the images must not change on every release.
         app.version = "X.X.X";
         add_windows_symbols(&cc.egui_ctx);
@@ -436,6 +436,36 @@ fn jump() {
     assert!(h.state().jump_open());
     h.event(egui::Event::Text("cla".into()));
     save(&mut h, "jump");
+}
+
+#[test]
+#[ignore = "renders README screenshots; run ./scripts/screenshots.sh"]
+fn update() {
+    use tcanvas::features::updates::release::{self, Asset, Release};
+    let mut h = harness("update");
+    demo_canvas(&mut h);
+    ctrl_shift(&h, Key::Num0);
+    steps(&mut h, 45);
+    h.state_mut().version = "1.4.2";
+    h.state_mut().updates.pin_running_version("1.4.2");
+    let make = |version: &str, notes: &str| {
+        let files = [release::asset_name(cfg!(windows), version), release::SUMS.to_string()];
+        Release {
+            version: version.into(),
+            notes: notes.into(),
+            page: release::release_page(version),
+            assets: files.into_iter().map(|name| Asset { url: format!("https://example.com/{name}"), name }).collect(),
+        }
+    };
+    h.state().updates.offer(vec![
+        make("1.5.0", "### Added\n\n- Update button in the toolbar, with the release notes before updating\n- Search inside a terminal's scrollback\n\n### Fixed\n\n- Wires no longer flicker while a group is dragged"),
+        make("1.4.3", "### Fixed\n\n- Paste with right-click keeps line breaks in bracketed paste mode"),
+    ]);
+    steps(&mut h, 3);
+    h.get_by_label("Update to v1.5.0").click();
+    steps(&mut h, 3);
+    h.event(egui::Event::PointerGone);
+    save(&mut h, "update");
 }
 
 #[test]

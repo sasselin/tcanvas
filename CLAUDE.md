@@ -45,7 +45,7 @@ Cargo workspace (`Cargo.toml`, edition 2024, resolver 3):
 ## App architecture: vertical slices
 
 - `crates/app/src/features/<name>/` - one folder per feature (canvas, terminal_card, wires,
-  projects, changes, filters, jump, spaces, notifications, persistence, agent_link, ...).
+  projects, changes, filters, jump, spaces, notifications, persistence, agent_link, updates, ...).
   A slice owns its state, UI, logic and its unit tests.
 - `crates/app/src/shell/` - shared plumbing only: `App`/`Config` (`mod.rs`, global
   shortcuts), `world.rs` (shared data read by every slice), `event.rs` (event bus: the
@@ -122,6 +122,10 @@ cargo build --release --target x86_64-pc-windows-gnu -p tcanvas   # Windows cros
   `tcanvas-vX.Y.Z-setup-x64.exe`, `tcanvas-vX.Y.Z-linux-x86_64.tar.gz`, `SHA256SUMS` and build
   attestations, and updates winget (`sasselin.tcanvas`) when `vars.WINGET_ENABLED` is set.
 - The whole workspace shares one version (`version.workspace`), released as `tcanvas`.
+- The app updates itself from these releases (`features/updates`): it looks for `tcanvas.exe`,
+  `tcanvas-vX.Y.Z-linux-x86_64.tar.gz` and `SHA256SUMS`, shows the release body (the CHANGELOG
+  section) before updating and the embedded `CHANGELOG.md` after. Renaming those assets or
+  changing the archive layout breaks updates for every installed copy.
 - Native Linux: same app, `cfg(not(windows))` paths run tmux and the agent directly (agent next
   to the exe or in the `PATH`), notifications through D-Bus (`notify-rust`). Texts that mention
   WSL have a Linux variant (`Texts::agent_missing_help`, `Texts::folder_path_hint`).

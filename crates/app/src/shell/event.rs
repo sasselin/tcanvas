@@ -83,4 +83,8 @@ pub enum Event {
     /// A card's tmux client stopped without being asked to.
     PtyExited(CardId),
     Notify(CardId, Notice),
+    /// A newer release is out (version without the `v`): warn once.
+    UpdateAvailable(String),
+    /// Opens the release notes of the pending update, with its "Update" button.
+    ShowReleaseNotes,
 }

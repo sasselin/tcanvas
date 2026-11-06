@@ -30,7 +30,7 @@ fn harness_in(dir: &std::path::Path, lang: Lang) -> Harness<'static, App> {
     Harness::builder()
         .with_size(Vec2::new(1400.0, 900.0))
         .with_step_dt(1.0 / 60.0)
-        .build_eframe(move |cc| App::new(&cc.egui_ctx, Config { launcher: Launcher::Disabled, agent: AgentMode::Disabled, config_dir: dir, os_toasts: false }))
+        .build_eframe(move |cc| App::new(&cc.egui_ctx, Config { launcher: Launcher::Disabled, agent: AgentMode::Disabled, config_dir: dir, os_toasts: false, update_check: false }))
 }
 
 fn steps(h: &mut Harness<'_, App>, n: usize) {
@@ -1702,4 +1702,83 @@ fn the_toolbar_shows_the_running_version() {
     let mut h = harness(&dir);
     steps(&mut h, 2);
     h.get_by_label(&format!("v{}", tcanvas::shell::version::current()));
+}
+
+fn release(version: &str, notes: &str) -> tcanvas::features::updates::release::Release {
+    use tcanvas::features::updates::release::{self, Asset, Release};
+    let files = [release::asset_name(cfg!(windows), version), release::SUMS.to_string()];
+    Release {
+        version: version.into(),
+        notes: notes.into(),
+        page: release::release_page(version),
+        assets: files.into_iter().map(|name| Asset { url: format!("https://example.com/{name}"), name }).collect(),
+    }
+}
+
+#[test]
+fn a_newer_release_shows_the_update_button_a_toast_and_its_notes() {
+    let dir = temp_dir("update");
+    let mut h = harness(&dir);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Mettre à jour vers v99.0.1").is_none());
+    h.state().updates.offer(vec![release("99.0.0", "### Added\n\n- **Older** thing"), release("99.0.1", "### Fixed\n\n- Newest fix")]);
+    steps(&mut h, 3);
+    assert_eq!(h.state().pending_toasts(), 1, "warned once");
+    h.get_by_label("Mise à jour disponible");
+
+    // Before updating: the notes of every version since the running one, newest first.
+    h.get_by_label("Mettre à jour vers v99.0.1").click();
+    steps(&mut h, 3);
+    h.get_by_label("tcanvas v99.0.1 est disponible");
+    h.get_by_label("•  Newest fix");
+    h.get_by_label("•  Older thing");
+    h.get_by_label("Mettre à jour et redémarrer");
+    h.get_by_label("Plus tard").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label("•  Newest fix").is_none());
+    assert_eq!(*h.state().updates.phase(), tcanvas::features::updates::Phase::Idle, "nothing downloaded");
+}
+
+#[test]
+fn the_update_button_in_english() {
+    let dir = temp_dir("update-en");
+    let mut h = harness_in(&dir, Lang::En);
+    steps(&mut h, 2);
+    h.state().updates.offer(vec![release("99.0.0", "- Something new")]);
+    steps(&mut h, 3);
+    h.get_by_label("Update to v99.0.0").click();
+    steps(&mut h, 3);
+    h.get_by_label("tcanvas v99.0.0 is available");
+    h.get_by_label("Update and restart");
+}
+
+#[test]
+fn the_version_label_opens_whats_new() {
+    let dir = temp_dir("whats-new-label");
+    let mut h = harness(&dir);
+    steps(&mut h, 2);
+    h.get_by_label(&format!("v{}", tcanvas::shell::version::current())).click();
+    steps(&mut h, 3);
+    let base = tcanvas::features::updates::version::base(tcanvas::shell::version::current());
+    h.get_by_label(&format!("Quoi de neuf dans la v{base}"));
+    h.get_by_label("Fermer").click();
+    steps(&mut h, 3);
+    assert!(h.state().updates.dialog.is_none());
+}
+
+#[test]
+fn whats_new_shows_once_after_an_update() {
+    let dir = temp_dir("whats-new");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("updates.json"), r#"{"last_seen_version": "0.0.1"}"#).unwrap();
+    let mut h = harness(&dir);
+    steps(&mut h, 3);
+    let base = tcanvas::features::updates::version::base(tcanvas::shell::version::current());
+    h.get_by_label(&format!("Quoi de neuf dans la v{base}"));
+    h.get_by_label("v0.1.0");
+    drop(h);
+    // Next start: already seen.
+    let mut h = harness(&dir);
+    steps(&mut h, 3);
+    assert!(h.state().updates.dialog.is_none());
 }

@@ -290,6 +290,25 @@ pub struct Texts {
     // Links between terminals.
     pub wire_hint: fn(&str, &str) -> String,
     pub linked_group_hint: fn(&str) -> String,
+
+    // Updates.
+    pub version_hint: &'static str,
+    pub update_button: fn(&str) -> String,
+    pub update_button_hint: &'static str,
+    pub update_installing: fn(&str) -> String,
+    pub update_restarting: &'static str,
+    pub update_failed: &'static str,
+    pub update_failed_hint: fn(&str) -> String,
+    pub update_notice_title: &'static str,
+    pub update_notice_body: fn(&str) -> String,
+    pub update_title: fn(&str) -> String,
+    pub update_running: fn(&str) -> String,
+    pub update_restart_note: &'static str,
+    pub update_now: &'static str,
+    pub update_later: &'static str,
+    pub release_page: &'static str,
+    pub whats_new_title: fn(&str) -> String,
+    pub no_release_notes: &'static str,
 }
 
 pub const EN: Texts = Texts {
@@ -465,6 +484,24 @@ pub const EN: Texts = Texts {
 
     wire_hint: |a, b| format!("{a}  ⇄  {b}\nclick: go to the other group · right-click: delete"),
     linked_group_hint: |name| format!("Linked group: open “{name}”"),
+
+    version_hint: "What's new in this version",
+    update_button: |v| format!("Update to v{v}"),
+    update_button_hint: "See what's new, then update",
+    update_installing: |v| format!("Downloading v{v}…"),
+    update_restarting: "Restarting…",
+    update_failed: "Update failed",
+    update_failed_hint: |e| format!("{e}\nClick to open the release page"),
+    update_notice_title: "Update available",
+    update_notice_body: |v| format!("tcanvas v{v} is out: click to see what's new"),
+    update_title: |v| format!("tcanvas v{v} is available"),
+    update_running: |v| format!("You have v{v}. What's new:"),
+    update_restart_note: "tcanvas restarts after the update; terminals keep running.",
+    update_now: "Update and restart",
+    update_later: "Later",
+    release_page: "View on GitHub",
+    whats_new_title: |v| format!("What's new in v{v}"),
+    no_release_notes: "No release notes for this version.",
 };
 
 pub const FR: Texts = Texts {
@@ -640,6 +677,24 @@ pub const FR: Texts = Texts {
 
     wire_hint: |a, b| format!("{a}  ⇄  {b}\nclic : aller à l'autre groupe · clic droit : supprimer"),
     linked_group_hint: |name| format!("Groupe relié : ouvrir « {name} »"),
+
+    version_hint: "Nouveautés de cette version",
+    update_button: |v| format!("Mettre à jour vers v{v}"),
+    update_button_hint: "Voir les nouveautés, puis mettre à jour",
+    update_installing: |v| format!("Téléchargement de v{v}…"),
+    update_restarting: "Redémarrage…",
+    update_failed: "Échec de la mise à jour",
+    update_failed_hint: |e| format!("{e}\nCliquer pour ouvrir la page de la version"),
+    update_notice_title: "Mise à jour disponible",
+    update_notice_body: |v| format!("tcanvas v{v} est disponible : cliquer pour voir les nouveautés"),
+    update_title: |v| format!("tcanvas v{v} est disponible"),
+    update_running: |v| format!("Vous avez la v{v}. Les nouveautés :"),
+    update_restart_note: "tcanvas redémarre après la mise à jour ; les terminaux continuent de tourner.",
+    update_now: "Mettre à jour et redémarrer",
+    update_later: "Plus tard",
+    release_page: "Voir sur GitHub",
+    whats_new_title: |v| format!("Quoi de neuf dans la v{v}"),
+    no_release_notes: "Pas de notes pour cette version.",
 };
 
 #[cfg(test)]

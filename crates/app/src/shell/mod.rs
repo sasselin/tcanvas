@@ -24,6 +24,7 @@ use crate::features::persistence::{self, Persistence};
 use crate::features::projects::Projects;
 use crate::features::spaces::Spaces;
 use crate::features::terminal_card::{Launcher, TerminalCards};
+use crate::features::updates::Updates;
 use crate::features::wires::Wires;
 use event::Event;
 use i18n::t;
@@ -34,11 +35,13 @@ pub struct Config {
     pub agent: AgentMode,
     pub config_dir: PathBuf,
     pub os_toasts: bool,
+    /// Look for new releases on GitHub (off in tests: no network).
+    pub update_check: bool,
 }
 
 impl Config {
     pub fn production() -> Self {
-        Self { launcher: Launcher::Tmux, agent: AgentMode::Spawn, config_dir: persistence::default_dir(), os_toasts: true }
+        Self { launcher: Launcher::Tmux, agent: AgentMode::Spawn, config_dir: persistence::default_dir(), os_toasts: true, update_check: true }
     }
 }
 
@@ -88,6 +91,7 @@ pub struct App {
     notifications: Notifications,
     agent: AgentLink,
     persistence: Persistence,
+    pub updates: Updates,
     shortcuts: Vec<Shortcut>,
     /// Shown in the toolbar: `version::current()`, pinned by the screenshot scenes so the README
     /// images don't change on every release.
@@ -115,6 +119,7 @@ impl App {
             jump: Jump::default(),
             notifications: Notifications::new(ctx.clone(), config.os_toasts),
             agent: AgentLink::new(ctx.clone(), config.agent),
+            updates: Updates::new(ctx.clone(), &config.config_dir, version::current(), config.update_check),
             persistence,
             shortcuts: Vec::new(),
             version: version::current(),
@@ -210,6 +215,7 @@ impl App {
         self.cards.poll(&mut self.world, &mut events);
         self.changes.poll(&self.world, &mut events);
         self.notifications.poll(&ctx, &mut events);
+        self.updates.poll(&mut events);
 
         // Two fixed rows: actions and projects, then search and filters. No centered
         // layout or automatic wrapping: the bar keeps its height no matter what.
@@ -221,7 +227,7 @@ impl App {
                 let vp = self.canvas.viewport();
                 self.spaces.ui(ui, &self.world, vp, &mut events);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(RichText::new(format!("v{}", self.version)).small().color(theme::TEXT_DIM));
+                    self.updates.toolbar_ui(ui, self.version);
                     self.agent.status_ui(ui);
                     self.changes.toolbar_ui(ui, &self.world, &mut events);
                     if let Some(err) = &self.persistence.last_error {
@@ -257,7 +263,11 @@ impl App {
         self.cards.dialogs(&ctx, &self.world, &mut events);
         self.projects.dialogs(&ctx, &self.world, &mut events);
         self.notifications.ui(&ctx, &self.world, &mut events);
+        self.updates.dialogs(&ctx);
         self.dispatch(events);
+
+        let (persistence, world) = (&mut self.persistence, &self.world);
+        self.updates.restart_when_ready(&ctx, || persistence.save_now(world));
 
         self.persistence.tick(&self.world);
         if self.persistence.wants_repaint() {
@@ -286,6 +296,7 @@ impl App {
             self.canvas.handle(&ev, w, &mut out);
             self.agent.handle(&ev, w, &mut out);
             self.notifications.handle(&ev, w, &mut out);
+            self.updates.handle(&ev);
             queue.extend(out);
         }
         self.world.refit_projects();

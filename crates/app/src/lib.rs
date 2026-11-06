@@ -11,6 +11,7 @@ pub mod features {
     pub mod projects;
     pub mod spaces;
     pub mod terminal_card;
+    pub mod updates;
     pub mod wires;
 }
 pub mod shell;

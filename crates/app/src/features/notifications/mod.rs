@@ -1,5 +1,5 @@
 //! Notifications: when a terminal stalls, waits for an answer, fails, finishes a long
-//! command or stops. Badge on the card, in-app toast, Windows toast.
+//! command or stops, and when an update is out. Badge on the card, in-app toast, system toast.
 
 mod os;
 
@@ -68,9 +68,18 @@ pub fn human_duration(secs: u64) -> String {
     }
 }
 
+/// What a toast is about, and where a click on it leads.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ToastTarget {
+    Card(CardId),
+    /// A newer release: opens its notes.
+    Update,
+}
+
 struct Toast {
-    card: CardId,
-    notice: Notice,
+    target: ToastTarget,
+    /// `None` for an update.
+    notice: Option<Notice>,
     title: String,
     body: String,
     created: Option<f64>,
@@ -80,7 +89,7 @@ pub struct Notifications {
     prev: HashMap<String, TermStatus>,
     toasts: Vec<Toast>,
     os: os::OsToaster,
-    clicked: Receiver<CardId>,
+    clicked: Receiver<ToastTarget>,
 }
 
 impl Notifications {
@@ -89,12 +98,12 @@ impl Notifications {
         Self { prev: HashMap::new(), toasts: Vec::new(), os: os::OsToaster::new(ctx, tx, os_toasts), clicked }
     }
 
-    /// Clicks on Windows toasts: go back to the app, on the right terminal.
+    /// Clicks on system toasts: go back to the app, on the right terminal (or the update).
     pub fn poll(&mut self, ctx: &egui::Context, events: &mut Vec<Event>) {
-        while let Ok(id) = self.clicked.try_recv() {
+        while let Ok(target) = self.clicked.try_recv() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
-            events.push(Event::FlyTo(id));
+            events.push(click_event(&target));
         }
     }
 
@@ -120,7 +129,8 @@ impl Notifications {
                 }
             }
             Event::Notify(id, notice) => self.notify(world, id, notice),
-            Event::FocusCard(id) | Event::KillCard(id) | Event::RemoveCard(id) => self.toasts.retain(|t| &t.card != id),
+            Event::UpdateAvailable(version) => self.update_available(world, version),
+            Event::FocusCard(id) | Event::KillCard(id) | Event::RemoveCard(id) => self.toasts.retain(|t| t.target != ToastTarget::Card(id.clone())),
             _ => {}
         }
     }
@@ -136,11 +146,25 @@ impl Notifications {
         }
         card.attention |= !info_only;
         let (title, body) = message(notice, card);
+        let target = ToastTarget::Card(id.clone());
         if !window_focused && !info_only {
-            self.os.show(&title, &body, id);
+            self.os.show(&title, &body, &target);
         }
-        self.toasts.retain(|t| !(t.card == *id && t.notice == *notice));
-        self.toasts.push(Toast { card: id.clone(), notice: notice.clone(), title, body, created: None });
+        self.toasts.retain(|t| !(t.target == target && t.notice.as_ref() == Some(notice)));
+        self.push(Toast { target, notice: Some(notice.clone()), title, body, created: None });
+    }
+
+    fn update_available(&mut self, world: &World, version: &str) {
+        let (title, body) = (t().update_notice_title.to_string(), (t().update_notice_body)(version));
+        if !world.window_focused {
+            self.os.show(&title, &body, &ToastTarget::Update);
+        }
+        self.toasts.retain(|t| t.target != ToastTarget::Update);
+        self.push(Toast { target: ToastTarget::Update, notice: None, title, body, created: None });
+    }
+
+    fn push(&mut self, toast: Toast) {
+        self.toasts.push(toast);
         if self.toasts.len() > MAX_TOASTS {
             self.toasts.remove(0);
         }
@@ -148,7 +172,7 @@ impl Notifications {
 
     pub fn ui(&mut self, ctx: &egui::Context, world: &World, events: &mut Vec<Event>) {
         let now = ctx.input(|i| i.time);
-        self.toasts.retain(|t| t.created.is_none_or(|c| now - c < if t.notice == Notice::Copied { COPIED_SECS } else { TOAST_SECS }));
+        self.toasts.retain(|t| t.created.is_none_or(|c| now - c < if t.notice == Some(Notice::Copied) { COPIED_SECS } else { TOAST_SECS }));
         if self.toasts.is_empty() {
             return;
         }
@@ -157,13 +181,16 @@ impl Notifications {
         egui::Area::new(Id::unique("toasts")).anchor(Align2::LEFT_BOTTOM, [12.0, -12.0]).show(ctx, |ui| {
             for (k, t) in self.toasts.iter_mut().enumerate().rev() {
                 t.created.get_or_insert(now);
-                let status = world.card(&t.card).and_then(|c| c.status());
-                let frame = egui::Frame::popup(ui.style()).stroke(egui::Stroke::new(1.5, theme::status_color(status)));
+                let color = match &t.target {
+                    ToastTarget::Card(id) => theme::status_color(world.card(id).and_then(|c| c.status())),
+                    ToastTarget::Update => theme::FOCUS,
+                };
+                let frame = egui::Frame::popup(ui.style()).stroke(egui::Stroke::new(1.5, color));
                 let resp = frame
                     .show(ui, |ui| {
                         ui.set_width(300.0);
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new(&t.title).strong().color(theme::status_color(status)));
+                            ui.label(RichText::new(&t.title).strong().color(color));
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.small_button("×").clicked() {
                                     dismiss = Some(k);
@@ -175,7 +202,7 @@ impl Notifications {
                     .response
                     .interact(Sense::click());
                 if resp.clicked() && dismiss != Some(k) {
-                    events.push(Event::FlyTo(t.card.clone()));
+                    events.push(click_event(&t.target));
                 }
                 ui.add_space(6.0);
             }
@@ -183,6 +210,13 @@ impl Notifications {
         if let Some(k) = dismiss {
             self.toasts.remove(k);
         }
+    }
+}
+
+fn click_event(target: &ToastTarget) -> Event {
+    match target {
+        ToastTarget::Card(id) => Event::FlyTo(id.clone()),
+        ToastTarget::Update => Event::ShowReleaseNotes,
     }
 }
 
@@ -286,5 +320,16 @@ mod tests {
         n.handle(&Event::Notify(id, Notice::Copied), &mut w, &mut vec![]);
         assert_eq!(n.pending(), 1);
         assert!(!w.cards[0].attention);
+    }
+
+    #[test]
+    fn an_update_gets_one_toast_that_opens_its_notes() {
+        let (mut w, _) = world_with_card();
+        let mut n = Notifications::new(egui::Context::default(), false);
+        n.handle(&Event::UpdateAvailable("0.1.2".into()), &mut w, &mut vec![]);
+        n.handle(&Event::UpdateAvailable("0.1.3".into()), &mut w, &mut vec![]);
+        assert_eq!(n.pending(), 1);
+        assert!(n.toasts[0].body.contains("v0.1.3"));
+        assert!(matches!(click_event(&n.toasts[0].target), Event::ShowReleaseNotes));
     }
 }
