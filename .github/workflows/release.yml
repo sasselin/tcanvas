@@ -17,6 +17,7 @@ jobs:
     name: Release PR
     if: github.repository_owner == 'sasselin'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: write
       pull-requests: write
@@ -39,6 +40,7 @@ jobs:
     name: Tag and GitHub release
     if: github.repository_owner == 'sasselin'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: write
       pull-requests: read
@@ -64,6 +66,7 @@ jobs:
     needs: release
     if: needs.release.outputs.created == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: write
       id-token: write
@@ -101,6 +104,7 @@ jobs:
     if: needs.release.outputs.created == 'true'
     # Oldest supported runner: the glibc the app links against stays compatible with more distros.
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     permissions:
       contents: write
       id-token: write
@@ -138,6 +142,7 @@ jobs:
     name: SHA256SUMS
     needs: [release, windows, linux]
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: write
     env:
@@ -158,6 +163,7 @@ jobs:
     needs: [release, windows]
     if: vars.WINGET_ENABLED == 'true'
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: vedantmgoyal9/winget-releaser@v2
         with:
