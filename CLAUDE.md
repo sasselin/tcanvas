@@ -139,6 +139,9 @@ cargo build --release --target x86_64-pc-windows-gnu -p tcanvas   # Windows cros
 - **Keep them current**: any change that alters what the UI looks like (layout, colors, texts,
   new panel...) reruns `./scripts/screenshots.sh`; look at the PNGs, then commit them with the
   change. A notable new screen gets its own scene and a README image.
+- `demo.gif` (top of the README) comes from the `demo` scene: it writes frames to
+  `target/demo-frames/` and `screenshots.sh` assembles them with `ffmpeg` (12 fps, own palette).
+  Keep it short and light (a few hundred KB).
 - Scenes use the English UI and fake but realistic content (`/home/me/...`, no real data).
 - The WSL GPU driver crashes in headless rendering: the script uses Mesa's lavapipe
   (`VK_ICD_FILENAMES`, needs `mesa-vulkan-drivers`).

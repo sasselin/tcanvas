@@ -1,5 +1,11 @@
 # tcanvas
 
+[![CI](https://github.com/sasselin/tcanvas/actions/workflows/ci.yml/badge.svg)](https://github.com/sasselin/tcanvas/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/sasselin/tcanvas)](https://github.com/sasselin/tcanvas/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/sasselin/tcanvas/total)](https://github.com/sasselin/tcanvas/releases)
+![Platforms: Windows (WSL), Linux](https://img.shields.io/badge/platforms-Windows%20(WSL)%20%7C%20Linux-informational)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
+
 All your WSL terminals on an **infinite canvas**, Figma- or Miro-style. No more tabs: every
 terminal is a card you can move and resize. Group them by project, filter them, jump straight to
 the one you need, and get notified when one of them gets stuck.
@@ -16,6 +22,8 @@ for watching what Claude (or any other AI agent) is doing while it works.
   (set `TCANVAS_LANG=en` or `TCANVAS_LANG=fr` to override; any language other than French
   falls back to English).
 
+![Demo: from the overview into a project, Claude Code writes files, the Changes panel follows each diff live, then the card pulses when Claude asks before running the tests](docs/screenshots/demo.gif)
+
 ![The canvas: several projects, each a group linked to its folder with a Claude Code session and its tools; wires between related groups, statuses and the minimap](docs/screenshots/overview.png)
 
 ## Features
@@ -28,20 +36,26 @@ for watching what Claude (or any other AI agent) is doing while it works.
   terminals between groups, and nothing ever overlaps.
 - **Linked folder**: new terminals in a group open in its folder, picked with a WSL folder browser.
 - **Live changes**: modified files, their diffs against `HEAD`, and the branch's recent commits.
+- **Free grid**: inside a group, use the whole canvas: no frame, the group's label becomes a bar
+  pinned at the top left, and terminals stay in the group wherever they are dropped.
 - **Status and notifications**: stalled, waiting for input, failed, long command finished,
-  terminal stopped, as Windows toasts and a pulsing border on the card.
+  terminal stopped, as in-app toasts, desktop notifications when the window is in the background
+  (Windows toasts, D-Bus on Linux) and a pulsing border on the card.
 - **Status filters, text filter and a "go to" palette** across all projects.
 - **Wires between groups** to show how projects relate (an API and its front end, the infra they
-  run on); a click flies to the other group. Inside a project's space, linked groups show as
-  chips on the side of the frame that open them.
+  run on); a click flies to the other group. Inside a project's space, every group reachable
+  through its wires (the whole chain) shows as a `⇄ name` chip in one row under the label.
 - **Clipboard** like Windows Terminal: selection copied on release, right-click or
   `Ctrl+Shift+V` to paste.
 - **Clean shutdown**: closing a terminal really stops its shell and every process it started.
-- **Persistent layout**: cards, groups, wires, the open project and the view are saved.
+  A terminal whose session ended offers **Restart** or **Remove**.
+- **Persistent layout**: cards, groups, wires, the open project, the view and the free grid
+  option are saved.
 - **Updates from the app**: a new release shows a toast and an **Update** button with its
   release notes; one click downloads it, checks it against `SHA256SUMS`, swaps the binaries and
   restarts (terminals keep running). After an update, "What's new" lists the changes. Click the
-  version in the toolbar to read them again. `TCANVAS_NO_UPDATE_CHECK=1` turns the check off.
+  version at the right end of the toolbar to read them again (development builds show the commits
+  since the last release, e.g. `0.1.1+3-gd44468c`). `TCANVAS_NO_UPDATE_CHECK=1` turns the check off.
 
 ![A project's space: Claude Code asking before running the tests, and chips to the linked groups](docs/screenshots/project.png)
 
@@ -150,7 +164,8 @@ Agent commands: `tcanvas-agent` (server mode, used by the app), `tcanvas-agent i
 | Right-click inside a terminal · Alt + right-click | Paste · tmux's own menu |
 | **Alt + drag** from a group's label onto another group | Link the two groups with a **wire** |
 | Click a wire · right-click | Fly to the other group · delete the wire |
-| Click a linked-group chip (`→ web`) in a project's space | Open that group's space |
+| Click a linked-group chip (`⇄ web`) in a project's space | Open that group's space |
+| **Free grid** in the top bar (inside a group) | Toggle the free grid: no frame, the whole canvas belongs to the open group |
 | Click the minimap | Go there |
 | Group label: drag · **double-click** · right-click | Move it with its cards · **rename in place** (Enter confirms, Esc cancels) · menu: new terminal here, rename, linked folder, color, remove the frame (keep the terminals), close the group |
 | **×** on a group's label | Close the group **and all its terminals**, after confirmation (lists the running commands) |
@@ -173,12 +188,14 @@ Global shortcuts (they work even when a terminal has the keyboard):
 | `Ctrl+Shift+0` | Show all (in the open space) |
 
 Ctrl+C, Ctrl+K, Ctrl+P, Ctrl+plus/minus, Esc, Tab… go to the terminal. Ctrl+V and `Ctrl+Shift+V` paste.
-A mouse selection (in tmux) is copied to the Windows clipboard; `Ctrl+Shift+C` never sends ^C.
+A mouse selection (in tmux) is copied to the system clipboard; `Ctrl+Shift+C` never sends ^C.
 
 **Spaces**: each project is a separate canvas. Only one is visible at a time; a terminal created
 while a project is open belongs to it. Terminals outside any project only appear in **All**.
 A project always opens framed on its whole content; **All** restores the overview you left.
-The open project and the view are saved.
+The open project and the view are saved. With **Free grid** on, a group's space has no frame:
+its label is a bar pinned at the top left (rename, folder, new terminal, changes, close) and a
+terminal dropped anywhere stays in the group.
 
 **Nothing overlaps**: a growing group pushes neighboring groups (and their terminals) aside;
 a terminal outside any group, dropped or created against a frame, jumps to the nearest free spot;
@@ -193,14 +210,16 @@ the filter and return to the previous view. Other terminals are dimmed, never hi
 
 **Groups**: a terminal belongs to one group, and the group's frame **always wraps its terminals**
 (it grows and shrinks with them). While you drag a terminal, its group's frame stays put: drop it
-outside to take it out of the group, drop it on another frame to move it there.
+outside to take it out of the group, drop it on another frame to move it there. With **Free grid**
+on, the frame is never frozen and a terminal dropped anywhere stays in the open group.
 
 **Linked folder and changes**: new terminals in a linked group open in its folder. The agent scans
 the folder every 2 s (`git status` + `git diff HEAD`, untracked files included, without ever
 locking the index). The **Δ Changes** panel lists uncommitted files, most recent first, with
 `+/−` counts; files touched in the last few seconds are highlighted. Below them, the branch's
 recent commits; click a file or a commit to see its diff. With **Follow** (on by default), the
-diff of the latest modified file or commit shows up on its own; clicking a file stops following.
+diff of the latest modified file or commit shows up on its own; clicking a file or a commit
+stops following.
 A ✎ on another project's chip means files are being written there right now. Outside git: list
 of files modified since tracking started, without diffs.
 
@@ -209,10 +228,13 @@ the same session (`nohup`), and those that detached (`setsid`, daemons), found t
 `TMUX_PANE`. SIGHUP + SIGTERM first, SIGKILL for the stubborn ones, then a check that nothing is
 left.
 
-**Notifications**: a Windows toast (and a pulsing border on the card) when a terminal is stalled
+**Notifications**: a toast in the app and a pulsing border on the card (plus a desktop
+notification, Windows toast or D-Bus on Linux, when the window is in the background) when a
+terminal is stalled
 (no output for 60 s with an idle CPU; adjustable per card), waits for an answer (`[y/N]`,
 `password:`…), fails (exit code ≠ 0, except Ctrl+C), finishes a command that took more than 30 s,
-or stops. Nothing if you are already looking at that terminal.
+or stops. Nothing if you are already looking at that terminal. In-app notices also confirm a
+copy, or that a terminal moved to another group (click: go there), without any alert.
 
 The icon (`assets/icon.svg`, with an `icon-small.svg` variant for 16–32 px) is embedded in the
 Windows exe (`crates/app/build.rs`, `embed-resource` + mingw-w64's `windres`) and in the window.
@@ -232,20 +254,22 @@ The workspace is organized in **vertical slices**:
 ```
 crates/protocol   app ⇄ agent messages (serde, one JSON line per message)
 crates/agent      features/{tmux, status, hooks, kill, changes, serve}
-crates/app        shell/ (world, event bus, i18n, agent launch, theme, fonts)
+crates/app        shell/ (world, event bus, i18n, agent launch, theme, fonts, widgets, version)
                   features/{canvas, terminal_card, projects, spaces, changes, wires,
-                            filters, jump, notifications, agent_link, persistence}
+                            filters, jump, notifications, agent_link, persistence, updates}
 ```
 
 Slices never call each other: they read the `World` and emit `Event`s that the `shell`
 dispatches to all of them.
 
-The canvas is saved to `%APPDATA%\tcanvas\config\layout.json` (atomic writes; an unreadable file
+The canvas is saved to `%APPDATA%\tcanvas\config\layout.json` (`~/.config/tcanvas/layout.json`
+on Linux; atomic writes; an unreadable file
 is set aside, never overwritten). Orphaned tmux sessions (`tc_*`) are adopted again automatically.
 
 Useful variables: `TCANVAS_TMUX_SOCKET` (tmux socket, default `tcanvas`), `TCANVAS_CONFIG_DIR`,
 `TCANVAS_AGENT` (path of the agent inside WSL; disables the self-installation), `TCANVAS_AGENT_BIN`
-(build time: prebuilt agent to embed instead of building it), `TCANVAS_LANG` (`en` or `fr`).
+(build time: prebuilt agent to embed instead of building it), `TCANVAS_LANG` (`en` or `fr`),
+`TCANVAS_NO_UPDATE_CHECK=1` (no update check).
 
 ## Development
 

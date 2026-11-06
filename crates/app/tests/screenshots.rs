@@ -101,15 +101,30 @@ const CLAUDE_W: usize = 70;
 
 /// Claude Code in the api project, asking before running the tests.
 fn claude_api() -> String {
-    let mut v = vec![user("add rate limiting to the login route"), String::new(), say("I'll add a per-IP limiter and put it in front of /login."), String::new()];
-    v.extend(tool("Read", "src/routes/auth.rs", "Read 84 lines"));
-    v.extend(tool("Write", "src/middleware/rate_limit.rs", "Wrote 48 lines to src/middleware/rate_limit.rs"));
-    v.extend(tool("Update", "src/routes/auth.rs", "Updated src/routes/auth.rs with 2 additions and 1 removal"));
-    v.push(format!("     {GRAY}13{RESET} {DIFF_ADD}+     let limit = RateLimit::per_minute(10);{RESET}"));
-    v.push(format!("     {GRAY}16{RESET} {DIFF_DEL}-         .route(\"/login\", post(login)){RESET}"));
-    v.push(format!("     {GRAY}16{RESET} {DIFF_ADD}+         .route(\"/login\", post(login).layer(limit)){RESET}"));
-    v.push(String::new());
-    v.extend(boxed(
+    let mut v = claude_api_steps().concat();
+    v.extend(claude_api_question());
+    screen(v)
+}
+
+/// Claude Code's work in the api project, one step at a time (the demo shows them one by one).
+fn claude_api_steps() -> [Vec<String>; 4] {
+    let write = tool("Write", "src/middleware/rate_limit.rs", "Wrote 48 lines to src/middleware/rate_limit.rs");
+    let mut update = tool("Update", "src/routes/auth.rs", "Updated src/routes/auth.rs with 2 additions and 1 removal");
+    update.push(format!("     {GRAY}13{RESET} {DIFF_ADD}+     let limit = RateLimit::per_minute(10);{RESET}"));
+    update.push(format!("     {GRAY}16{RESET} {DIFF_DEL}-         .route(\"/login\", post(login)){RESET}"));
+    update.push(format!("     {GRAY}16{RESET} {DIFF_ADD}+         .route(\"/login\", post(login).layer(limit)){RESET}"));
+    update.push(String::new());
+    [
+        vec![user("add rate limiting to the login route"), String::new()],
+        vec![say("I'll add a per-IP limiter and put it in front of /login."), String::new()].into_iter().chain(tool("Read", "src/routes/auth.rs", "Read 84 lines")).collect(),
+        write,
+        update,
+    ]
+}
+
+/// Claude Code asking before running the tests.
+fn claude_api_question() -> Vec<String> {
+    boxed(
         CLAUDE_W,
         CLAUDE,
         &[
@@ -123,8 +138,7 @@ fn claude_api() -> String {
             "  2. Yes, and don't ask again for cargo test commands".into(),
             format!("  3. No, and tell Claude what to do differently {GRAY}(esc){RESET}"),
         ],
-    ));
-    screen(v)
+    )
 }
 
 /// Claude Code in the web project, at work.
@@ -500,6 +514,154 @@ fn folder() {
     assert!(h.query_by_label("Link this folder").is_some());
     h.event(egui::Event::PointerGone);
     save(&mut h, "folder");
+}
+
+/// The README's animated demo: frames rendered here, assembled into `demo.gif` by
+/// `./scripts/screenshots.sh` (ffmpeg). Smaller than the stills: the GIF must stay light.
+const DEMO_SIZE: Vec2 = vec2(1280.0, 760.0);
+const DEMO_PIXELS_PER_POINT: f32 = 1.0;
+/// One frame kept every `DEMO_STEPS_PER_FRAME` app steps (60 per second): 12 frames per second.
+const DEMO_STEPS_PER_FRAME: usize = 5;
+
+/// Where the demo frames go (the script reads them from there).
+fn demo_frames_dir() -> PathBuf {
+    std::env::var_os("TCANVAS_DEMO_FRAMES").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/demo-frames"))
+}
+
+/// A file of the demo's changes: path, kind, lines added and removed, age in seconds.
+type DemoFile = (&'static str, ChangeKind, u32, u32, u64);
+
+/// Records the app's frames while it runs, and plays the agent's part for the diffs.
+struct Recorder {
+    dir: PathBuf,
+    frame: usize,
+    /// Agent commands already answered.
+    answered: usize,
+    /// The uncommitted files of `shop-api`. Sent again with fresh dates between frames: the panel
+    /// reads the wall clock, and rendering takes far longer than the time the demo shows.
+    files: Vec<DemoFile>,
+}
+
+impl Recorder {
+    fn new() -> Self {
+        let dir = demo_frames_dir();
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        Self { dir, frame: 0, answered: 0, files: vec![] }
+    }
+
+    /// The agent reports the uncommitted files of `shop-api`.
+    fn set_files(&mut self, h: &mut Harness<'_, App>, files: &[DemoFile]) {
+        self.files = files.to_vec();
+        self.send_files(h);
+    }
+
+    fn send_files(&self, h: &mut Harness<'_, App>) {
+        let now = unix_now();
+        let files = self.files.iter().map(|(path, kind, added, removed, age)| FileChange {
+            path: (*path).into(),
+            kind: kind.clone(),
+            added: Some(*added),
+            removed: Some(*removed),
+            mtime: now - age,
+            binary: false,
+        });
+        let set = ChangeSet { files: files.collect(), ..api_changes() };
+        h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Changes(set))]);
+    }
+
+    /// Answers the diffs the panel asked for since last time.
+    fn answer_diffs(&mut self, h: &mut Harness<'_, App>) {
+        let asked: Vec<_> = h.state().agent_sent()[self.answered..].to_vec();
+        self.answered += asked.len();
+        for cmd in asked {
+            if let protocol::AgentCmd::Diff { key, file } = cmd {
+                let text = demo_diff(&file).into();
+                h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Diff { key, file, text, truncated: false, problem: None })]);
+            }
+        }
+    }
+
+    /// Runs the app for `secs` (app time) and keeps 12 frames per second.
+    fn play(&mut self, h: &mut Harness<'_, App>, secs: f32) {
+        for i in 0..(secs * 60.0).round() as usize {
+            // Right after a frame, so the panel has settled before the next one.
+            if i % DEMO_STEPS_PER_FRAME == 1 {
+                self.send_files(h);
+            }
+            self.answer_diffs(h);
+            h.step();
+            if i % DEMO_STEPS_PER_FRAME == 0 {
+                let image = h.render().expect("wgpu render (is a GPU adapter available?)");
+                image.save(self.dir.join(format!("{:04}.png", self.frame))).unwrap();
+                self.frame += 1;
+            }
+        }
+    }
+}
+
+/// Shows `lines` in the api project's Claude Code card, with that status.
+fn api_claude(h: &mut Harness<'_, App>, lines: Vec<String>, status: TermStatus) {
+    let app = h.state_mut();
+    app.cards.show_canned(&app.world, "t0", screen(lines).as_bytes());
+    let session = app.world.card("t0").unwrap().session();
+    let tail = vec!["Do you want to proceed?".into()];
+    let info = SessionInfo { session, status, command: Some("claude".into()), cwd: None, last_exit: None, last_duration_secs: None, tail };
+    app.dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
+}
+
+fn demo_diff(file: &str) -> &'static str {
+    match file {
+        "src/middleware/rate_limit.rs" => RATE_LIMIT_DIFF,
+        "src/routes/auth.rs" => AUTH_DIFF,
+        _ => "@@ -14,6 +14,7 @@ edition = \"2024\"\n [dependencies]\n axum = \"0.8\"\n+dashmap = \"6\"\n serde = { version = \"1\", features = [\"derive\"] }\n",
+    }
+}
+
+const RATE_LIMIT_DIFF: &str = "@@ -0,0 +1,48 @@\n+//! Per-IP rate limiting for sensitive routes.\n+\n+use std::net::IpAddr;\n+use std::time::{Duration, Instant};\n+\n+use dashmap::DashMap;\n+\n+pub struct RateLimit {\n+    per: Duration,\n+    max: u32,\n+    hits: DashMap<IpAddr, (Instant, u32)>,\n+}\n+\n+impl RateLimit {\n+    pub fn per_minute(max: u32) -> Self {\n+        Self { per: Duration::from_secs(60), max, hits: DashMap::new() }\n+    }\n+\n+    /// `Err(retry_after)` once `ip` went over the limit.\n+    pub fn check(&self, ip: IpAddr) -> Result<(), Duration> {\n";
+
+const AUTH_DIFF: &str = "@@ -12,9 +12,10 @@ use crate::middleware::RateLimit;\n pub fn router(state: AppState) -> Router {\n+    let limit = RateLimit::per_minute(10);\n     Router::new()\n         .route(\"/health\", get(health))\n-        .route(\"/login\", post(login))\n+        .route(\"/login\", post(login).layer(limit))\n         .route(\"/logout\", post(logout))\n         .with_state(state)\n }\n";
+
+#[test]
+#[ignore = "renders README screenshots; run ./scripts/screenshots.sh"]
+fn demo() {
+    let mut h = harness_sized("demo", DEMO_SIZE, DEMO_PIXELS_PER_POINT);
+    demo_canvas(&mut h);
+    let [ask, read, write, update] = claude_api_steps();
+    api_claude(&mut h, ask.clone(), TermStatus::Running);
+    let mut rec = Recorder::new();
+    let cargo = || -> DemoFile { ("Cargo.toml", ChangeKind::Modified, 1, 0, 300) };
+    rec.set_files(&mut h, &[cargo()]);
+    ctrl_shift(&h, Key::Num0);
+    steps(&mut h, 45);
+
+    // The overview, then a flight into the shop's API.
+    rec.play(&mut h, 1.5);
+    ctrl_shift(&h, Key::Num1);
+    rec.play(&mut h, 1.2);
+    h.get_by_label("Δ Changes (1)").click();
+    h.step();
+    h.event(egui::Event::PointerGone);
+    rec.play(&mut h, 0.8);
+
+    // Claude at work: every file it writes shows up in the panel, with its diff.
+    let mut lines = [ask, read].concat();
+    api_claude(&mut h, lines.clone(), TermStatus::Running);
+    rec.play(&mut h, 1.2);
+    lines.extend(write);
+    api_claude(&mut h, lines.clone(), TermStatus::Running);
+    rec.set_files(&mut h, &[("src/middleware/rate_limit.rs", ChangeKind::Untracked, 48, 0, 0), cargo()]);
+    rec.play(&mut h, 2.0);
+    lines.extend(update);
+    api_claude(&mut h, lines.clone(), TermStatus::Running);
+    rec.set_files(&mut h, &[("src/routes/auth.rs", ChangeKind::Modified, 2, 1, 0), ("src/middleware/rate_limit.rs", ChangeKind::Untracked, 48, 0, 3), cargo()]);
+    rec.play(&mut h, 2.0);
+
+    // It asks before running the tests: the card pulses and a notice says so.
+    lines.extend(claude_api_question());
+    api_claude(&mut h, lines, TermStatus::WaitingInput);
+    rec.play(&mut h, 3.5);
+    eprintln!("wrote {} frames to {}", rec.frame, rec.dir.display());
 }
 
 /// Keeps the fixtures honest in the normal test run, without rendering.
