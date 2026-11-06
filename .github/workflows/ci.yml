@@ -44,12 +44,34 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-gnu, x86_64-unknown-linux-musl
+      # Shared with release.yml, which restores it: release builds start warm.
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-release
       - name: System packages
-        run: sudo apt-get update && sudo apt-get install -y mingw-w64 musl-tools nsis
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 musl-tools nsis
       - run: cargo build --release --target x86_64-pc-windows-gnu -p tcanvas
       - name: Installer
         run: makensis -V2 -DVERSION=0.0.0 -DEXE="$PWD/target/x86_64-pc-windows-gnu/release/tcanvas.exe" -DOUTFILE="$PWD/setup.exe" installer/tcanvas.nsi
+
+  # The same build as release.yml's Linux archive, on the same runner: it keeps the cache that
+  # the release restores warm (an unused cache expires after 7 days).
+  linux-release:
+    name: Linux release build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-release
+      - name: System packages
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libxkbcommon-dev libwayland-dev
+      - run: cargo build --release -p tcanvas
+      - run: cargo build --release -p tcanvas-agent --target x86_64-unknown-linux-musl
 
   # Release notes come from commit messages: PR titles (squash merge) must be Conventional Commits.
   pr-title:

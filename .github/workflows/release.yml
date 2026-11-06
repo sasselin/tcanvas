@@ -81,8 +81,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-gnu, x86_64-unknown-linux-musl
+      # Kept warm by ci.yml on every push to main; restored only, so a release never replaces it.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-release
+          save-if: false
       - name: System packages
-        run: sudo apt-get update && sudo apt-get install -y mingw-w64 musl-tools nsis
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 musl-tools nsis
       # build.rs builds the static Linux agent and embeds it in the exe.
       - run: cargo build --release --target x86_64-pc-windows-gnu -p tcanvas
       - name: Installer
@@ -118,6 +123,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-unknown-linux-musl
+      # Kept warm by ci.yml's linux-release job (same runner image).
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-release
+          save-if: false
       - name: System packages
         run: sudo apt-get update && sudo apt-get install -y musl-tools libxkbcommon-dev libwayland-dev
       - run: cargo build --release -p tcanvas
