@@ -514,6 +514,30 @@ fn palette_finds_projects() {
 }
 
 #[test]
+fn dragging_a_project_chip_reorders_the_groups() {
+    let dir = temp_dir("project-chip-drag");
+    let mut h = harness(&dir);
+    for (n, name) in ["api", "web", "db"].into_iter().enumerate() {
+        add_project(&mut h, name, Rect::from_min_size(pos2(n as f32 * 2000.0, 0.0), Vec2::new(600.0, 400.0)));
+    }
+    steps(&mut h, 2);
+    let order = |h: &Harness<'_, App>| h.state().world.projects.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+    let (api, db) = (widget_rect(&h, "● api"), widget_rect(&h, "● db"));
+
+    drag_with(&mut h, api.center(), pos2(db.max.x + 10.0, db.center().y), Modifiers::NONE);
+    assert_eq!(order(&h), ["web", "db", "api"], "dropped after the last chip");
+    assert_eq!(h.state().world.space, None, "a drag does not open the space");
+    let (web, api) = (widget_rect(&h, "● web"), widget_rect(&h, "● api"));
+    drag_with(&mut h, api.center(), pos2(web.min.x - 2.0, web.center().y), Modifiers::NONE);
+    assert_eq!(order(&h), ["api", "web", "db"], "dropped before the first chip");
+
+    // A plain click still opens the space without moving anything.
+    h.get_by_label("● db").click();
+    steps(&mut h, 2);
+    assert_eq!((order(&h), h.state().world.space.as_deref()), (vec!["api".to_string(), "web".into(), "db".into()], Some("p-db")));
+}
+
+#[test]
 fn clicking_a_project_chip_opens_that_project_alone() {
     let dir = temp_dir("project-chip");
     let mut h = harness(&dir);
