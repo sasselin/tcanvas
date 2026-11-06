@@ -2640,7 +2640,7 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "protocol"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -3262,7 +3262,7 @@ dependencies = [
 
 [[package]]
 name = "tcanvas"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "alacritty_terminal",
  "arboard",
@@ -3286,7 +3286,7 @@ dependencies = [
 
 [[package]]
 name = "tcanvas-agent"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "libc",
  "protocol",
