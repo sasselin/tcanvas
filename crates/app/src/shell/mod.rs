@@ -28,6 +28,9 @@ use event::Event;
 use i18n::t;
 use world::{Card, World};
 
+/// The running build's version (the workspace version, set by release-plz).
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub struct Config {
     pub launcher: Launcher,
     pub agent: AgentMode,
@@ -88,6 +91,9 @@ pub struct App {
     agent: AgentLink,
     persistence: Persistence,
     shortcuts: Vec<Shortcut>,
+    /// Shown in the toolbar: `VERSION`, pinned by the screenshot scenes so the README
+    /// images don't change on every release.
+    pub version: &'static str,
 }
 
 impl App {
@@ -113,6 +119,7 @@ impl App {
             agent: AgentLink::new(ctx.clone(), config.agent),
             persistence,
             shortcuts: Vec::new(),
+            version: VERSION,
         }
     }
 
@@ -216,6 +223,7 @@ impl App {
                 let vp = self.canvas.viewport();
                 self.spaces.ui(ui, &self.world, vp, &mut events);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.label(RichText::new(format!("v{}", self.version)).small().color(theme::TEXT_DIM));
                     self.agent.status_ui(ui);
                     self.changes.toolbar_ui(ui, &self.world, &mut events);
                     if let Some(err) = &self.persistence.last_error {

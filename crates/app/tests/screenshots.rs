@@ -255,7 +255,9 @@ fn harness_sized(name: &str, size: Vec2, pixels_per_point: f32) -> Harness<'stat
     let dir = std::env::temp_dir().join(format!("tcanvas-shot-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     Harness::builder().with_size(size).with_pixels_per_point(pixels_per_point).with_step_dt(1.0 / 60.0).wgpu().build_eframe(move |cc| {
-        let app = App::new(&cc.egui_ctx, Config { launcher: Launcher::Disabled, agent: AgentMode::Disabled, config_dir: dir, os_toasts: false });
+        let mut app = App::new(&cc.egui_ctx, Config { launcher: Launcher::Disabled, agent: AgentMode::Disabled, config_dir: dir, os_toasts: false });
+        // A fixed version: the images must not change on every release.
+        app.version = "X.X.X";
         add_windows_symbols(&cc.egui_ctx);
         app
     })
