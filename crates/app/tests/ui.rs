@@ -1813,6 +1813,50 @@ fn the_version_label_opens_whats_new() {
 }
 
 #[test]
+fn whats_new_checks_for_updates_on_request() {
+    let dir = temp_dir("check-now");
+    let mut h = harness(&dir);
+    steps(&mut h, 2);
+    h.state_mut().updates.set_fetcher(|| Ok(vec![]));
+    h.get_by_label(&format!("v{}", tcanvas::shell::version::current())).click();
+    steps(&mut h, 3);
+    h.get_by_label("Rechercher des mises à jour").click();
+    wait_for_label(&mut h, "Vous avez la dernière version");
+
+    // A newer release turns up: its notes replace "What's new", with no toast.
+    h.state_mut().updates.set_fetcher(|| Ok(vec![release("99.0.1", "### Fixed\n\n- Newest fix")]));
+    h.get_by_label("Rechercher des mises à jour").click();
+    wait_for_label(&mut h, "tcanvas v99.0.1 est disponible");
+    h.get_by_label("•  Newest fix");
+    h.get_by_label("Mettre à jour et redémarrer");
+    assert_eq!(h.state().pending_toasts(), 0);
+}
+
+#[test]
+fn whats_new_check_button_in_english() {
+    let dir = temp_dir("check-now-en");
+    let mut h = harness_in(&dir, Lang::En);
+    steps(&mut h, 2);
+    h.state_mut().updates.set_fetcher(|| Err("offline".into()));
+    h.get_by_label(&format!("v{}", tcanvas::shell::version::current())).click();
+    steps(&mut h, 3);
+    h.get_by_label("Check for updates").click();
+    wait_for_label(&mut h, "Check failed");
+}
+
+/// Steps the harness until `label` shows up (an answer from a background thread).
+fn wait_for_label(h: &mut Harness<'_, App>, label: &str) {
+    for _ in 0..200 {
+        steps(h, 1);
+        if h.query_by_label(label).is_some() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("{label}: never shown");
+}
+
+#[test]
 fn whats_new_shows_once_after_an_update() {
     let dir = temp_dir("whats-new");
     std::fs::create_dir_all(&dir).unwrap();

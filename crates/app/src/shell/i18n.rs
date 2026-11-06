@@ -310,6 +310,10 @@ pub struct Texts {
     pub release_page: &'static str,
     pub whats_new_title: fn(&str) -> String,
     pub no_release_notes: &'static str,
+    pub check_updates: &'static str,
+    pub checking_updates: &'static str,
+    pub up_to_date: &'static str,
+    pub check_failed: &'static str,
 }
 
 pub const EN: Texts = Texts {
@@ -504,6 +508,10 @@ pub const EN: Texts = Texts {
     release_page: "View on GitHub",
     whats_new_title: |v| format!("What's new in v{v}"),
     no_release_notes: "No release notes for this version.",
+    check_updates: "Check for updates",
+    checking_updates: "Checking…",
+    up_to_date: "You have the latest version",
+    check_failed: "Check failed",
 };
 
 pub const FR: Texts = Texts {
@@ -698,6 +706,10 @@ pub const FR: Texts = Texts {
     release_page: "Voir sur GitHub",
     whats_new_title: |v| format!("Quoi de neuf dans la v{v}"),
     no_release_notes: "Pas de notes pour cette version.",
+    check_updates: "Rechercher des mises à jour",
+    checking_updates: "Vérification…",
+    up_to_date: "Vous avez la dernière version",
+    check_failed: "Échec de la vérification",
 };
 
 #[cfg(test)]

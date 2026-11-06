@@ -1,7 +1,8 @@
 //! Updates: checks GitHub for a newer release (at startup, then every 6 hours), warns once
 //! per version (toast), shows its release notes, and on request downloads it, swaps the
 //! binaries in place and restarts. After an update, the first start shows "What's new" from
-//! the CHANGELOG embedded in the new build.
+//! the CHANGELOG embedded in the new build. That dialog (also opened from the version label)
+//! can check for a newer release right away.
 //!
 //! `TCANVAS_NO_UPDATE_CHECK=1` turns the check off; tests turn it off through `Config`.
 
@@ -11,6 +12,7 @@ pub mod release;
 pub mod version;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
@@ -28,6 +30,8 @@ const STATE_FILE: &str = "updates.json";
 
 enum Msg {
     Checked(Vec<Release>),
+    /// The answer to a check the user asked for.
+    CheckedNow(Result<Vec<Release>, String>),
     Installed(Result<PathBuf, String>),
 }
 
@@ -53,6 +57,17 @@ pub enum Dialog {
     WhatsNew(Vec<Section>),
 }
 
+/// A check asked for from the "What's new" dialog.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ManualCheck {
+    Checking,
+    UpToDate,
+    Failed(String),
+}
+
+/// Fetches the published releases (GitHub; tests swap it out).
+pub type Fetcher = Arc<dyn Fn() -> Result<Vec<Release>, String> + Send + Sync>;
+
 /// What the app remembers between runs (`updates.json` in the config folder).
 #[derive(Serialize, Deserialize, Default)]
 struct State {
@@ -70,6 +85,8 @@ pub struct Updates {
     pub dialog: Option<Dialog>,
     /// The version a toast was already shown for.
     notified: Option<String>,
+    manual: Option<ManualCheck>,
+    fetch: Fetcher,
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
 }
@@ -87,7 +104,7 @@ impl Updates {
                 spawn_checker(ctx.clone(), tx.clone());
             }
         }
-        Self { ctx, running: running.to_string(), pending: Vec::new(), phase: Phase::Idle, dialog, notified: None, tx, rx }
+        Self { ctx, running: running.to_string(), pending: Vec::new(), phase: Phase::Idle, dialog, notified: None, manual: None, fetch: Arc::new(install::fetch_releases), tx, rx }
     }
 
     pub fn pending(&self) -> &[Release] {
@@ -96,6 +113,28 @@ impl Updates {
 
     pub fn phase(&self) -> &Phase {
         &self.phase
+    }
+
+    pub fn manual_check(&self) -> Option<&ManualCheck> {
+        self.manual.as_ref()
+    }
+
+    /// Replaces the GitHub query used by "Check for updates" (tests).
+    pub fn set_fetcher(&mut self, fetch: impl Fn() -> Result<Vec<Release>, String> + Send + Sync + 'static) {
+        self.fetch = Arc::new(fetch);
+    }
+
+    /// Looks for a newer release now, in the background; `poll` picks up the answer.
+    pub fn check_now(&mut self) {
+        if self.manual == Some(ManualCheck::Checking) {
+            return;
+        }
+        self.manual = Some(ManualCheck::Checking);
+        let (tx, ctx, fetch) = (self.tx.clone(), self.ctx.clone(), self.fetch.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::CheckedNow(fetch()));
+            ctx.request_repaint();
+        });
     }
 
     /// Pretends to run `version` (screenshots: images must not change on every release).
@@ -120,6 +159,24 @@ impl Updates {
                         self.notified = Some(latest.version.clone());
                         events.push(Event::UpdateAvailable(latest.version.clone()));
                     }
+                }
+                Msg::CheckedNow(Ok(list)) => {
+                    // The user is looking at the dialog: show the notes instead of a toast.
+                    self.pending = release::pending(list, &self.running, cfg!(windows));
+                    match self.pending.first() {
+                        Some(latest) => {
+                            self.notified = Some(latest.version.clone());
+                            self.manual = None;
+                            if matches!(self.dialog, Some(Dialog::WhatsNew(_))) && self.phase == Phase::Idle {
+                                self.dialog = Some(Dialog::ReleaseNotes);
+                            }
+                        }
+                        None => self.manual = Some(ManualCheck::UpToDate),
+                    }
+                }
+                Msg::CheckedNow(Err(error)) => {
+                    eprintln!("update check failed: {error}");
+                    self.manual = Some(ManualCheck::Failed(error));
                 }
                 Msg::Installed(Ok(exe)) => self.phase = Phase::Ready(exe),
                 Msg::Installed(Err(error)) => {
@@ -169,6 +226,9 @@ impl Updates {
     pub fn toolbar_ui(&mut self, ui: &mut egui::Ui, shown: &str) {
         let label = ui.add(egui::Label::new(RichText::new(format!("v{shown}")).small().color(theme::TEXT_DIM)).sense(Sense::click())).on_hover_text(t().version_hint);
         if label.clicked() {
+            if self.manual != Some(ManualCheck::Checking) {
+                self.manual = None;
+            }
             self.dialog = Some(Dialog::WhatsNew(changelog::sections_between(changelog::EMBEDDED, None, &self.running)));
         }
         match self.phase.clone() {
@@ -238,9 +298,29 @@ impl Updates {
                         notes_ui(ui, sections);
                     }
                     ui.add_space(8.0);
-                    if ui.button(t().close).clicked() {
-                        close = true;
-                    }
+                    ui.horizontal(|ui| {
+                        if ui.button(t().close).clicked() {
+                            close = true;
+                        }
+                        let checking = self.manual == Some(ManualCheck::Checking);
+                        if ui.add_enabled(!checking, egui::Button::new(t().check_updates)).clicked() {
+                            self.check_now();
+                        }
+                        match &self.manual {
+                            Some(ManualCheck::Checking) => {
+                                ui.spinner();
+                                ui.label(RichText::new(t().checking_updates).color(theme::TEXT_DIM));
+                            }
+                            Some(ManualCheck::UpToDate) => {
+                                ui.label(RichText::new(t().up_to_date).color(theme::TEXT_DIM));
+                            }
+                            Some(ManualCheck::Failed(error)) => {
+                                let red = theme::status_color(Some(protocol::TermStatus::Exited(1)));
+                                ui.label(RichText::new(t().check_failed).color(red)).on_hover_text(error.as_str());
+                            }
+                            None => {}
+                        }
+                    });
                 }
             }
         });
@@ -377,6 +457,54 @@ mod tests {
         assert!(events.is_empty() && u.pending().is_empty());
         u.handle(&Event::ShowReleaseNotes);
         assert_eq!(u.dialog, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Polls until the background check has answered.
+    fn wait_for_check(u: &mut Updates, events: &mut Vec<Event>) {
+        for _ in 0..200 {
+            u.poll(events);
+            if u.manual_check() != Some(&ManualCheck::Checking) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("the check never answered");
+    }
+
+    #[test]
+    fn checking_now_opens_the_notes_of_a_newer_release_without_a_toast() {
+        let dir = temp("now-newer");
+        let mut u = Updates::new(egui::Context::default(), &dir, "0.1.0", false);
+        u.set_fetcher(|| Ok(vec![release("0.1.1")]));
+        u.dialog = Some(Dialog::WhatsNew(vec![]));
+        let mut events = vec![];
+        u.check_now();
+        wait_for_check(&mut u, &mut events);
+        assert_eq!(u.dialog, Some(Dialog::ReleaseNotes));
+        assert_eq!(u.manual_check(), None);
+        assert!(events.is_empty(), "no toast");
+        // The background check does not announce it again.
+        u.offer(vec![release("0.1.1")]);
+        u.poll(&mut events);
+        assert!(events.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn checking_now_reports_up_to_date_or_the_error() {
+        let dir = temp("now-same");
+        let mut u = Updates::new(egui::Context::default(), &dir, "0.2.0", false);
+        u.dialog = Some(Dialog::WhatsNew(vec![]));
+        u.set_fetcher(|| Ok(vec![release("0.1.1")]));
+        u.check_now();
+        wait_for_check(&mut u, &mut vec![]);
+        assert_eq!(u.manual_check(), Some(&ManualCheck::UpToDate));
+        assert!(matches!(u.dialog, Some(Dialog::WhatsNew(_))));
+        u.set_fetcher(|| Err("offline".into()));
+        u.check_now();
+        wait_for_check(&mut u, &mut vec![]);
+        assert_eq!(u.manual_check(), Some(&ManualCheck::Failed("offline".into())));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
