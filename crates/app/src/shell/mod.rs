@@ -191,6 +191,7 @@ impl App {
         self.cards.poll(&mut self.world, &mut events);
         self.changes.poll(&self.world, &mut events);
         self.notifications.poll(&ctx, &mut events);
+        self.notifications.acknowledge_watched(&mut self.world);
         self.updates.poll(&mut events);
 
         // Two fixed rows: actions and projects, then search and filters. No centered

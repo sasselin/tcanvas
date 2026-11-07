@@ -107,6 +107,20 @@ impl Notifications {
         }
     }
 
+    /// The terminal the user is looking at (window focused, card focused) needs no alert:
+    /// one raised while they were away is acknowledged as soon as they look at it again.
+    pub fn acknowledge_watched(&mut self, world: &mut World) {
+        if !world.window_focused {
+            return;
+        }
+        let Some(id) = world.focused.clone() else { return };
+        if let Some(card) = world.card_mut(&id) {
+            card.attention = false;
+        }
+        let target = ToastTarget::Card(id);
+        self.toasts.retain(|t| t.target != target || matches!(t.notice, Some(Notice::Moved(_) | Notice::Copied)));
+    }
+
     pub fn pending(&self) -> usize {
         self.toasts.len()
     }
@@ -278,6 +292,21 @@ mod tests {
         n.handle(&Event::Notify(id, Notice::Failed(1)), &mut w, &mut vec![]);
         assert!(!w.cards[0].attention);
         assert_eq!(n.pending(), 0);
+    }
+
+    #[test]
+    fn an_alert_raised_while_away_clears_once_the_user_looks_at_that_terminal() {
+        let (mut w, id) = world_with_card();
+        w.focused = Some(id.clone());
+        let mut n = Notifications::new(egui::Context::default(), false);
+        n.handle(&Event::Notify(id.clone(), Notice::WaitingInput), &mut w, &mut vec![]);
+        n.acknowledge_watched(&mut w);
+        assert!(w.cards[0].attention, "still away: the alert stays");
+        w.window_focused = true;
+        n.handle(&Event::Notify(id, Notice::Copied), &mut w, &mut vec![]);
+        n.acknowledge_watched(&mut w);
+        assert!(!w.cards[0].attention);
+        assert_eq!(n.pending(), 1, "only the copy confirmation is left");
     }
 
     #[test]
