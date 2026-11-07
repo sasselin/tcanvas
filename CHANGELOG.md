@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/sasselin/tcanvas/compare/v0.1.2...v0.1.3) - 2026-11-07
+
+### Added
+
+- List every shortcut and mouse gesture in a Keyboard shortcuts window
+- Show coding agents waiting for input through their hooks
+- Check for updates on demand from the What's new dialog
+- Sort group chips by name from their right-click menu
+- Reorder group chips in the top bar by dragging them
+
+### Other
+
+- Animated demo, badges and an up-to-date README
+
 ## [0.1.2](https://github.com/sasselin/tcanvas/compare/v0.1.1...v0.1.2) - 2026-11-06
 
 ### Added
