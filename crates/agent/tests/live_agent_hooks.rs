@@ -22,6 +22,11 @@ impl Server {
         assert!(out.status.success(), "tmux {args:?} failed");
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
+    /// The pane's `@tc_agent` mark, read through a format like the status loop does
+    /// (`show -v` of an unset user option fails on recent tmux).
+    fn mark(&self, session: &str) -> String {
+        self.tmux(&["display", "-p", "-t", session, "#{@tc_agent}"])
+    }
     fn type_line(&self, session: &str, line: &str) {
         self.tmux(&["send-keys", "-t", session, "-l", line]);
         self.tmux(&["send-keys", "-t", session, "Enter"]);
@@ -101,7 +106,7 @@ fn hooks_mark_the_pane_while_their_agent_runs() {
     agent.wait_status(session, "WaitingInput from the Stop hook", |i| i.status == TermStatus::WaitingInput);
     agent.wait_status(session, "Running from UserPromptSubmit", |i| i.status == TermStatus::Running);
     thread::sleep(Duration::from_secs(3));
-    assert!(server.tmux(&["show", "-p", "-t", session, "-v", "@tc_agent"]).starts_with("working "));
+    assert!(server.mark(session).starts_with("working "));
 
     // The fake agent quits; another silent command must not inherit its mark.
     server.tmux(&["send-keys", "-t", session, "C-c"]);
@@ -113,7 +118,7 @@ fn hooks_mark_the_pane_while_their_agent_runs() {
     // SessionEnd removes the mark; outside a tcanvas server the hook does nothing.
     server.type_line(session, &format!("{AGENT} hook SessionEnd </dev/null"));
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !server.tmux(&["show", "-p", "-t", session, "-v", "@tc_agent"]).is_empty() {
+    while !server.mark(session).is_empty() {
         assert!(Instant::now() < deadline, "SessionEnd did not clear the mark");
         thread::sleep(Duration::from_millis(100));
     }
