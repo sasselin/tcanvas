@@ -9,6 +9,7 @@ pub mod features {
     pub mod notifications;
     pub mod persistence;
     pub mod projects;
+    pub mod shortcuts;
     pub mod spaces;
     pub mod terminal_card;
     pub mod updates;

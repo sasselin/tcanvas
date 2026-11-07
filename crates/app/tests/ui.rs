@@ -1872,3 +1872,54 @@ fn whats_new_shows_once_after_an_update() {
     steps(&mut h, 3);
     assert!(h.state().updates.dialog.is_none());
 }
+
+#[test]
+fn ctrl_shift_k_lists_the_shortcuts_and_escape_closes_them() {
+    let dir = temp_dir("shortcuts-key");
+    let mut h = harness(&dir);
+    add_card(&mut h, "api", Pos2::ZERO);
+    steps(&mut h, 2);
+    ctrl_shift(&h, Key::K);
+    steps(&mut h, 2);
+    assert!(h.state().shortcuts_open());
+    h.get_by_label("Raccourcis clavier");
+    h.get_by_label("Ctrl+Maj+P");
+    h.get_by_label("Alt+clic droit");
+    h.key_press(Key::Escape);
+    steps(&mut h, 2);
+    assert!(!h.state().shortcuts_open());
+}
+
+#[test]
+fn the_toolbar_button_and_the_palette_open_the_shortcuts() {
+    let dir = temp_dir("shortcuts-open");
+    let mut h = harness(&dir);
+    steps(&mut h, 2);
+    h.get_by_label("⌨").click();
+    steps(&mut h, 2);
+    assert!(h.state().shortcuts_open());
+    h.get_by_label("OK").click();
+    steps(&mut h, 2);
+    assert!(!h.state().shortcuts_open());
+
+    ctrl_shift(&h, Key::P);
+    steps(&mut h, 2);
+    h.event(egui::Event::Text("raccourcis".into()));
+    steps(&mut h, 2);
+    h.key_press(Key::Enter);
+    steps(&mut h, 2);
+    assert!(!h.state().jump_open());
+    assert!(h.state().shortcuts_open());
+}
+
+#[test]
+fn shortcuts_window_in_english() {
+    let dir = temp_dir("shortcuts-en");
+    let mut h = harness_in(&dir, Lang::En);
+    steps(&mut h, 2);
+    ctrl_shift(&h, Key::K);
+    steps(&mut h, 2);
+    h.get_by_label("Keyboard shortcuts");
+    h.get_by_label("Ctrl+Shift+K");
+    h.get_by_label("This window");
+}

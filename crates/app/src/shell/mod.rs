@@ -12,7 +12,7 @@ pub mod world;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use egui::{Align, Align2, CentralPanel, FontId, Frame, Id, Key, Layout, Panel, RichText, Ui};
+use egui::{Align, Align2, CentralPanel, FontId, Frame, Id, Layout, Panel, RichText, Ui};
 
 use crate::features::agent_link::{AgentLink, AgentMode};
 use crate::features::canvas::Canvas;
@@ -22,6 +22,8 @@ use crate::features::jump::Jump;
 use crate::features::notifications::Notifications;
 use crate::features::persistence::{self, Persistence};
 use crate::features::projects::Projects;
+use crate::features::shortcuts::Shortcuts;
+use crate::features::shortcuts::keymap::{Shortcut, shortcut_of};
 use crate::features::spaces::Spaces;
 use crate::features::terminal_card::{Launcher, TerminalCards};
 use crate::features::updates::Updates;
@@ -45,39 +47,6 @@ impl Config {
     }
 }
 
-/// Global shortcuts: always for the app, even when a terminal has focus.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Shortcut {
-    Jump,
-    NewCard,
-    Search,
-    FitAll,
-    /// Project #1 to #9 (creation order).
-    Project(usize),
-    CloseCard,
-}
-
-const DIGITS: [Key; 10] = [Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
-
-fn shortcut_of(ev: &egui::Event) -> Option<Shortcut> {
-    let egui::Event::Key { key, physical_key, pressed: true, modifiers, .. } = ev else { return None };
-    if !(modifiers.ctrl && modifiers.shift && !modifiers.alt) {
-        return None;
-    }
-    // Digits: physical key, so Ctrl+Shift+1 also works on AZERTY (where 1 is on "&").
-    let digit = [physical_key.as_ref(), Some(key)].into_iter().flatten().find_map(|k| DIGITS.iter().position(|d| d == k));
-    if let Some(n) = digit {
-        return Some(if n == 0 { Shortcut::FitAll } else { Shortcut::Project(n) });
-    }
-    Some(match key {
-        Key::P => Shortcut::Jump,
-        Key::N => Shortcut::NewCard,
-        Key::F => Shortcut::Search,
-        Key::W => Shortcut::CloseCard,
-        _ => return None,
-    })
-}
-
 pub struct App {
     pub world: World,
     canvas: Canvas,
@@ -88,6 +57,7 @@ pub struct App {
     wires: Wires,
     pub filters: Filters,
     jump: Jump,
+    shortcuts_help: Shortcuts,
     notifications: Notifications,
     agent: AgentLink,
     persistence: Persistence,
@@ -117,6 +87,7 @@ impl App {
             wires: Wires,
             filters: Filters::default(),
             jump: Jump::default(),
+            shortcuts_help: Shortcuts::default(),
             notifications: Notifications::new(ctx.clone(), config.os_toasts),
             agent: AgentLink::new(ctx.clone(), config.agent),
             updates: Updates::new(ctx.clone(), &config.config_dir, version::current(), config.update_check),
@@ -143,6 +114,10 @@ impl App {
         self.jump.is_open()
     }
 
+    pub fn shortcuts_open(&self) -> bool {
+        self.shortcuts_help.is_open()
+    }
+
     /// Commands addressed to the agent while it is disabled (tests).
     pub fn agent_sent(&self) -> &[protocol::AgentCmd] {
         self.agent.sent()
@@ -153,7 +128,7 @@ impl App {
     }
 
     fn typing_elsewhere(&self, ctx: &egui::Context) -> bool {
-        ctx.memory(|m| m.focused().is_some()) || self.jump.is_open() || self.cards.has_dialog() || self.projects.has_dialog()
+        ctx.memory(|m| m.focused().is_some()) || self.jump.is_open() || self.shortcuts_help.is_open() || self.cards.has_dialog() || self.projects.has_dialog()
     }
 
     /// Removes global shortcuts, then gives the rest of the keyboard input to the focused terminal.
@@ -174,6 +149,7 @@ impl App {
         for s in std::mem::take(&mut self.shortcuts) {
             match s {
                 Shortcut::Jump => self.jump.open(),
+                Shortcut::Help => self.shortcuts_help.open(),
                 Shortcut::NewCard => events.push(Event::NewCard { at: None, project: None }),
                 Shortcut::Search => {
                     events.push(Event::Unfocus);
@@ -228,6 +204,7 @@ impl App {
                 self.spaces.ui(ui, &self.world, vp, &mut events);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     self.updates.toolbar_ui(ui, self.version);
+                    self.shortcuts_help.toolbar_ui(ui);
                     self.agent.status_ui(ui);
                     self.changes.toolbar_ui(ui, &self.world, &mut events);
                     if let Some(err) = &self.persistence.last_error {
@@ -264,6 +241,7 @@ impl App {
         self.projects.dialogs(&ctx, &self.world, &mut events);
         self.notifications.ui(&ctx, &self.world, &mut events);
         self.updates.dialogs(&ctx);
+        self.shortcuts_help.ui(&ctx);
         self.dispatch(events);
 
         let (persistence, world) = (&mut self.persistence, &self.world);
@@ -297,6 +275,7 @@ impl App {
             self.agent.handle(&ev, w, &mut out);
             self.notifications.handle(&ev, w, &mut out);
             self.updates.handle(&ev);
+            self.shortcuts_help.handle(&ev);
             queue.extend(out);
         }
         self.world.refit_projects();
@@ -319,37 +298,5 @@ impl eframe::App for App {
 
     fn on_exit(&mut self) {
         self.save_now();
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use egui::Modifiers;
-
-    fn key(key: Key, modifiers: Modifiers) -> egui::Event {
-        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
-    }
-
-    #[test]
-    fn shortcuts_need_ctrl_shift_and_no_alt() {
-        let cs = Modifiers::CTRL | Modifiers::SHIFT;
-        assert_eq!(shortcut_of(&key(Key::P, cs)), Some(Shortcut::Jump));
-        assert_eq!(shortcut_of(&key(Key::K, cs)), None);
-        assert_eq!(shortcut_of(&key(Key::N, cs)), Some(Shortcut::NewCard));
-        assert_eq!(shortcut_of(&key(Key::P, Modifiers::CTRL)), None, "Ctrl+P stays with the shell");
-        assert_eq!(shortcut_of(&key(Key::P, cs | Modifiers::ALT)), None);
-        assert_eq!(shortcut_of(&egui::Event::Text("K".into())), None);
-    }
-
-    #[test]
-    fn digit_shortcuts_use_the_physical_key() {
-        let cs = Modifiers::CTRL | Modifiers::SHIFT;
-        assert_eq!(shortcut_of(&key(Key::Num3, cs)), Some(Shortcut::Project(3)));
-        assert_eq!(shortcut_of(&key(Key::Num0, cs)), Some(Shortcut::FitAll));
-        // AZERTY: the "&" key produces a logical key with no digit, but the physical key is 1.
-        let azerty = egui::Event::Key { key: Key::Exclamationmark, physical_key: Some(Key::Num1), pressed: true, repeat: false, modifiers: cs };
-        assert_eq!(shortcut_of(&azerty), Some(Shortcut::Project(1)));
-        assert_eq!(shortcut_of(&key(Key::Num1, Modifiers::CTRL)), None);
     }
 }

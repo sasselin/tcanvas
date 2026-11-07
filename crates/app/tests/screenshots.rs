@@ -454,6 +454,20 @@ fn jump() {
 
 #[test]
 #[ignore = "renders README screenshots; run ./scripts/screenshots.sh"]
+fn shortcuts() {
+    let mut h = harness("shortcuts");
+    demo_canvas(&mut h);
+    ctrl_shift(&h, Key::Num0);
+    steps(&mut h, 45);
+    ctrl_shift(&h, Key::K);
+    steps(&mut h, 3);
+    assert!(h.state().shortcuts_open());
+    h.event(egui::Event::PointerGone);
+    save(&mut h, "shortcuts");
+}
+
+#[test]
+#[ignore = "renders README screenshots; run ./scripts/screenshots.sh"]
 fn update() {
     use tcanvas::features::updates::release::{self, Asset, Release};
     let mut h = harness("update");

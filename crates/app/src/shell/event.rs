@@ -91,4 +91,6 @@ pub enum Event {
     UpdateAvailable(String),
     /// Opens the release notes of the pending update, with its "Update" button.
     ShowReleaseNotes,
+    /// Opens the "Keyboard shortcuts" window.
+    ShowShortcuts,
 }

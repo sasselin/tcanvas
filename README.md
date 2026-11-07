@@ -65,6 +65,8 @@ for watching what Claude (or any other AI agent) is doing while it works.
 
 ![The "go to" palette (Ctrl+Shift+P), across every project](docs/screenshots/jump.png)
 
+![The keyboard shortcuts window (Ctrl+Shift+K): every shortcut and mouse gesture](docs/screenshots/shortcuts.png)
+
 ![An update is out: the toolbar button, the toast and the release notes before updating](docs/screenshots/update.png)
 
 ## Install
@@ -198,6 +200,7 @@ Global shortcuts (they work even when a terminal has the keyboard):
 | `Ctrl+Shift+W` | Close the focused terminal (confirmation: Enter closes, Esc cancels) |
 | `Ctrl+Shift+F` | Filter (Enter: frame the matches) |
 | `Ctrl+Shift+0` | Show all (in the open space) |
+| `Ctrl+Shift+K` | Every shortcut and mouse gesture (also the ⌨ button of the top bar, or the "Go to" palette) |
 
 Ctrl+C, Ctrl+K, Ctrl+P, Ctrl+plus/minus, Esc, Tab… go to the terminal. Ctrl+V and `Ctrl+Shift+V` paste.
 A mouse selection (in tmux) is copied to the system clipboard; `Ctrl+Shift+C` never sends ^C.

@@ -1,10 +1,11 @@
 //! "Go to" palette (Ctrl+Shift+P): fuzzy search among terminals and projects,
-//! Enter to fly there.
+//! Enter to fly there. Also lists the "Keyboard shortcuts" window.
 
 use egui::{Align2, Id, Key, Modal, Modifiers, RichText, TextEdit};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 
+use crate::features::shortcuts::keymap;
 use crate::shell::event::Event;
 use crate::shell::i18n::t;
 use crate::shell::theme;
@@ -14,6 +15,8 @@ use crate::shell::world::{Card, CardId, ProjectId, World};
 pub enum Target {
     Card(CardId),
     Project(ProjectId),
+    /// The "Keyboard shortcuts" window.
+    Shortcuts,
 }
 
 pub struct Candidate {
@@ -24,7 +27,7 @@ pub struct Candidate {
 }
 
 /// No query: terminals asking for attention, then projects (in the order of their
-/// shortcuts), then recently used terminals. With a query: descending fuzzy score;
+/// shortcuts), then recently used terminals, then the shortcuts window. With a query: descending fuzzy score;
 /// on equal score, the project comes first.
 pub fn rank(query: &str, candidates: &[Candidate]) -> Vec<Target> {
     let query = query.trim();
@@ -32,6 +35,7 @@ pub fn rank(query: &str, candidates: &[Candidate]) -> Vec<Target> {
         (Target::Card(_), true) => 0,
         (Target::Project(_), _) => 1,
         (Target::Card(_), false) => 2,
+        (Target::Shortcuts, _) => 3,
     };
     if query.is_empty() {
         let mut order: Vec<(usize, &Candidate)> = candidates.iter().enumerate().collect();
@@ -62,7 +66,8 @@ pub fn candidates(world: &World) -> Vec<Candidate> {
         let cmd = c.info.as_ref().and_then(|i| i.command.as_deref()).unwrap_or_default();
         Candidate { target: Target::Card(c.id.clone()), haystack: format!("{} {} {} {}", c.title(), project, c.current_cwd().unwrap_or_default(), cmd), attention: c.attention, z: c.z }
     });
-    projects.chain(cards).collect()
+    let help = Candidate { target: Target::Shortcuts, haystack: t().shortcuts_title.to_owned(), attention: false, z: 0 };
+    projects.chain(cards).chain(std::iter::once(help)).collect()
 }
 
 /// What choosing a target does.
@@ -70,6 +75,7 @@ pub fn go_to(world: &World, target: &Target) -> Option<Event> {
     match target {
         Target::Card(id) => Some(Event::FlyTo(id.clone())),
         Target::Project(id) => world.project(id).map(|p| Event::EnterSpace(Some(p.id.clone()))),
+        Target::Shortcuts => Some(Event::ShowShortcuts),
     }
 }
 
@@ -148,6 +154,7 @@ fn label(world: &World, target: &Target) -> Option<RichText> {
             let key = if n < 9 { (t().project_shortcut)(n + 1) } else { String::new() };
             RichText::new(format!("■ {}  —  {}{key}", p.name, (t().terminal_count)(count))).color(theme::rgb(p.color)).strong()
         }
+        Target::Shortcuts => RichText::new(format!("⌨ {}   {}", t().shortcuts_title, keymap::help_combo().format())).color(theme::TEXT_DIM),
     })
 }
 
@@ -186,5 +193,15 @@ mod tests {
     fn projects_are_found_by_name() {
         let list = [card("t", "server Backend /srv/api", false, 1), project("p", "Backend ~/api")];
         assert_eq!(rank("backend", &list)[0], Target::Project("p".into()), "on equal score, the project first");
+    }
+
+    #[test]
+    fn the_shortcuts_window_is_listed_last_and_found_by_name() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
+        let mut list = candidates(&World::default());
+        list.insert(0, card("a", "raccord", false, 1));
+        assert_eq!(rank("", &list).last(), Some(&Target::Shortcuts));
+        assert_eq!(rank("clavier", &list), vec![Target::Shortcuts]);
+        assert!(matches!(go_to(&World::default(), &Target::Shortcuts), Some(Event::ShowShortcuts)));
     }
 }
