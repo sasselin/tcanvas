@@ -3,7 +3,8 @@
 //! chips of the top bar can be dragged to reorder them, or sorted by name from their
 //! right-click menu (the order is saved).
 
-use egui::{Button, Color32, CursorIcon, Pos2, Rect, RichText, Sense, Stroke, Ui, Vec2};
+use egui::scroll_area::{ScrollBarVisibility, ScrollSource};
+use egui::{Align, Button, Color32, CursorIcon, Layout, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Ui, Vec2};
 
 use crate::shell::event::Event;
 use crate::shell::i18n::t;
@@ -18,6 +19,10 @@ const FALLBACK_VIEWPORT: Vec2 = Vec2::new(1280.0, 800.0);
 #[derive(Default)]
 pub struct Spaces {
     viewport: Option<Rect>,
+    /// The space whose chip was last scrolled into view.
+    revealed: Option<Option<ProjectId>>,
+    /// Group chips out of view at the last frame (they fill the "▾ N" menu).
+    hidden: usize,
 }
 
 fn camera_key(space: Option<&str>) -> String {
@@ -93,12 +98,50 @@ pub fn enter(world: &mut World, target: Option<ProjectId>, vp: Rect) -> bool {
     true
 }
 
+/// Activity marks shown next to a group name (never on the open group).
+#[derive(Clone, Copy, Default)]
+struct Marks {
+    writing: bool,
+    calling: bool,
+}
+
+/// A group's name with its marks: ✎ files just modified, 🔔 a terminal asking for attention.
+fn chip_label(name: &str, marks: Marks) -> String {
+    format!("{name}{}{}", if marks.writing { " ✎" } else { "" }, if marks.calling { " 🔔" } else { "" })
+}
+
+/// While a chip is dragged: highlights it and shows where it would land; on release, moves it.
+fn drag_ui(ui: &Ui, world: &World, chips: &[Rect], n: usize, released: bool, events: &mut Vec<Event>) {
+    let pointer = ui.ctx().pointer_latest_pos();
+    let centers: Vec<f32> = chips.iter().map(|r| r.center().x).collect();
+    let at = pointer.map(|p| drop_index(&centers, p.x));
+    let id = &world.projects[n].id;
+    if released {
+        if let Some(at) = at {
+            events.push(Event::MoveProject(id.clone(), at));
+        }
+        return;
+    }
+    ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+    let painter = ui.painter();
+    painter.rect_filled(chips[n], 4.0, theme::rgb(world.projects[n].color).gamma_multiply(0.25));
+    if let Some(at) = at.filter(|&at| at != n && at != n + 1) {
+        let x = match chips.get(at) {
+            Some(r) => r.min.x - ui.spacing().item_spacing.x / 2.0,
+            None => chips[chips.len() - 1].max.x + ui.spacing().item_spacing.x / 2.0,
+        };
+        painter.vline(x, chips[n].y_range(), Stroke::new(2.0, theme::rgb(world.projects[n].color)));
+    }
+}
+
 impl Spaces {
     fn viewport(&self) -> Rect {
         self.viewport.filter(|r| r.is_positive()).unwrap_or(Rect::from_min_size(Pos2::ZERO, FALLBACK_VIEWPORT))
     }
 
-    /// Top bar chips: "All", then one project per chip. Only one is active.
+    /// Top bar chips: "All", then one project per chip. Only one is active. The group chips
+    /// take the width left over: they scroll sideways (mouse wheel) when they do not fit, the
+    /// active one is scrolled into view when the space changes, and a "▾ N" menu lists them all.
     pub fn ui(&mut self, ui: &mut Ui, world: &World, vp: Rect, events: &mut Vec<Event>) {
         self.viewport = Some(vp);
         if world.projects.is_empty() && world.space.is_none() {
@@ -113,69 +156,103 @@ impl Spaces {
         if ui.add(chip).on_hover_text(t().all_spaces_hint).clicked() {
             events.push(Event::EnterSpace(None));
         }
-        // Group chips: click opens the space, drag (or hold then move) reorders them.
-        let mut chips = Vec::with_capacity(world.projects.len());
-        let mut dragged = None;
-        for (n, p) in world.projects.iter().enumerate() {
-            let on = world.space.as_ref() == Some(&p.id);
-            // A bell flags a terminal asking for attention in another space.
-            let calling = !on && world.members(&p.id).any(|c| c.attention);
-            // A pencil flags files just modified in another group's folder.
-            let writing = !on && world.file_activity.get(&p.id).is_some_and(|&t| now.saturating_sub(t) < WRITING_SECS);
-            let label = format!("● {}{}{}", p.name, if writing { " ✎" } else { "" }, if calling { " 🔔" } else { "" });
-            let text = RichText::new(label).color(if on { theme::CARD_BG } else { theme::rgb(p.color) });
-            let chip = Button::selectable(on, text).fill(if on { theme::rgb(p.color) } else { Color32::TRANSPARENT }).sense(Sense::click_and_drag());
-            let hint = if n < 9 { (t().open_project_shortcut)(n + 1) } else { t().open_project.into() };
-            // Id from the project, not the label: the drag survives the ✎ / 🔔 marks changing.
-            let resp = ui.push_id(("space-chip", &p.id), |ui| ui.add(chip)).inner;
-            if resp.dragged() || resp.drag_stopped() {
-                dragged = Some((n, resp.drag_stopped()));
+        let marks: Vec<Marks> = world
+            .projects
+            .iter()
+            .map(|p| {
+                let on = world.space.as_ref() == Some(&p.id);
+                Marks {
+                    // A pencil flags files just modified in another group's folder.
+                    writing: !on && world.file_activity.get(&p.id).is_some_and(|&t| now.saturating_sub(t) < WRITING_SECS),
+                    // A bell flags a terminal asking for attention in another space.
+                    calling: !on && world.members(&p.id).any(|c| c.attention),
+                }
+            })
+            .collect();
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.separator();
+            if self.hidden > 0 {
+                self.menu_ui(ui, world, &marks, events);
             }
-            let resp = if resp.dragged() { resp } else { resp.on_hover_text(hint) };
-            if resp.clicked() {
-                events.push(Event::EnterSpace(Some(p.id.clone())));
+            ui.with_layout(Layout::left_to_right(Align::Center), |ui| self.chips_ui(ui, world, &marks, events));
+        });
+    }
+
+    /// The group chips, in a horizontal scroll area filling the available width.
+    fn chips_ui(&mut self, ui: &mut Ui, world: &World, marks: &[Marks], events: &mut Vec<Event>) {
+        let reveal = self.revealed.as_ref() != Some(&world.space);
+        self.revealed = Some(world.space.clone());
+        // The vertical wheel scrolls the chips: no Shift needed.
+        ui.style_mut().always_scroll_the_only_direction = true;
+        let out = ScrollArea::horizontal().id_salt("space-chips").scroll_bar_visibility(ScrollBarVisibility::AlwaysHidden).scroll_source(ScrollSource::MOUSE_WHEEL).show(ui, |ui| {
+            // Group chips: click opens the space, drag (or hold then move) reorders them.
+            let mut chips = Vec::with_capacity(world.projects.len());
+            let mut dragged = None;
+            for (n, p) in world.projects.iter().enumerate() {
+                let on = world.space.as_ref() == Some(&p.id);
+                let label = format!("● {}", chip_label(&p.name, marks[n]));
+                let text = RichText::new(label).color(if on { theme::CARD_BG } else { theme::rgb(p.color) });
+                let chip = Button::selectable(on, text).fill(if on { theme::rgb(p.color) } else { Color32::TRANSPARENT }).sense(Sense::click_and_drag());
+                let hint = if n < 9 { (t().open_project_shortcut)(n + 1) } else { t().open_project.into() };
+                // Id from the project, not the label: the drag survives the ✎ / 🔔 marks changing.
+                let resp = ui.push_id(("space-chip", &p.id), |ui| ui.add(chip)).inner;
+                if on && reveal {
+                    resp.scroll_to_me(None);
+                }
+                if resp.dragged() || resp.drag_stopped() {
+                    dragged = Some((n, resp.drag_stopped()));
+                }
+                let resp = if resp.dragged() { resp } else { resp.on_hover_text(hint) };
+                if resp.clicked() {
+                    events.push(Event::EnterSpace(Some(p.id.clone())));
+                }
+                resp.context_menu(|ui| {
+                    if ui.add_enabled(!is_sorted_by_name(&world.projects), Button::new(t().sort_projects)).clicked() {
+                        events.push(Event::SortProjects);
+                        ui.close();
+                    }
+                });
+                chips.push(resp.rect);
             }
-            resp.context_menu(|ui| {
-                if ui.add_enabled(!is_sorted_by_name(&world.projects), Button::new(t().sort_projects)).clicked() {
-                    events.push(Event::SortProjects);
+            if let Some((n, released)) = dragged {
+                drag_ui(ui, world, &chips, n, released, events);
+            }
+            chips
+        });
+        let visible = out.inner_rect.expand(0.5);
+        let hidden = out.inner.iter().filter(|r| !visible.contains_rect(**r)).count();
+        if hidden != self.hidden {
+            self.hidden = hidden;
+            ui.ctx().request_repaint();
+        }
+    }
+
+    /// "▾ N" (N chips out of view): a menu listing every group, the current one checked.
+    fn menu_ui(&mut self, ui: &mut Ui, world: &World, marks: &[Marks], events: &mut Vec<Event>) {
+        let resp = ui.menu_button(format!("▾ {}", self.hidden), |ui| {
+            for (n, p) in world.projects.iter().enumerate() {
+                let on = world.space.as_ref() == Some(&p.id);
+                let text = RichText::new(chip_label(&p.name, marks[n])).color(theme::rgb(p.color));
+                if ui.add(Button::selectable(on, text)).clicked() {
+                    events.push(Event::EnterSpace(Some(p.id.clone())));
                     ui.close();
                 }
-            });
-            chips.push(resp.rect);
-        }
-        if let Some((n, released)) = dragged {
-            let pointer = ui.ctx().pointer_latest_pos();
-            let centers: Vec<f32> = chips.iter().map(|r| r.center().x).collect();
-            let at = pointer.map(|p| drop_index(&centers, p.x));
-            let id = &world.projects[n].id;
-            if released {
-                if let Some(at) = at {
-                    events.push(Event::MoveProject(id.clone(), at));
-                }
-            } else {
-                ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-                let painter = ui.painter();
-                painter.rect_filled(chips[n], 4.0, theme::rgb(world.projects[n].color).gamma_multiply(0.25));
-                if let Some(at) = at.filter(|&at| at != n && at != n + 1) {
-                    let x = match chips.get(at) {
-                        Some(r) => r.min.x - ui.spacing().item_spacing.x / 2.0,
-                        None => chips[chips.len() - 1].max.x + ui.spacing().item_spacing.x / 2.0,
-                    };
-                    let r = chips[n];
-                    painter.vline(x, r.y_range(), Stroke::new(2.0, theme::rgb(world.projects[n].color)));
-                }
             }
-        }
-        // Inside a group only: the "free grid" option (the group is the whole canvas).
-        if !all {
-            ui.separator();
-            let on = world.free_grid;
-            let chip = Button::selectable(on, RichText::new(t().free_grid).color(if on { theme::CARD_BG } else { theme::TEXT })).fill(if on { theme::TEXT } else { Color32::TRANSPARENT });
-            if ui.add(chip).on_hover_text(t().free_grid_hint).clicked() {
-                events.push(Event::ToggleFreeGrid);
-            }
+        });
+        resp.response.on_hover_text(t().all_groups_menu_hint);
+    }
+
+    /// Inside a group only: the "free grid" option (the group is the whole canvas).
+    pub fn free_grid_ui(&mut self, ui: &mut Ui, world: &World, events: &mut Vec<Event>) {
+        if world.space.is_none() {
+            return;
         }
         ui.separator();
+        let on = world.free_grid;
+        let chip = Button::selectable(on, RichText::new(t().free_grid).color(if on { theme::CARD_BG } else { theme::TEXT })).fill(if on { theme::TEXT } else { Color32::TRANSPARENT });
+        if ui.add(chip).on_hover_text(t().free_grid_hint).clicked() {
+            events.push(Event::ToggleFreeGrid);
+        }
     }
 
     pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
@@ -259,7 +336,7 @@ mod tests {
     #[test]
     fn entering_a_project_frames_it_the_first_time() {
         let mut w = world();
-        let mut s = Spaces { viewport: Some(vp()) };
+        let mut s = Spaces { viewport: Some(vp()), ..Default::default() };
         handle(&mut s, &mut w, Event::EnterSpace(Some("web".into())));
         assert_eq!(w.space.as_deref(), Some("web"));
         let on_screen = w.camera.rect_to_screen(w.projects[1].rect, vp());
@@ -269,7 +346,7 @@ mod tests {
     #[test]
     fn a_project_always_opens_framed_and_the_overview_keeps_its_view() {
         let mut w = world();
-        let mut s = Spaces { viewport: Some(vp()) };
+        let mut s = Spaces { viewport: Some(vp()), ..Default::default() };
         let overview = Camera { center: pos2(123.0, 45.0), zoom: 0.3 };
         w.camera = overview;
         handle(&mut s, &mut w, Event::EnterSpace(Some("api".into())));
@@ -287,7 +364,7 @@ mod tests {
     #[test]
     fn re_entering_the_current_space_reframes_it() {
         let mut w = world();
-        let mut s = Spaces { viewport: Some(vp()) };
+        let mut s = Spaces { viewport: Some(vp()), ..Default::default() };
         handle(&mut s, &mut w, Event::EnterSpace(Some("api".into())));
         let out = handle(&mut s, &mut w, Event::EnterSpace(Some("api".into())));
         assert!(matches!(out.as_slice(), [Event::FitRect(r)] if r.contains_rect(w.projects[0].rect)));
@@ -306,6 +383,13 @@ mod tests {
 
     fn order(w: &World) -> Vec<&str> {
         w.projects.iter().map(|p| p.id.as_str()).collect()
+    }
+
+    #[test]
+    fn chip_label_shows_the_activity_marks() {
+        assert_eq!(chip_label("api", Marks::default()), "api");
+        assert_eq!(chip_label("api", Marks { writing: true, calling: true }), "api ✎ 🔔");
+        assert_eq!(chip_label("api", Marks { writing: false, calling: true }), "api 🔔");
     }
 
     #[test]

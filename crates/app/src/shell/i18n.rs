@@ -300,6 +300,7 @@ pub struct Texts {
     // Spaces.
     pub all_spaces: &'static str,
     pub all_spaces_hint: &'static str,
+    pub all_groups_menu_hint: &'static str,
     pub free_grid: &'static str,
     pub free_grid_hint: &'static str,
     pub open_project: &'static str,
@@ -542,6 +543,7 @@ pub const EN: Texts = Texts {
 
     all_spaces: "All",
     all_spaces_hint: "Overview: all projects",
+    all_groups_menu_hint: "Groups out of view: open the list of all groups",
     free_grid: "Free grid",
     free_grid_hint: "Inside a group, use the whole canvas: no frame, terminals stay in the group wherever they are dropped",
     open_project: "Open this project · Drag: reorder · Right-click: sort",
@@ -780,6 +782,7 @@ pub const FR: Texts = Texts {
 
     all_spaces: "Tous",
     all_spaces_hint: "Vue d'ensemble : tous les projets",
+    all_groups_menu_hint: "Groupes hors de vue : ouvrir la liste de tous les groupes",
     free_grid: "Grille libre",
     free_grid_hint: "Dans un groupe, utiliser tout le canevas : pas de cadre, les terminaux restent dans le groupe où qu'on les lâche",
     open_project: "Ouvrir ce projet · Glisser : réordonner · Clic droit : trier",

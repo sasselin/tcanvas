@@ -195,14 +195,12 @@ impl App {
         self.updates.poll(&mut events);
 
         // Two fixed rows: actions and projects, then search and filters. No centered
-        // layout or automatic wrapping: the bar keeps its height no matter what.
+        // layout or automatic wrapping: the bar keeps its height no matter what (group chips
+        // that do not fit scroll sideways, and a menu lists them all).
         Panel::top("toolbar").resizable(false).show(ui, |ui| {
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                Filters::actions_ui(ui, &mut events);
-                ui.separator();
-                let vp = self.canvas.viewport();
-                self.spaces.ui(ui, &self.world, vp, &mut events);
+                // Right side first: the group chips then get only the width left over.
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     self.updates.toolbar_ui(ui, self.version);
                     self.shortcuts_help.toolbar_ui(ui);
@@ -211,9 +209,18 @@ impl App {
                     if let Some(err) = &self.persistence.last_error {
                         ui.label(RichText::new(t().layout_warning).color(theme::status_color(Some(protocol::TermStatus::Exited(1))))).on_hover_text(err);
                     }
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        Filters::actions_ui(ui, &mut events);
+                        ui.separator();
+                        let vp = self.canvas.viewport();
+                        self.spaces.ui(ui, &self.world, vp, &mut events);
+                    });
                 });
             });
-            ui.horizontal(|ui| self.filters.ui(ui, &self.world, &mut events));
+            ui.horizontal(|ui| {
+                self.filters.ui(ui, &self.world, &mut events);
+                self.spaces.free_grid_ui(ui, &self.world, &mut events);
+            });
             ui.add_space(2.0);
         });
 

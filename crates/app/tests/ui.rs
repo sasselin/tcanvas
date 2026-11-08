@@ -1949,3 +1949,46 @@ fn shortcuts_window_in_english() {
     h.get_by_label("Ctrl+Shift+K");
     h.get_by_label("This window");
 }
+
+/// Many groups: the chips scroll inside the room left of the right-hand widgets, and the
+/// "▾ N" menu reaches the ones out of view.
+fn many_groups_scroll_and_open_from_the_menu(lang: Lang) {
+    let dir = temp_dir(&format!("many-groups-{lang:?}"));
+    let mut h = harness_in(&dir, lang);
+    for n in 0..20 {
+        add_project(&mut h, &format!("a-rather-long-group-name-{n:02}"), Rect::from_min_size(pos2(0.0, n as f32 * 1000.0), Vec2::new(800.0, 500.0)));
+    }
+    steps(&mut h, 4);
+    let help = widget_rect(&h, "⌨");
+    let menu = h.get_by_label_contains("▾ ").rect();
+    assert!(menu.max.x < help.min.x, "the menu stays left of the right-hand widgets: {menu:?} vs {help:?}");
+
+    h.get_by_label_contains("▾ ").click();
+    steps(&mut h, 2);
+    h.get_by_label("a-rather-long-group-name-19").click();
+    steps(&mut h, 4);
+    assert_eq!(h.state().world.space.as_deref(), Some("p-a-rather-long-group-name-19"));
+    // The open group's chip was scrolled into view, left of the menu.
+    let chip = widget_rect(&h, "● a-rather-long-group-name-19");
+    let menu = h.get_by_label_contains("▾ ").rect();
+    assert!(chip.max.x <= menu.min.x + 1.0 && chip.min.x > 0.0, "{chip:?} vs {menu:?}");
+}
+
+#[test]
+fn many_groups_scroll_and_open_from_the_menu_fr() {
+    many_groups_scroll_and_open_from_the_menu(Lang::Fr);
+}
+
+#[test]
+fn many_groups_scroll_and_open_from_the_menu_en() {
+    many_groups_scroll_and_open_from_the_menu(Lang::En);
+}
+
+#[test]
+fn few_groups_need_no_menu() {
+    let dir = temp_dir("few-groups");
+    let mut h = harness(&dir);
+    add_project(&mut h, "api", Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0)));
+    steps(&mut h, 4);
+    assert!(h.query_by_label_contains("▾ ").is_none());
+}
