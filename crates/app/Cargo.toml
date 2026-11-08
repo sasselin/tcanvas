@@ -18,8 +18,10 @@ alacritty_terminal = "0.26"
 uuid = { version = "1", features = ["v4"] }
 directories = "6"
 nucleo-matcher = "0.3"
-# Clipboard reading for Ctrl+Shift+V and right-click paste (egui only reads it for Ctrl+V).
-arboard = { version = "3.6", default-features = false }
+# Clipboard reading (text and images) for Ctrl+Shift+V and right-click paste (egui only reads it for Ctrl+V).
+arboard = { version = "3.6", default-features = false, features = ["image-data"] }
+# Encodes pasted clipboard images, saved to a file whose path is pasted into the terminal.
+png = "0.18"
 sys-locale = "0.3"
 # Update check and download from GitHub releases (rustls, no system TLS needed).
 ureq = "3"

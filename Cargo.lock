@@ -3276,6 +3276,7 @@ dependencies = [
  "image",
  "notify-rust",
  "nucleo-matcher",
+ "png",
  "protocol",
  "serde",
  "serde_json",

@@ -2,6 +2,7 @@
 
 mod clipboard;
 mod input;
+mod paste_image;
 mod pty;
 mod render;
 
@@ -19,7 +20,7 @@ use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::widgets::{confirm, text_prompt};
 use crate::shell::world::{Card, CardId, World};
-pub use clipboard::{ClipboardSource, Fixed as FixedClipboard};
+pub use clipboard::{ClipboardSource, Fixed as FixedClipboard, FixedImage as FixedImageClipboard};
 use input::{ClipAction, MouseButton};
 use pty::{GridSize, TermRuntime};
 pub use pty::{Launch, attach_command};
@@ -82,6 +83,8 @@ pub struct TerminalCards {
     clipboard: Box<dyn ClipboardSource>,
     /// Without a real terminal (tests): what would have been sent to each card.
     written: Vec<(CardId, Vec<u8>)>,
+    /// Where pasted images are saved (their path is pasted into the terminal).
+    paste_dir: std::path::PathBuf,
 }
 
 impl TerminalCards {
@@ -106,12 +109,31 @@ impl TerminalCards {
                 Launcher::Disabled => Box::new(clipboard::Fixed(None)),
             },
             written: Vec::new(),
+            paste_dir: paste_image::default_dir(),
         }
     }
 
     /// Replaces the clipboard (tests).
     pub fn set_clipboard(&mut self, clipboard: Box<dyn ClipboardSource>) {
         self.clipboard = clipboard;
+    }
+
+    /// Replaces the folder for pasted images (tests).
+    pub fn set_paste_dir(&mut self, dir: std::path::PathBuf) {
+        self.paste_dir = dir;
+    }
+
+    /// Paste bytes for the clipboard: its text, or else the path of its image saved as a PNG.
+    fn clipboard_paste(&mut self, bracketed: bool) -> Vec<u8> {
+        if let Some(text) = self.clipboard.text() {
+            return input::paste_bytes(&text, bracketed);
+        }
+        self.clipboard.image().map(|img| self.image_paste(&img, bracketed)).unwrap_or_default()
+    }
+
+    /// Saves an image and returns the paste of its path (nothing if it cannot be saved).
+    fn image_paste(&self, image: &egui::ColorImage, bracketed: bool) -> Vec<u8> {
+        paste_image::save(image, &self.paste_dir).map(|path| input::paste_bytes(&path, bracketed)).unwrap_or_default()
     }
 
     /// Shows fixed terminal output in a card, without a PTY (screenshots, UI tests).
@@ -147,10 +169,9 @@ impl TerminalCards {
 
     /// Pastes the system clipboard into the card.
     fn paste_clipboard(&mut self, id: &str) {
-        if let Some(text) = self.clipboard.text() {
-            let bracketed = self.mode_of(id).contains(TermMode::BRACKETED_PASTE);
-            self.send_to(id, input::paste_bytes(&text, bracketed));
-        }
+        let bracketed = self.mode_of(id).contains(TermMode::BRACKETED_PASTE);
+        let bytes = self.clipboard_paste(bracketed);
+        self.send_to(id, bytes);
     }
 
     pub fn has_dialog(&self) -> bool {
@@ -167,7 +188,7 @@ impl TerminalCards {
                 egui::Event::Key { modifiers, .. } => self.mods = *modifiers,
                 _ => {}
             }
-            let take = matches!(ev, egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::Copy | egui::Event::Cut | egui::Event::Key { .. });
+            let take = matches!(ev, egui::Event::Text(_) | egui::Event::Paste(_) | egui::Event::PasteImage(_) | egui::Event::Copy | egui::Event::Cut | egui::Event::Key { .. });
             if take {
                 self.keys.push((ev.clone(), self.mods));
             }
@@ -231,14 +252,11 @@ impl TerminalCards {
             match ev {
                 egui::Event::Text(t) => out.extend(input::text_bytes(&t, mods)),
                 egui::Event::Paste(t) => out.extend(input::paste_bytes(&t, mode.contains(TermMode::BRACKETED_PASTE))),
+                egui::Event::PasteImage(img) => out.extend(self.image_paste(&img, mode.contains(TermMode::BRACKETED_PASTE))),
                 egui::Event::Copy => out.push(0x03),
                 egui::Event::Cut => out.push(0x18),
                 egui::Event::Key { key, pressed: true, modifiers, .. } => match input::clip_action(key, modifiers) {
-                    Some(ClipAction::Paste) => {
-                        if let Some(text) = self.clipboard.text() {
-                            out.extend(input::paste_bytes(&text, mode.contains(TermMode::BRACKETED_PASTE)));
-                        }
-                    }
+                    Some(ClipAction::Paste) => out.extend(self.clipboard_paste(mode.contains(TermMode::BRACKETED_PASTE))),
                     Some(ClipAction::Copy) => {}
                     None => out.extend(input::key_bytes(key, modifiers, app_cursor).unwrap_or_default()),
                 },

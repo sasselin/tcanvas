@@ -46,7 +46,8 @@ for watching what Claude (or any other AI agent) is doing while it works.
   run on); a click flies to the other group. Inside a project's space, every group reachable
   through its wires (the whole chain) shows as a `⇄ name` chip in one row under the label.
 - **Clipboard** like Windows Terminal: selection copied on release, right-click or
-  `Ctrl+Shift+V` to paste.
+  `Ctrl+Shift+V` to paste. Pasting an image (a screenshot...) saves it as a PNG and pastes its
+  path, which coding agents such as Claude Code turn into an attachment.
 - **Clean shutdown**: closing a terminal really stops its shell and every process it started.
   A terminal whose session ended offers **Restart** or **Remove**.
 - **Persistent layout**: cards, groups, wires, the open project, the view and the free grid
@@ -202,7 +203,7 @@ Global shortcuts (they work even when a terminal has the keyboard):
 | `Ctrl+Shift+0` | Show all (in the open space) |
 | `Ctrl+Shift+K` | Every shortcut and mouse gesture (also the ⌨ button of the top bar, or the "Go to" palette) |
 
-Ctrl+C, Ctrl+K, Ctrl+P, Ctrl+plus/minus, Esc, Tab… go to the terminal. Ctrl+V and `Ctrl+Shift+V` paste.
+Ctrl+C, Ctrl+K, Ctrl+P, Ctrl+plus/minus, Esc, Tab… go to the terminal. Ctrl+V and `Ctrl+Shift+V` paste (an image pastes the path of a saved PNG).
 A mouse selection (in tmux) is copied to the system clipboard; `Ctrl+Shift+C` never sends ^C.
 
 **Spaces**: each project is a separate canvas. Only one is visible at a time; a terminal created

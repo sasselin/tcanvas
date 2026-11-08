@@ -1602,6 +1602,32 @@ fn terminal_clipboard_shortcuts_and_right_click_paste() {
 }
 
 #[test]
+fn pasting_an_image_pastes_the_path_of_a_saved_png() {
+    let dir = temp_dir("paste-image");
+    let mut h = harness(&dir);
+    let pasted = dir.join("pasted");
+    h.state_mut().cards.set_paste_dir(pasted.clone());
+    let image = egui::ColorImage::new([2, 2], vec![egui::Color32::RED; 4]);
+    h.state_mut().cards.set_clipboard(Box::new(tcanvas::features::terminal_card::FixedImageClipboard(image.clone())));
+    let id = add_card(&mut h, "api", Pos2::ZERO);
+    h.state_mut().world.camera = tcanvas::shell::world::Camera { center: pos2(250.0, 150.0), zoom: 1.0 };
+    h.state_mut().dispatch(vec![Event::FocusCard(id.clone())]);
+    steps(&mut h, 2);
+
+    // Ctrl+V with an image: egui sends PasteImage. Then Ctrl+Shift+V reads the clipboard's image.
+    h.event(egui::Event::PasteImage(std::sync::Arc::new(image)));
+    ctrl_shift(&h, Key::V);
+    steps(&mut h, 2);
+    let written = String::from_utf8(h.state().cards.written(&id)).unwrap();
+    let paths: Vec<&str> = written.split(".png").filter(|p| !p.is_empty()).collect();
+    assert_eq!(paths.len(), 2, "one path per paste: {written}");
+    assert!(written.starts_with(pasted.to_str().unwrap()) || cfg!(windows), "{written}");
+    let files: Vec<_> = std::fs::read_dir(&pasted).unwrap().flatten().collect();
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().all(|f| std::fs::read(f.path()).unwrap().starts_with(b"\x89PNG")));
+}
+
+#[test]
 fn the_changes_badge_shows_diffs_and_commits_from_the_overview() {
     let dir = temp_dir("changes-badge");
     let mut h = harness(&dir);
