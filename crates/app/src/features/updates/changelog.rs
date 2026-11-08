@@ -16,20 +16,25 @@ pub struct Section {
 /// The sections of versions in `(after, upto]`, newest first. `after == None`: only `upto`.
 /// Headings look like `## [0.1.1](https://...) - 2026-11-06`; `[Unreleased]` is skipped.
 pub fn sections_between(markdown: &str, after: Option<&str>, upto: &str) -> Vec<Section> {
-    let upto = version::parse(upto);
-    let after = after.and_then(version::parse);
+    let (Some(upto), after) = (version::parse(upto), after.and_then(version::parse)) else { return Vec::new() };
+    sections(markdown, |v| v <= upto && after.is_none_or(|a| v > a) && (after.is_some() || v == upto))
+}
+
+/// Every version up to `upto` (the running one), newest first: the whole history of this build.
+pub fn history(markdown: &str, upto: &str) -> Vec<Section> {
+    let Some(upto) = version::parse(upto) else { return Vec::new() };
+    sections(markdown, |v| v <= upto)
+}
+
+/// The sections whose version satisfies `wanted`, newest first.
+fn sections(markdown: &str, wanted: impl Fn((u32, u32, u32)) -> bool) -> Vec<Section> {
     let mut out: Vec<Section> = Vec::new();
     let mut current: Option<Section> = None;
     for line in markdown.lines() {
         if let Some(heading) = line.strip_prefix("## ") {
             out.extend(current.take());
             let v = heading.trim_start_matches('[').split([']', ' ']).next().unwrap_or_default();
-            let parsed = version::parse(v);
-            let wanted = match (parsed, upto) {
-                (Some(p), Some(u)) => p <= u && after.is_none_or(|a| p > a) && (after.is_some() || p == u),
-                _ => false,
-            };
-            if wanted {
+            if version::parse(v).is_some_and(&wanted) {
                 current = Some(Section { version: version::base(v), body: String::new() });
             }
         } else if let Some(s) = current.as_mut() {
@@ -123,6 +128,14 @@ mod tests {
         assert_eq!(versions(&sections_between(CHANGELOG, None, "0.1.1+3-gabc1234")), ["0.1.1"]);
         assert!(sections_between(CHANGELOG, None, "0.3.0").is_empty());
         assert!(sections_between(CHANGELOG, None, "X.X.X").is_empty());
+    }
+
+    #[test]
+    fn history_lists_every_version_up_to_the_running_one() {
+        assert_eq!(versions(&history(CHANGELOG, "0.2.0")), ["0.2.0", "0.1.1", "0.1.0"]);
+        assert_eq!(versions(&history(CHANGELOG, "0.1.1+3-gabc1234")), ["0.1.1", "0.1.0"]);
+        assert_eq!(versions(&history(CHANGELOG, "0.1.0")), ["0.1.0"]);
+        assert!(history(CHANGELOG, "X.X.X").is_empty());
     }
 
     #[test]

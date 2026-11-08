@@ -1830,9 +1830,12 @@ fn the_version_label_opens_whats_new() {
     let mut h = harness(&dir);
     steps(&mut h, 2);
     h.get_by_label(&format!("v{}", tcanvas::shell::version::current())).click();
-    steps(&mut h, 3);
+    // The modal grows with the history for a few frames, then settles where it is centered.
+    steps(&mut h, 10);
     let base = tcanvas::features::updates::version::base(tcanvas::shell::version::current());
     h.get_by_label(&format!("Quoi de neuf dans la v{base}"));
+    // The whole history, not only the running version.
+    h.get_by_label("v0.1.0");
     h.get_by_label("Fermer").click();
     steps(&mut h, 3);
     assert!(h.state().updates.dialog.is_none());
@@ -1845,7 +1848,8 @@ fn whats_new_checks_for_updates_on_request() {
     steps(&mut h, 2);
     h.state_mut().updates.set_fetcher(|| Ok(vec![]));
     h.get_by_label(&format!("v{}", tcanvas::shell::version::current())).click();
-    steps(&mut h, 3);
+    // The modal grows with the history for a few frames, then settles where it is centered.
+    steps(&mut h, 10);
     h.get_by_label("Rechercher des mises à jour").click();
     wait_for_label(&mut h, "Vous avez la dernière version");
 
@@ -1865,7 +1869,8 @@ fn whats_new_check_button_in_english() {
     steps(&mut h, 2);
     h.state_mut().updates.set_fetcher(|| Err("offline".into()));
     h.get_by_label(&format!("v{}", tcanvas::shell::version::current())).click();
-    steps(&mut h, 3);
+    // The modal grows with the history for a few frames, then settles where it is centered.
+    steps(&mut h, 10);
     h.get_by_label("Check for updates").click();
     wait_for_label(&mut h, "Check failed");
 }

@@ -574,7 +574,7 @@ pub const EN: Texts = Texts {
     wire_hint: |a, b| format!("{a}  ⇄  {b}\nclick: go to the other group · right-click: delete"),
     linked_group_hint: |name| format!("Linked group: open “{name}”"),
 
-    version_hint: "What's new in this version",
+    version_hint: "What's new, and every earlier version",
     update_button: |v| format!("Update to v{v}"),
     update_button_hint: "See what's new, then update",
     update_installing: |v| format!("Downloading v{v}…"),
@@ -813,7 +813,7 @@ pub const FR: Texts = Texts {
     wire_hint: |a, b| format!("{a}  ⇄  {b}\nclic : aller à l'autre groupe · clic droit : supprimer"),
     linked_group_hint: |name| format!("Groupe relié : ouvrir « {name} »"),
 
-    version_hint: "Nouveautés de cette version",
+    version_hint: "Nouveautés et historique des versions",
     update_button: |v| format!("Mettre à jour vers v{v}"),
     update_button_hint: "Voir les nouveautés, puis mettre à jour",
     update_installing: |v| format!("Téléchargement de v{v}…"),

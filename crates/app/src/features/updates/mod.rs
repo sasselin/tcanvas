@@ -229,7 +229,7 @@ impl Updates {
             if self.manual != Some(ManualCheck::Checking) {
                 self.manual = None;
             }
-            self.dialog = Some(Dialog::WhatsNew(changelog::sections_between(changelog::EMBEDDED, None, &self.running)));
+            self.dialog = Some(Dialog::WhatsNew(changelog::history(changelog::EMBEDDED, &self.running)));
         }
         match self.phase.clone() {
             Phase::Idle => {
@@ -331,7 +331,7 @@ impl Updates {
 }
 
 fn notes_ui(ui: &mut egui::Ui, sections: &[Section]) {
-    ScrollArea::vertical().max_height(360.0).auto_shrink([false, true]).show(ui, |ui| {
+    ScrollArea::vertical().max_height((ui.ctx().content_rect().height() * 0.6).max(240.0)).auto_shrink([false, true]).show(ui, |ui| {
         for (k, s) in sections.iter().enumerate() {
             if k > 0 {
                 ui.add_space(8.0);
