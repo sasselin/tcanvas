@@ -277,7 +277,9 @@ fn scenario(dir: &Path, folder: &str, home: &str, socket: &str, strict: bool) {
     //    blank screen does not make the card "starting" again): each line once, as written.
     assert_eq!(send(&mut h, &id, "clear; cat > cat.txt", true), SendOutcome::Sent);
     wait(&mut h, "blank screen", 10, |app| app.cards.screen_text(&id).is_some_and(|s| s.trim().is_empty()));
-    wait(&mut h, "cat reading, bracketed paste off", 10, |app| !app.cards.bracketed_paste(&id));
+    // `cat` is running once the shell has created its output file. The card's own view of
+    // bracketed paste is not a usable signal here: it did not turn off on the CI runner's tmux.
+    wait(&mut h, "cat started", 10, |_| in_wsl("test").args(["-e", &at("cat.txt")]).status().is_ok_and(|s| s.success()));
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(send(&mut h, &id, "line one\nline two\n", true), SendOutcome::Sent);
     wait_file(&mut h, &at("cat.txt"), "line one\nline two\n");
