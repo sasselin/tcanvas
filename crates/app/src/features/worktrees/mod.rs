@@ -17,13 +17,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use egui::{Color32, Panel, RichText, ScrollArea, Ui};
-use protocol::{AgentEvent, RecipeAction, RecipeReport, Worktree, WorktreeList};
+use protocol::{AgentCmd, AgentEvent, Problem, RecipeAction, RecipeReport, Worktree, WorktreeList, WorktreePlan};
 
 use cleanup::CleanupWindow;
 use create::CreateDialog;
 use trust::Trust;
 
-use crate::shell::event::Event;
+use crate::shell::event::{Event, TaskWorktreeSpec};
 use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::world::{CardWorktree, ProjectId, World, unix_now};
@@ -105,6 +105,10 @@ pub struct Worktrees {
     applying: Vec<(u64, Option<create::Sent>)>,
     /// The recipe setup commands accepted.
     trust: Trust,
+    /// Plans asked for tasks' starts, by request id.
+    task_plans: BTreeMap<u64, TaskWorktreeSpec>,
+    /// The last plan answered for each task (by id), checked again when its creation is asked.
+    task_planned: BTreeMap<String, WorktreePlan>,
 }
 
 impl Worktrees {
@@ -196,6 +200,28 @@ impl Worktrees {
     pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
         match ev {
             Event::NewWorktree(project) => self.open_create(world, project),
+            // A task's start: the same plan, the same checks and the same creation as the dialog's,
+            // answered with events; its card opens in the worktree once it is there.
+            Event::PlanTaskWorktree(spec) => {
+                let id = create::next_id();
+                self.task_plans.insert(id, (**spec).clone());
+                out.push(Event::ToAgent(AgentCmd::PlanWorktree { id, key: spec.project.clone(), folder: spec.folder.clone(), location: spec.location.clone() }));
+            }
+            Event::CreateTaskWorktree(order) => {
+                let id = create::next_id();
+                match create::task_creation(order, self.task_planned.get(&order.spec.task), id) {
+                    Ok((request, sent)) => {
+                        out.push(Event::ToAgent(AgentCmd::CreateWorktree { id, key: order.spec.project.clone(), request }));
+                        self.sent.push(sent);
+                    }
+                    Err(problem) => out.push(Event::TaskWorktreeFailed { project: order.spec.project.clone(), task: order.spec.task.clone(), problem }),
+                }
+            }
+            Event::Agent(AgentEvent::WorktreePlan(plan)) if self.task_plans.contains_key(&plan.id) => {
+                let spec = self.task_plans.remove(&plan.id).expect("asked");
+                self.task_planned.insert(spec.task.clone(), (**plan).clone());
+                out.push(Event::TaskWorktreePlanned(Box::new(create::task_plan(&spec, plan, &self.trust))));
+            }
             Event::Agent(ev @ (AgentEvent::WorktreePlan(_) | AgentEvent::WorktreeCreated { .. })) => {
                 if let AgentEvent::WorktreeCreated { id, path, problem, recipe_pending, .. } = ev
                     && let Some(i) = self.sent.iter().position(|s| s.id == *id)
@@ -206,6 +232,13 @@ impl Worktrees {
                     let hold = *recipe_pending && sent.starts_something();
                     let (events, keep) = create::on_created(&sent, path.as_deref(), problem.as_ref(), hold, world);
                     out.extend(events);
+                    if let Some(task) = sent.task.as_ref().filter(|_| !keep) {
+                        let (project, id) = (sent.project.clone(), task.task.clone());
+                        out.push(match (path, problem) {
+                            (Some(path), None) => Event::TaskWorktreeCreated { project, task: id, path: path.clone(), branch: task.branch.clone() },
+                            (_, problem) => Event::TaskWorktreeFailed { project, task: id, problem: problem.clone().unwrap_or(Problem::NotAGitRepo) },
+                        });
+                    }
                     if let (Some(path), None) = (path, problem) {
                         // Accepted only now that the creation went through.
                         if let (Some(setup), Some(repo)) = (&sent.setup, &sent.repo) {
@@ -461,6 +494,7 @@ mod tests {
             templates: Vec::new(),
             messages: Vec::new(),
             worktree_location: None,
+            task_settings: Default::default(),
         });
         let mut ids = vec![];
         for cwd in cwds {
@@ -655,7 +689,7 @@ mod tests {
     #[test]
     fn a_card_with_something_to_run_waits_for_the_recipe() {
         let (mut w, _) = world_with_cards(&[]);
-        w.projects[0].templates = vec![crate::shell::world::CommandTemplate { name: "Claude".into(), command: "claude".into() }];
+        w.projects[0].templates = vec![crate::shell::world::CommandTemplate { name: "Claude".into(), command: "claude".into(), task: false }];
         let mut s = Worktrees::default();
         s.handle(&Event::Agent(AgentEvent::Worktrees(list("p", shop()))), &mut w, &mut vec![]);
         s.handle(&Event::NewWorktree("p".into()), &mut w, &mut vec![]);
@@ -692,7 +726,7 @@ mod tests {
         s.handle(&answer(id, true), &mut w, &mut out);
         assert_eq!(new_cards(&out), 1, "nothing to run: no need to wait");
         // A ticked setup: remembered when the creation goes through, not when it is refused.
-        let setup = |id| create::Sent { id, project: "p".into(), command: None, setup: Some("npm ci".into()), repo: Some("/home/me/shop".into()), location: None };
+        let setup = |id| create::Sent { id, project: "p".into(), command: None, setup: Some("npm ci".into()), repo: Some("/home/me/shop".into()), location: None, task: None };
         s.sent.push(setup(50));
         let refused = Event::Agent(AgentEvent::WorktreeCreated {
             id: 50,

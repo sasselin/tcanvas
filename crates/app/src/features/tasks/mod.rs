@@ -15,11 +15,13 @@
 //! user's text and offers to load their version or to overwrite it.
 
 pub mod logic;
+pub mod start;
+mod starter;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use egui::{Button, CollapsingHeader, Color32, ComboBox, Id, Key, Modal, Panel, RichText, ScrollArea, Sides, TextEdit, Ui};
-use protocol::{AgentCmd, AgentEvent, Author, FoundList, FoundWhy, Priority, Problem, Task, TaskBoard, TaskHooks, TaskOp, TaskStatus};
+use protocol::{AgentCmd, AgentEvent, Author, FoundList, FoundWhy, LinkChange, Priority, Problem, SessionInfo, Task, TaskBoard, TaskHooks, TaskOp, TaskStatus, WorktreeList};
 
 use crate::features::changes::age_label;
 use crate::features::shortcuts::keymap::tasks_combo;
@@ -27,8 +29,9 @@ use crate::shell::event::Event;
 use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::widgets;
-use crate::shell::world::{Project, ProjectId, World, unix_now};
+use crate::shell::world::{CardId, CardTask, Project, ProjectId, World, unix_now};
 use logic::{blocked_by, dependency_choices, find, move_op, open_count, priority_mark, ready, sections};
+use start::{Blocked, RowAction};
 
 const ERROR: Color32 = Color32::from_rgb(235, 95, 95);
 const READY: Color32 = Color32::from_rgb(90, 200, 120);
@@ -58,6 +61,14 @@ enum Pending {
     Editor,
     /// A note from the editor: its text is cleared once added.
     Note { text: String },
+    /// A task's links, set by its start or cleared when its worktree went: a refusal shows in the
+    /// panel.
+    ClearLink { reference: String },
+    /// A started task's links (`starter::Starting`): refused, sent again.
+    StartLink { task: String },
+    /// An automatic status change (`start::Follow`), for the task `task` of the list `list`: a
+    /// refusal because the status changed meanwhile is expected (manual wins), others show.
+    Auto { list: String, task: String },
 }
 
 /// A removal that can be undone.
@@ -133,7 +144,29 @@ impl Editor {
 enum Action {
     Open(String),
     Op(TaskOp, Pending),
-    Adopt { from: String, merge: bool },
+    Adopt {
+        from: String,
+        merge: bool,
+    },
+    /// Start (or resume) a task; `ask`: always show the confirmation.
+    Start {
+        task: String,
+        ask: bool,
+    },
+    GoTo(CardId),
+}
+
+/// Why a task cannot be started now, translated.
+pub fn blocked_text(b: &Blocked) -> &'static str {
+    match b {
+        Blocked::NoFolder => t().start_blocked_no_folder,
+        Blocked::AgentOffline => t().start_blocked_offline,
+        Blocked::AgentTooOld => t().start_blocked_too_old,
+        Blocked::ReadOnly => t().start_blocked_read_only,
+        Blocked::Waiting => t().start_blocked_waiting,
+        Blocked::Starting => t().start_blocked_starting,
+        Blocked::Shell => t().start_blocked_shell,
+    }
 }
 
 #[derive(Default)]
@@ -166,6 +199,33 @@ pub struct Tasks {
     task_hooks_pending: bool,
     /// What failed last time, translated.
     task_hooks_error: Option<String>,
+    /// The agent records where tasks are worked on (`TaskOp::SetLinks`).
+    task_links: bool,
+    /// Each group's repository as the agent lists it (`None`: its folder is outside git; missing:
+    /// not known yet).
+    repos: BTreeMap<ProjectId, Option<WorktreeList>>,
+    /// Worktree folders linked to tasks during this run and not yet seen in a list: a list from
+    /// before their creation does not clear those links.
+    linked_unseen: HashSet<String>,
+    /// Tasks whose worktree link is being cleared.
+    clearing: HashSet<String>,
+    /// The login shell runs the card's task script (bash or zsh), as the agent says.
+    shell_ok: bool,
+    /// The start being prepared (its dialogs).
+    starter: Option<starter::Starter>,
+    /// Starts asked while another one was being prepared: (group, task, ask), in order.
+    queued: std::collections::VecDeque<(ProjectId, String, bool)>,
+    /// Starts sent, until the list shows their session (by task id).
+    starts: HashMap<String, starter::Starting>,
+    /// How each task's status follows its agent, by (list key, task id).
+    follows: HashMap<(String, String), start::Follow>,
+    /// The last marks counted of each card's session.
+    sessions: HashMap<String, start::Obs>,
+    /// Marks reported before the list showed their session's link: counted once it does.
+    unlinked: HashMap<String, start::Obs>,
+    /// Sessions of the cards started for tasks during this run: their first observation counts
+    /// from nothing (a prompt already there is a new one).
+    fresh: HashSet<String>,
 }
 
 impl Tasks {
@@ -174,7 +234,17 @@ impl Tasks {
     }
 
     pub fn has_dialog(&self) -> bool {
-        self.editor.is_some() || self.merge.is_some()
+        self.editor.is_some() || self.merge.is_some() || self.starter.as_ref().is_some_and(|s| s.shown)
+    }
+
+    /// A start is being prepared (its template choice or its confirmation is up).
+    pub fn starting(&self) -> bool {
+        self.starter.is_some()
+    }
+
+    /// The key of the list `key` is subscribed to (the repository's main checkout), else `key`.
+    fn list_key(&self, key: &str) -> String {
+        self.boards.get(key).and_then(|b| b.list.as_ref()).map_or_else(|| key.to_string(), |l| l.key.clone())
     }
 
     pub fn editor(&self) -> Option<&Editor> {
@@ -199,17 +269,25 @@ impl Tasks {
         self.boards.get(key).and_then(|b| b.list.as_ref()).map(|l| l.tasks.as_slice()).unwrap_or_default()
     }
 
-    /// Every frame: the agent follows exactly the panel group's list and the edited one (the
-    /// count shows on the toolbar even when the panel is closed).
-    pub fn poll(&mut self, world: &World, events: &mut Vec<Event>) {
+    /// Every frame: the agent follows exactly the panel group's list, the edited one, and those
+    /// of the groups holding terminals (a task's card shows its task, and its status follows its
+    /// agent); the count shows on the toolbar even when the panel is closed. Which task each card
+    /// was started for goes to the world.
+    pub fn poll(&mut self, world: &mut World, events: &mut Vec<Event>) {
         let mut wanted: BTreeMap<ProjectId, String> = BTreeMap::new();
         if self.capable != Some(false) {
             let edited = self.editor.as_ref().and_then(|e| world.project(&e.key));
-            for p in self.panel_project(world).into_iter().chain(edited) {
+            let with_cards = world.projects.iter().filter(|p| world.members(&p.id).next().is_some());
+            let starting = self.starter.as_ref().and_then(|s| world.project(&s.project));
+            for p in self.panel_project(world).into_iter().chain(edited).chain(with_cards).chain(starting) {
                 if let Some(cwd) = &p.cwd {
                     wanted.insert(p.id.clone(), cwd.clone());
                 }
             }
+        }
+        let tasks = card_tasks(&self.boards, world);
+        if tasks != world.card_tasks {
+            world.card_tasks = tasks;
         }
         let mut cmds = Vec::new();
         self.watched.retain(|key, path| {
@@ -284,7 +362,7 @@ impl Tasks {
             ids.push(self.send(&ed.key, op, Some(ed.rev), Pending::Save { content: true }, out));
         }
         if now.status != ed.saved.status {
-            ids.push(self.send(&ed.key, TaskOp::SetStatus { task: ed.task.clone(), status: now.status }, None, Pending::Save { content: false }, out));
+            ids.push(self.send(&ed.key, TaskOp::SetStatus { task: ed.task.clone(), status: now.status, from: None }, None, Pending::Save { content: false }, out));
         }
         match &mut self.editor {
             Some(e) if !ids.is_empty() => {
@@ -295,8 +373,10 @@ impl Tasks {
         }
     }
 
-    fn act(&mut self, key: &str, action: Action, out: &mut Vec<Event>) {
+    fn act(&mut self, world: &World, key: &str, action: Action, out: &mut Vec<Event>) {
         match action {
+            Action::Start { task, ask } => self.begin(world, key, &task, ask),
+            Action::GoTo(card) => out.push(Event::FlyTo(card)),
             Action::Open(task) => self.open_editor(key, &task),
             Action::Op(op, mut pending) => {
                 if let Pending::Remove { key: k, .. } = &mut pending {
@@ -313,7 +393,7 @@ impl Tasks {
         }
     }
 
-    fn answered(&mut self, id: u64, key: &str, problem: Option<&Problem>, content_rev: Option<u64>) {
+    fn answered(&mut self, id: u64, key: &str, problem: Option<&Problem>, content_rev: Option<u64>, out: &mut Vec<Event>) {
         let Some(pending) = self.pending.remove(&id) else { return };
         let text = problem.map(|p| t().problem(p));
         match pending {
@@ -352,6 +432,21 @@ impl Tasks {
                     self.editor = None;
                 }
             }
+            Pending::ClearLink { .. } => {
+                if let Some(text) = text {
+                    self.error = Some((key.to_string(), text));
+                }
+            }
+            Pending::StartLink { task } => self.link_answered(&task, problem, out),
+            Pending::Auto { list, task } => {
+                if let Some(follow) = self.follows.get_mut(&(list, task)).filter(|_| problem.is_some()) {
+                    follow.refused();
+                }
+                // The status changed meanwhile: what was done by hand stays, nothing to say.
+                if let Some(text) = text.filter(|_| !matches!(problem, Some(Problem::TaskStatusChanged { .. }))) {
+                    self.error = Some((key.to_string(), text));
+                }
+            }
             Pending::Editor | Pending::Note { .. } => {
                 let Some(ed) = self.editor.as_mut() else { return };
                 match (text, pending) {
@@ -365,9 +460,13 @@ impl Tasks {
 
     pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
         match ev {
-            Event::Agent(AgentEvent::Hello { tasks, task_hooks, .. }) => {
+            Event::Agent(AgentEvent::Hello { tasks, task_hooks, task_links, shell, .. }) => {
                 // A new agent: it follows nothing yet, and what the last one was asked is lost.
                 self.capable = Some(*tasks);
+                self.task_links = *task_links;
+                self.shell_ok = shell.is_none_or(|s| s.runs_task_script());
+                self.starts_lost();
+                self.reset_follow();
                 (self.task_hooks, self.task_hooks_pending, self.task_hooks_error) = (*task_hooks, false, None);
                 self.watched.clear();
                 self.lost();
@@ -378,6 +477,8 @@ impl Tasks {
             }
             Event::AgentLost => {
                 self.capable = None;
+                self.starts_lost();
+                self.reset_follow();
                 (self.task_hooks, self.task_hooks_pending) = (None, false);
                 self.watched.clear();
                 self.lost();
@@ -394,10 +495,45 @@ impl Tasks {
             }
             Event::Agent(AgentEvent::Tasks(board)) => {
                 if world.project(&board.key).is_some_and(|p| p.cwd.is_some()) {
+                    if let Some(list) = &board.list {
+                        // Statuses changed by anyone: what the app follows sees them.
+                        for t in list.tasks.iter().filter(|t| t.removed.is_none()) {
+                            if let Some(follow) = self.follows.get_mut(&(list.key.clone(), t.id.clone())) {
+                                follow.seen(t.status);
+                            }
+                        }
+                    }
+                    if let Some(list) = &board.list {
+                        self.starts_seen(&list.tasks);
+                        let shown: HashSet<String> = list.tasks.iter().filter(|t| t.worktree.is_some()).map(|t| t.id.clone()).collect();
+                        self.clearing.retain(|id| shown.contains(id));
+                    }
                     self.boards.insert(board.key.clone(), (**board).clone());
+                    self.reconcile(&board.key, out);
+                    self.follow_unlinked(out);
                 }
             }
-            Event::Agent(AgentEvent::TasksEdited { id, key, problem, content_rev, .. }) => self.answered(*id, key, problem.as_ref(), *content_rev),
+            Event::Agent(AgentEvent::Worktrees(list)) => {
+                if world.project(&list.key).is_some_and(|p| p.cwd.is_some()) {
+                    if !list.worktrees.is_empty() {
+                        for path in start::worktree_paths(list) {
+                            self.linked_unseen.remove(&path);
+                        }
+                        self.repos.insert(list.key.clone(), Some(list.clone()));
+                        self.reconcile(&list.key, out);
+                        self.follow_branches(&list.key, out);
+                    } else if !matches!(self.repos.get(&list.key), Some(Some(_))) {
+                        // Outside git. A group known to be in a repository is never downgraded by an
+                        // empty list (git failing for a moment): it keeps its last list.
+                        self.repos.insert(list.key.clone(), None);
+                    }
+                }
+            }
+            Event::TaskWorktreePlanned(plan) => self.starter_planned(plan),
+            Event::TaskWorktreeCreated { task, path, branch, .. } => self.worktree_created(task, path, branch, out),
+            Event::TaskWorktreeFailed { project, task, problem } => self.worktree_failed(world, project, task, problem),
+            Event::Agent(AgentEvent::Session(info)) => self.follow_session(info, out),
+            Event::Agent(AgentEvent::TasksEdited { id, key, problem, content_rev, .. }) => self.answered(*id, key, problem.as_ref(), *content_rev, out),
             Event::Agent(AgentEvent::TasksNotice { key, problem }) => {
                 if world.project(key).is_some() {
                     out.push(Event::Inform { title: t().tasks_notice_title.into(), body: t().problem(problem) });
@@ -405,6 +541,7 @@ impl Tasks {
             }
             Event::SetProjectCwd(id, _) | Event::RemoveProject(id) => {
                 self.boards.remove(id);
+                self.repos.remove(id);
                 self.undo.retain(|u| &u.key != id);
                 if let Some(ed) = self.editor.as_mut().filter(|e| &e.key == id) {
                     // Kept open with its text, to be copied.
@@ -412,6 +549,125 @@ impl Tasks {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The live task the session `session` was started for, with its group and list key: the first
+    /// group showing it (groups of one repository share its list).
+    fn task_of_session(&self, session: &str) -> Option<(ProjectId, String, Task)> {
+        self.boards.iter().find_map(|(project, board)| {
+            let list = board.list.as_ref()?;
+            let mut linked: Vec<&Task> = list.tasks.iter().filter(|t| t.removed.is_none() && t.session.as_deref() == Some(session)).collect();
+            linked.sort_by_key(|t| t.status.finished());
+            linked.first().map(|t| (project.clone(), list.key.clone(), (*t).clone()))
+        })
+    }
+
+    /// An automatic status change, naming the status it expects.
+    fn send_move(&mut self, project: &str, list: &str, task: &str, (from, to): start::Move, out: &mut Vec<Event>) {
+        let op = TaskOp::SetStatus { task: task.to_string(), status: to, from: Some(from) };
+        self.send(project, op, None, Pending::Auto { list: list.to_string(), task: task.to_string() }, out);
+    }
+
+    /// The agent changed: what the app followed starts over (no signal is computed from a status
+    /// change that never applied, nor from counters of another agent's run).
+    fn reset_follow(&mut self) {
+        self.follows.clear();
+        self.sessions.clear();
+        self.unlinked.clear();
+        // From now on, the first report of every session is a baseline only: a card started
+        // before does not count its marks from nothing again.
+        self.fresh.clear();
+    }
+
+    /// A session's report: the signals its marks give (a prompt, a turn end) move its task's
+    /// status by the rules (`start::Follow`). Only with an agent that records task links.
+    fn follow_session(&mut self, info: &SessionInfo, out: &mut Vec<Event>) {
+        if !self.task_links {
+            return;
+        }
+        let Some(now) = start::observe(info) else { return };
+        self.follow_marks(&info.session, now, out);
+    }
+
+    /// The marks of a session's report, against the last ones counted. Counted only once its task
+    /// is known: a report coming before the list shows the session's link waits for it.
+    fn follow_marks(&mut self, session: &str, now: start::Obs, out: &mut Vec<Event>) {
+        let prev = match self.sessions.get(session) {
+            Some(prev) => prev.clone(),
+            // Started here: from nothing. Otherwise (seen first now, after a restart or a new
+            // agent...) a baseline only.
+            None if self.fresh.contains(session) => start::Obs::default(),
+            None => {
+                self.sessions.insert(session.to_string(), now);
+                return;
+            }
+        };
+        let Some((project, list, task)) = self.task_of_session(session) else {
+            self.unlinked.insert(session.to_string(), now);
+            return;
+        };
+        self.unlinked.remove(session);
+        let signals = start::signals(&prev, &now);
+        self.sessions.insert(session.to_string(), now);
+        let branch = start::branch_state(self.repos.get(&project).and_then(|r| r.as_ref()), task.worktree.as_deref());
+        let instant = std::time::Instant::now();
+        for signal in signals {
+            let follow = self.follows.entry((list.clone(), task.id.clone())).or_default();
+            if let Some(change) = follow.signal(task.status, signal, &branch, instant) {
+                self.send_move(&project, &list, &task.id, change, out);
+            }
+        }
+        self.follows.entry((list, task.id)).or_default().reported(&branch);
+    }
+
+    /// The list changed: reports that waited for their session's link are counted now.
+    fn follow_unlinked(&mut self, out: &mut Vec<Event>) {
+        if !self.task_links {
+            return;
+        }
+        for (session, now) in std::mem::take(&mut self.unlinked) {
+            self.follow_marks(&session, now, out);
+        }
+    }
+
+    /// A new state of a group's repository: a turn end's commit may show up in it.
+    fn follow_branches(&mut self, project: &str, out: &mut Vec<Event>) {
+        if !self.task_links {
+            return;
+        }
+        let Some(list) = self.boards.get(project).and_then(|b| b.list.clone()) else { return };
+        let repo = self.repos.get(project).and_then(|r| r.clone());
+        let instant = std::time::Instant::now();
+        for task in list.tasks.iter().filter(|t| t.removed.is_none()) {
+            let Some(follow) = self.follows.get_mut(&(list.key.clone(), task.id.clone())).filter(|f| f.awaits_branch()) else { continue };
+            if let Some(change) = follow.branch(task.status, &start::branch_state(repo.as_ref(), task.worktree.as_deref()), instant) {
+                self.send_move(project, &list.key, &task.id, change, out);
+            }
+        }
+    }
+
+    /// Once both the group's list and its repository are known: a task linked to a worktree the
+    /// repository no longer has (the cleanup removed it, even while the app was closed) loses that
+    /// link, never the task, its branch or its status. A folder linked during this run and not yet
+    /// seen in any list is left alone (the list may predate it).
+    fn reconcile(&mut self, project: &str, out: &mut Vec<Event>) {
+        if !self.task_links {
+            return;
+        }
+        let (Some(Some(repo)), Some(tasks)) = (self.repos.get(project), self.boards.get(project).and_then(|b| b.list.as_ref()).map(|l| l.tasks.clone())) else { return };
+        let paths = start::worktree_paths(repo);
+        for task in tasks.iter().filter(|t| t.removed.is_none()) {
+            if self.clearing.contains(&task.id) || self.starts.contains_key(&task.id) {
+                continue;
+            }
+            let Some(w) = task.worktree.as_deref() else { continue };
+            if paths.iter().any(|p| start::same_path(p, w)) || self.linked_unseen.iter().any(|p| start::same_path(p, w)) {
+                continue;
+            }
+            self.clearing.insert(task.id.clone());
+            let op = TaskOp::SetLinks { task: task.id.clone(), worktree: Some(LinkChange::Clear), branch: None, session: None };
+            self.send(project, op, None, Pending::ClearLink { reference: task.reference.clone() }, out);
         }
     }
 
@@ -451,16 +707,17 @@ impl Tasks {
         // Borrowed out for the frame (no copy), put back after.
         let board = self.boards.remove(&project.id);
         let mut actions = Vec::new();
-        Panel::left("tasks").resizable(true).default_size(360.0).min_size(260.0).show(ui, |ui| self.panel_body(ui, &project, board.as_ref(), focus, &mut actions, events));
+        Panel::left("tasks").resizable(true).default_size(360.0).min_size(260.0).show(ui, |ui| self.panel_body(ui, world, &project, board.as_ref(), focus, &mut actions, events));
         if let Some(board) = board {
             self.boards.entry(project.id.clone()).or_insert(board);
         }
         for action in actions {
-            self.act(&project.id, action, events);
+            self.act(world, &project.id, action, events);
         }
     }
 
-    fn panel_body(&mut self, ui: &mut Ui, project: &Project, board: Option<&TaskBoard>, focus: bool, actions: &mut Vec<Action>, events: &mut Vec<Event>) {
+    #[allow(clippy::too_many_arguments)]
+    fn panel_body(&mut self, ui: &mut Ui, world: &World, project: &Project, board: Option<&TaskBoard>, focus: bool, actions: &mut Vec<Action>, events: &mut Vec<Event>) {
         ui.add_space(6.0);
         Sides::new().shrink_left().show(
             ui,
@@ -512,12 +769,16 @@ impl Tasks {
             ui.label(RichText::new(t().tasks_empty).color(theme::TEXT_DIM));
             return;
         }
+        let base = self.readiness(project, writable);
+        let launching: Vec<String> = self.starts.keys().cloned().collect();
+        let blocked = move |t: &Task| start::blocked(start::Readiness { starting: launching.contains(&t.id), ..base });
+        let ctx = StartCtx { world, blocked: &blocked };
         ScrollArea::vertical().id_salt("tasks-list").auto_shrink([false, false]).show(ui, |ui| {
             for (status, tasks) in sections(&list.tasks) {
                 let header = format!("{} ({})", t().task_status(status), tasks.len());
                 CollapsingHeader::new(RichText::new(header).small().strong().color(theme::TEXT_DIM)).id_salt(("tasks-section", status as u8)).default_open(!status.finished()).show(ui, |ui| {
                     for task in tasks {
-                        actions.extend(row(ui, task, &list.tasks, writable));
+                        actions.extend(row(ui, task, &list.tasks, writable, &ctx));
                     }
                 });
             }
@@ -596,8 +857,13 @@ impl Tasks {
         }
     }
 
-    /// The task editor (a modal window) and the merge confirmation. Call after the panels.
-    pub fn dialogs(&mut self, ctx: &egui::Context, events: &mut Vec<Event>) {
+    /// The task editor (a modal window), the merge confirmation, and a start's dialogs. Call after
+    /// the panels.
+    pub fn dialogs(&mut self, ctx: &egui::Context, world: &World, events: &mut Vec<Event>) {
+        if self.starter.is_some() {
+            self.starter_ui(ctx, world, events);
+            return;
+        }
         if let Some((key, found)) = self.merge.clone() {
             let list = self.boards.get(&key).and_then(|b| b.list.as_ref());
             let here = list.map_or(0, |l| l.live());
@@ -619,17 +885,30 @@ impl Tasks {
         let Some(key) = self.editor.as_ref().map(|e| e.key.clone()) else { return };
         // Borrowed out for the frame (no copy), put back after.
         let board = self.boards.remove(&key);
-        self.editor_ui(ctx, board.as_ref(), events);
+        let start = self.editor_ui(ctx, world, board.as_ref(), events);
         if let Some(board) = board {
-            self.boards.entry(key).or_insert(board);
+            self.boards.entry(key.clone()).or_insert(board);
+        }
+        if let Some(action) = start {
+            self.editor = None;
+            self.act(world, &key, action, events);
         }
     }
 
-    fn editor_ui(&mut self, ctx: &egui::Context, board: Option<&TaskBoard>, events: &mut Vec<Event>) {
+    /// The editor; its start button's action (the editor then closes).
+    fn editor_ui(&mut self, ctx: &egui::Context, world: &World, board: Option<&TaskBoard>, events: &mut Vec<Event>) -> Option<Action> {
         let empty: &[Task] = &[];
         let tasks = board.and_then(|b| b.list.as_ref()).map_or(empty, |l| l.tasks.as_slice());
         let writable = self.capable == Some(true) && board.is_some_and(|b| !b.read_only && b.list.is_some());
-        let Some(e) = self.editor.as_mut() else { return };
+        let base = self.editor.as_ref().and_then(|e| world.project(&e.key)).map(|p| self.readiness(p, writable));
+        let launching: Vec<String> = self.starts.keys().cloned().collect();
+        let blocked = move |t: &Task| match base {
+            Some(base) => start::blocked(start::Readiness { starting: launching.contains(&t.id), ..base }),
+            None => Some(Blocked::NoFolder),
+        };
+        let start_ctx = StartCtx { world, blocked: &blocked };
+        let mut start_action = None;
+        let e = self.editor.as_mut()?;
         let task = find(tasks, &e.task).filter(|t| t.removed.is_none());
         // Gone (removed elsewhere, list unreadable for a moment...): the text stays; back if it is.
         e.gone = task.is_none();
@@ -671,7 +950,17 @@ impl Tasks {
                         ui.selectable_value(&mut e.status, s, t().task_status(s));
                     }
                 });
+                // Started from what is saved: not while the fields hold unsaved text.
+                if let Some(task) = task {
+                    ui.add_space(12.0);
+                    let dirty = e.dirty();
+                    ui.add_enabled_ui(!dirty, |ui| start_action = start_button(ui, task, &start_ctx)).response.on_disabled_hover_text(t().task_start_save_first);
+                }
             });
+            if let Some(branch) = task.and_then(|t| t.branch.as_deref()) {
+                let place = task.and_then(|t| t.worktree.as_deref()).map_or_else(|| branch.to_string(), |w| format!("{branch} · {w}"));
+                ui.label(RichText::new(format!("⎇ {place}")).small().color(theme::TEXT_DIM));
+            }
             if e.conflict {
                 ui.add_space(4.0);
                 ui.label(RichText::new(t().task_conflict).color(ERROR));
@@ -779,7 +1068,7 @@ impl Tasks {
         });
         if close {
             self.editor = None;
-            return;
+            return None;
         }
         if overwrite && let Some(theirs) = task {
             // Keep mine: checked against their version now, saved again.
@@ -802,12 +1091,59 @@ impl Tasks {
         if save {
             self.save(events);
         }
+        start_action
     }
+}
+
+/// The task each card was started for: the cards whose session a live task records (an
+/// unfinished one first, when two do).
+fn card_tasks(boards: &HashMap<ProjectId, TaskBoard>, world: &World) -> BTreeMap<CardId, CardTask> {
+    let mut out: BTreeMap<CardId, (bool, CardTask)> = BTreeMap::new();
+    for list in boards.values().filter_map(|b| b.list.as_ref()) {
+        for t in list.tasks.iter().filter(|t| t.removed.is_none()) {
+            let Some(card) = t.session.as_deref().and_then(|s| world.card_by_session(s)) else { continue };
+            let finished = t.status.finished();
+            if out.get(&card.id).is_none_or(|(f, _)| *f && !finished) {
+                out.insert(card.id.clone(), (finished, CardTask { reference: t.reference.clone(), title: start::visible_text(&t.title) }));
+            }
+        }
+    }
+    out.into_iter().map(|(k, (_, v))| (k, v)).collect()
+}
+
+/// What a row may do about starting its task: the action, and why it cannot go now.
+struct StartCtx<'a> {
+    world: &'a World,
+    blocked: &'a dyn Fn(&Task) -> Option<Blocked>,
+}
+
+/// The start button of a task (`Start`, `Resume` or `Go to`), disabled with its reason.
+fn start_button(ui: &mut Ui, task: &Task, ctx: &StartCtx) -> Option<Action> {
+    let action = start::row_action(task, ctx.world);
+    let (label, hint) = match &action {
+        RowAction::Start => (t().task_start, t().task_start_hint),
+        RowAction::Resume => (t().task_resume, t().task_resume_hint),
+        RowAction::GoTo(_) => (t().task_go_to, t().task_go_to_hint),
+        RowAction::None => return None,
+    };
+    let blocked = match action {
+        RowAction::GoTo(_) => None,
+        _ => (ctx.blocked)(task),
+    };
+    let hint = blocked.as_ref().map_or(hint, blocked_text);
+    let clicked = ui.add_enabled(blocked.is_none(), Button::new(RichText::new(label).small())).on_hover_text(hint).on_disabled_hover_text(hint).clicked();
+    if matches!(action, RowAction::Resume) {
+        ui.label(RichText::new(t().task_card_closed).small().color(theme::TEXT_DIM));
+    }
+    clicked.then(|| match action {
+        RowAction::GoTo(card) => Action::GoTo(card),
+        _ => Action::Start { task: task.id.clone(), ask: false },
+    })
 }
 
 /// One task row: reference, priority mark, title (click: edit; right-click: actions), then what
 /// holds it up (or "ready"), its notes and the actions menu.
-fn row(ui: &mut Ui, task: &Task, tasks: &[Task], writable: bool) -> Vec<Action> {
+fn row(ui: &mut Ui, task: &Task, tasks: &[Task], writable: bool, start_ctx: &StartCtx) -> Vec<Action> {
     let mut actions = Vec::new();
     let (left, right) = Sides::new().shrink_left().show(
         ui,
@@ -825,7 +1161,7 @@ fn row(ui: &mut Ui, task: &Task, tasks: &[Task], writable: bool) -> Vec<Action> 
             }
             if writable {
                 title.context_menu(|ui| {
-                    if let Some(a) = row_menu(ui, task, tasks) {
+                    if let Some(a) = row_menu(ui, task, tasks, start_ctx) {
                         pick = Some(a);
                     }
                 });
@@ -835,7 +1171,15 @@ fn row(ui: &mut Ui, task: &Task, tasks: &[Task], writable: bool) -> Vec<Action> 
         |ui| {
             let mut pick = None;
             if writable {
-                ui.menu_button("…", |ui| pick = row_menu(ui, task, tasks)).response.on_hover_text(t().task_actions);
+                ui.menu_button("…", |ui| pick = row_menu(ui, task, tasks, start_ctx)).response.on_hover_text(t().task_actions);
+            }
+            // Shown read-only too: disabled, with the reason.
+            if let Some(a) = start_button(ui, task, start_ctx) {
+                pick = Some(a);
+            }
+            if let Some(branch) = &task.branch {
+                let hover = task.worktree.as_deref().map_or_else(|| branch.clone(), |w| format!("{branch}\n{w}"));
+                ui.label(RichText::new(format!("⎇ {}", crate::shell::widgets::elide_middle(branch, 16))).small().color(theme::TEXT_DIM)).on_hover_text(hover);
             }
             if !task.notes.is_empty() {
                 ui.label(RichText::new((t().task_notes)(task.notes.len())).small().color(theme::TEXT_DIM));
@@ -856,9 +1200,20 @@ fn row(ui: &mut Ui, task: &Task, tasks: &[Task], writable: bool) -> Vec<Action> 
     actions
 }
 
-/// The actions on one task: order, status, removal.
-fn row_menu(ui: &mut Ui, task: &Task, tasks: &[Task]) -> Option<Action> {
+/// The actions on one task: start (always asking first), order, status, removal.
+fn row_menu(ui: &mut Ui, task: &Task, tasks: &[Task], start_ctx: &StartCtx) -> Option<Action> {
     let mut pick = None;
+    if matches!(start::row_action(task, start_ctx.world), RowAction::Start | RowAction::Resume) {
+        let blocked = (start_ctx.blocked)(task);
+        let button = ui.add_enabled(blocked.is_none(), Button::new(t().task_start_options));
+        if let Some(b) = &blocked {
+            button.clone().on_disabled_hover_text(blocked_text(b));
+        }
+        if button.clicked() {
+            pick = Some(Action::Start { task: task.id.clone(), ask: true });
+        }
+        ui.separator();
+    }
     for (up, label) in [(true, t().task_move_up), (false, t().task_move_down)] {
         let op = move_op(tasks, &task.id, up);
         if ui.add_enabled(op.is_some(), Button::new(label)).clicked()
@@ -870,7 +1225,7 @@ fn row_menu(ui: &mut Ui, task: &Task, tasks: &[Task]) -> Option<Action> {
     ui.separator();
     for status in logic::DISPLAY.iter().rev().filter(|s| **s != task.status) {
         if ui.button((t().task_move_to)(t().task_status(*status))).clicked() {
-            pick = Some(Action::Op(TaskOp::SetStatus { task: task.id.clone(), status: *status }, Pending::Panel));
+            pick = Some(Action::Op(TaskOp::SetStatus { task: task.id.clone(), status: *status, from: None }, Pending::Panel));
         }
     }
     ui.separator();
@@ -899,6 +1254,7 @@ mod tests {
             templates: Vec::new(),
             messages: Vec::new(),
             worktree_location: None,
+            task_settings: Default::default(),
         }
     }
 
@@ -912,7 +1268,7 @@ mod tests {
     }
 
     fn hello(tasks: bool) -> Event {
-        Event::Agent(AgentEvent::Hello { version: "x".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks, task_hooks: None })
+        Event::Agent(AgentEvent::Hello { version: "x".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks, task_hooks: None, task_links: true, shell: None })
     }
 
     fn task(id: &str) -> Task {
@@ -960,34 +1316,34 @@ mod tests {
         let mut tasks = Tasks::default();
         let mut w = world();
         let mut out = vec![];
-        tasks.poll(&w, &mut out);
+        tasks.poll(&mut w, &mut out);
         assert_eq!(cmds(&out), vec![AgentCmd::WatchTasks { key: "shop".into(), path: "~/shop".into() }]);
         let mut out = vec![];
-        tasks.poll(&w, &mut out);
+        tasks.poll(&mut w, &mut out);
         assert!(out.is_empty(), "once");
         // Another group, without a folder: nothing to follow.
         w.space = Some("draft".into());
         let mut out = vec![];
-        tasks.poll(&w, &mut out);
+        tasks.poll(&mut w, &mut out);
         assert_eq!(cmds(&out), vec![AgentCmd::UnwatchTasks { key: "shop".into() }]);
         // A task of shop being edited keeps shop followed while another space is open.
         w.space = Some("shop".into());
-        tasks.poll(&w, &mut vec![]);
+        tasks.poll(&mut w, &mut vec![]);
         tasks.handle(&board("shop", vec![task("a")]), &mut w, &mut vec![]);
         tasks.open_editor("shop", "a");
         w.space = Some("blog".into());
         let mut out = vec![];
-        tasks.poll(&w, &mut out);
+        tasks.poll(&mut w, &mut out);
         assert_eq!(cmds(&out), vec![AgentCmd::WatchTasks { key: "blog".into(), path: "~/blog".into() }], "shop stays");
         // A new agent: subscribed again.
         tasks.handle(&hello(true), &mut w, &mut vec![]);
         let mut out = vec![];
-        tasks.poll(&w, &mut out);
+        tasks.poll(&mut w, &mut out);
         assert_eq!(cmds(&out).len(), 2);
         // An agent without task lists is asked nothing.
         tasks.handle(&hello(false), &mut w, &mut vec![]);
         let mut out = vec![];
-        tasks.poll(&w, &mut out);
+        tasks.poll(&mut w, &mut out);
         assert!(cmds(&out).is_empty());
     }
 

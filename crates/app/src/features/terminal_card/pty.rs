@@ -14,6 +14,7 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::tty;
 use alacritty_terminal::vte::ansi::Processor;
 
+use crate::shell::event::TaskEnv;
 use crate::shell::launch;
 use crate::shell::world::CardId;
 
@@ -80,7 +81,14 @@ const STAGE_DIR: &str = "~/.local/share/tcanvas/commands";
 /// the shell never reads half a file). First sweeps staged files left over for more than 10
 /// minutes (an app that quit before using them): regular files named like the app's sessions
 /// only, in that folder only, never through a symbolic link.
-const STAGE_SCRIPT: &str = r#"umask 077; d="$HOME/.local/share/tcanvas/commands"; mkdir -p "$d" || exit 1; find "$d" ! -path "$d" -prune -type f -name 'tc_*' -mmin +10 -exec rm -f {} + 2>/dev/null; cat > "$d/$1.tmp" && mv -f "$d/$1.tmp" "$d/$1""#;
+///
+/// Then sweeps the prompt files of cards started for a task (`<session>-task`) whose session is
+/// gone from the canvas's tmux server `$2` (the card was closed, its command killed): they hold
+/// the task's text, and the command that read them is over.
+const STAGE_SCRIPT: &str = r#"umask 077; d="$HOME/.local/share/tcanvas/commands"; mkdir -p "$d" || exit 1; find "$d" ! -path "$d" -prune -type f -name 'tc_*' -mmin +10 -exec rm -f {} + 2>/dev/null; for f in "$d"/tc_*-task; do [ -f "$f" ] || continue; s=${f##*/}; s=${s%-task}; tmux -L "$2" has-session -t "=$s" 2>/dev/null || rm -f "$f"; done; cat > "$d/$1.tmp" && mv -f "$d/$1.tmp" "$d/$1""#;
+
+/// Deletes the prompt file of a card started for a task (`$1`: its session).
+const DISCARD_TASK_SCRIPT: &str = r#"rm -f "$HOME/.local/share/tcanvas/commands/$1-task""#;
 
 /// Waits (at most `$3` tenths of a second) until the shell has taken the staged file `$1`, then
 /// claims it if it is still there: `mv` (here) and `rm` (the file's first line, in the shell) race
@@ -173,24 +181,92 @@ pub fn staged_file_with_setup(session: &str, setup: &str, text: &str) -> String 
     )
 }
 
+/// The staged file of a card started for a task: the task's texts travel as data, never as shell
+/// syntax.
+///
+/// Like `staged_file_with_setup`, the first line claims the file (`mv`), shows what runs (the
+/// setup and the command, dimmed: never the task's texts), and has `sed` write the commented data
+/// lines into private files next to it (`-title`, `-task`; `-setup` with a setup): the title on
+/// one line, then the prompt, each line prefixed with `#` so no shell ever runs it. Then four
+/// fixed lines export the variables the command's placeholders name (`TCANVAS_TASK_REF`, a
+/// reference made of letters and digits only, quoted; the others read back from their files by
+/// `cat` inside double quotes, so nothing in them is expanded or split), the title file is
+/// deleted, the setup (if any) runs as in `staged_file_with_setup`, and the command follows. The
+/// prompt file stays for the command (`{task_file}`); the next staging sweeps it after ten
+/// minutes. `$(...)` drops the trailing line break `sed` adds: the variables hold the texts
+/// exactly (the prompt never ends with a line break, see `features::tasks::start::build_prompt`).
+pub fn staged_file_with_task(session: &str, setup: Option<&str>, task: &TaskEnv, text: &str) -> String {
+    let path = format!("{STAGE_DIR}/{session}");
+    let claimed = format!("{path}-run");
+    let private = |suffix: &str| format!("$HOME/.local/share/tcanvas/commands/{session}-{suffix}");
+    // Line 1 is ours; the others are numbered as they are pushed.
+    let mut lines: Vec<String> = vec![String::new()];
+    let mut writes: Vec<(usize, usize, &str)> = Vec::new();
+    let mut shown_setup = None;
+    if let Some(setup) = setup {
+        let first = lines.len() + 1;
+        lines.push(format!("#/bin/rm -f {path}-setup"));
+        lines.extend(setup.split('\n').map(|l| format!("#{l}")));
+        writes.push((first, lines.len(), "setup"));
+        shown_setup = Some((first + 1, lines.len()));
+    }
+    lines.push(format!("#{}", task.title.replace(['\n', '\r'], " ")));
+    writes.push((lines.len(), lines.len(), "title"));
+    let first = lines.len() + 1;
+    lines.extend(task.prompt.split('\n').map(|l| format!("#{l}")));
+    writes.push((first, lines.len(), "task"));
+    lines.push(format!("export TCANVAS_TASK_REF={}", sh_quote(&task.reference)));
+    lines.push(format!("export TCANVAS_TASK_FILE=\"{}\"", private("task")));
+    lines.push("export TCANVAS_TASK=\"$(/bin/cat \"$TCANVAS_TASK_FILE\")\"".into());
+    lines.push(format!("export TCANVAS_TASK_TITLE=\"$(/bin/cat \"{0}\")\"; /bin/rm -f \"{0}\"", private("title")));
+    if setup.is_some() {
+        lines.push(format!("builtin source {path}-setup || ! /bin/rm -f {path}-setup \"$TCANVAS_TASK_FILE\" || return"));
+        lines.push(format!("/bin/rm -f {path}-setup"));
+    }
+    let command = lines.len() + 1;
+    lines.extend(text.split('\n').map(String::from));
+    let last = lines.len();
+    // Once the command ends, its prompt file goes (an empty line first: a command ending with a
+    // `\` continues onto it, not onto the removal).
+    lines.push(String::new());
+    lines.push("/bin/rm -f \"$TCANVAS_TASK_FILE\"".into());
+    let show = match shown_setup {
+        Some((a, b)) => format!("/bin/sed -n -e '{a},{b}s/^#//' -e '{a}s/^/\x1b[2m/' -e '{last}s/$/\x1b[0m/' -e '{a},{b}p' -e '{command},{last}p' {claimed}"),
+        None => format!("/bin/sed -n -e '{command}s/^/\x1b[2m/' -e '{last}s/$/\x1b[0m/' -e '{command},{last}p' {claimed}"),
+    };
+    let write: String = writes.iter().map(|(a, b, suffix)| format!(" -e '{a},{b}s/^#//' -e \"{a},{b}w {}\"", private(suffix))).collect();
+    // The private files are the user's only (a subshell: the shell's own umask is left alone).
+    lines[0] = format!("/bin/mv {path} {claimed} 2>/dev/null || return; {show}; (umask 077; /bin/sed -n{write} {claimed}); /bin/rm -f {claimed}");
+    lines.iter().map(|l| format!("{l}\n")).collect()
+}
+
 /// What a new card runs once: a setup (a worktree recipe's), then its command only if the setup
-/// succeeded; either may be missing, not both.
+/// succeeded; either may be missing, not both. A card started for a task has its task, read by
+/// the command through variables.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Start {
     pub setup: Option<String>,
     pub command: Option<String>,
+    pub task: Option<TaskEnv>,
 }
 
 impl Start {
     /// Each text as staged (`staged_text`); `None` when both are blank.
     pub fn new(setup: Option<&str>, command: Option<&str>) -> Option<Start> {
         let (setup, command) = (setup.and_then(staged_text), command.and_then(staged_text));
-        (setup.is_some() || command.is_some()).then_some(Start { setup, command })
+        (setup.is_some() || command.is_some()).then_some(Start { setup, command, task: None })
+    }
+
+    /// The start of a card for a task: its command reads the task from variables. `None` for a
+    /// blank command.
+    pub fn for_task(setup: Option<&str>, command: &str, task: TaskEnv) -> Option<Start> {
+        let command = staged_text(command)?;
+        Some(Start { setup: setup.and_then(staged_text), command: Some(command), task: Some(task) })
     }
 
     /// A command alone.
     pub fn command(text: &str) -> Start {
-        Start { setup: None, command: Some(text.to_string()) }
+        Start { setup: None, command: Some(text.to_string()), task: None }
     }
 
     /// Both texts, the setup first, as offered for copying when they did not run.
@@ -200,6 +276,9 @@ impl Start {
 
     /// The staged file for this start.
     pub fn file(&self, session: &str) -> String {
+        if let (Some(task), Some(command)) = (&self.task, self.command.as_deref()) {
+            return staged_file_with_task(session, self.setup.as_deref(), task, command);
+        }
         match (self.setup.as_deref(), self.command.as_deref()) {
             (Some(setup), Some(command)) => staged_file_with_setup(session, setup, command),
             (Some(text), None) | (None, Some(text)) => staged_file(session, text),
@@ -215,7 +294,7 @@ pub fn stage_command(session: &str, start: &Start) -> io::Result<()> {
     if !session_is_plain(session) {
         return Err(io::Error::other(format!("session name {session:?}")));
     }
-    let out = run_with_stdin(&stage_launch(cfg!(windows), test_home().as_deref(), session), start.file(session).as_bytes())?;
+    let out = run_with_stdin(&stage_launch(cfg!(windows), test_home().as_deref(), &protocol::tmux_socket(), session), start.file(session).as_bytes())?;
     if out.status.success() { Ok(()) } else { Err(io::Error::other(format!("{} {}", out.status, String::from_utf8_lossy(&out.stderr).trim()))) }
 }
 
@@ -256,8 +335,18 @@ fn run_with_stdin(l: &Launch, input: &[u8]) -> io::Result<std::process::Output> 
     child.wait_with_output()
 }
 
-fn stage_launch(windows: bool, home: Option<&str>, session: &str) -> Launch {
-    sh_launch(windows, home, STAGE_SCRIPT.into(), vec!["tcanvas-stage".into(), session.into()])
+fn stage_launch(windows: bool, home: Option<&str>, socket: &str, session: &str) -> Launch {
+    sh_launch(windows, home, STAGE_SCRIPT.into(), vec!["tcanvas-stage".into(), session.into(), socket.into()])
+}
+
+/// Deletes a card's prompt file (its card closed, its session ended), in the background.
+pub fn discard_task_file_in_background(session: String) {
+    if !session_is_plain(&session) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let _ = run_with_stdin(&sh_launch(cfg!(windows), test_home().as_deref(), DISCARD_TASK_SCRIPT.into(), vec!["tcanvas-discard".into(), session]), b"");
+    });
 }
 
 fn confirm_launch(windows: bool, home: Option<&str>, socket: &str, session: &str, tenths: u32) -> Launch {
@@ -542,7 +631,7 @@ mod tests {
     fn a_test_home_is_set_for_everything_run_on_the_linux_side() {
         let l = attach_launch(true, Some("/tmp/scratch home"), "s", "tc_x", None, None);
         assert_eq!(l.args[..6], ["--cd", "~", "-e", "env", "HOME=/tmp/scratch home", "sh"]);
-        assert_eq!(stage_launch(false, Some("/tmp/h"), "tc_x").args[..2], ["HOME=/tmp/h", "sh"]);
+        assert_eq!(stage_launch(false, Some("/tmp/h"), "s", "tc_x").args[..2], ["HOME=/tmp/h", "sh"]);
         assert_eq!(confirm_launch(false, Some("/tmp/h"), "s", "tc_x", 3).program, "env");
     }
 
@@ -586,9 +675,9 @@ mod tests {
 
     #[test]
     fn the_command_text_never_travels_on_a_command_line() {
-        let stage = |windows| stage_launch(windows, None, "tc_x");
-        assert_eq!(stage(false), Launch { program: "sh".into(), args: ["-c", STAGE_SCRIPT, "tcanvas-stage", "tc_x"].map(String::from).to_vec() });
-        assert_eq!(stage(true), Launch { program: "wsl.exe".into(), args: ["--cd", "~", "-e", "sh", "-c", STAGE_SCRIPT, "tcanvas-stage", "tc_x"].map(String::from).to_vec() });
+        let stage = |windows| stage_launch(windows, None, "my socket", "tc_x");
+        assert_eq!(stage(false), Launch { program: "sh".into(), args: ["-c", STAGE_SCRIPT, "tcanvas-stage", "tc_x", "my socket"].map(String::from).to_vec() });
+        assert_eq!(stage(true), Launch { program: "wsl.exe".into(), args: ["--cd", "~", "-e", "sh", "-c", STAGE_SCRIPT, "tcanvas-stage", "tc_x", "my socket"].map(String::from).to_vec() });
         let confirm = confirm_launch(true, None, "my socket", "tc_x", 300);
         assert_eq!(confirm.args[..6], ["--cd", "~", "-e", "sh", "-c", CONFIRM_SCRIPT]);
         assert_eq!(confirm.args[6..], ["tcanvas-confirm", "tc_x", "my socket", "300"]);
@@ -657,7 +746,7 @@ mod tests {
         }
 
         fn stage_start(&self, session: &str, start: &Start) {
-            assert_eq!(self.sh(&stage_launch(false, Some(&self.home.display().to_string()), session), start.file(session).as_bytes()), Some(0));
+            assert_eq!(self.sh(&stage_launch(false, Some(&self.home.display().to_string()), &self.socket, session), start.file(session).as_bytes()), Some(0));
         }
 
         /// The attach script without its final `exec tmux new-session -A` (it needs a terminal).
@@ -801,11 +890,150 @@ mod tests {
         }
     }
 
+    /// Task text written to hurt: quotes of every kind, command substitutions, backticks, `;`, a
+    /// leading `-`, placeholders of its own, `!`, a here-document end, a comment line, backslashes,
+    /// trailing spaces, and long.
+    #[cfg(unix)]
+    fn hostile_task() -> protocol::Task {
+        let title = "-x Fix \"quotes\" 'single' $(touch pwned-title) `touch pwned-tick`; rm -rf ~ {task} {task_title} !! \\ end";
+        let mut description = String::from("$(touch pwned-desc)\n`touch pwned-back`; touch pwned-semi\n-rf --force\n{task} {task_file} {task_ref} ${HOME}\n");
+        description.push_str("# a comment line\nEOF\n'\"'\"'\n!important !! !$\nback\\slash \\\\ \\n trailing   \n\n\nUNSEEN-MARKER caf\u{e9} \u{65e5}\u{672c}\n");
+        description.push_str(&"long line of a task description, ".repeat(900));
+        protocol::Task {
+            id: "t1".into(),
+            reference: "k3f".into(),
+            title: title.into(),
+            description,
+            status: protocol::TaskStatus::Todo,
+            priority: protocol::Priority::None,
+            depends_on: vec![],
+            notes: vec![],
+            created: 0,
+            updated: 0,
+            rev: 1,
+            content_rev: 1,
+            removed: None,
+            worktree: None,
+            branch: None,
+            session: None,
+            extra: protocol::Extra::new(),
+        }
+    }
+
+    /// A card started for a task, through the whole Linux side (staging, the session, the user's
+    /// shell sourcing the file), in bash then zsh with hostile rc files: every placeholder reaches
+    /// the command byte for byte as the prompt builder made it, nothing in the task's text runs,
+    /// the card shows the command and never the task's text, with and without a setup.
+    #[cfg(unix)]
+    #[test]
+    fn a_task_reaches_its_command_as_data_byte_for_byte() {
+        use protocol::task_command::expand_task_command;
+        if !tmux_available() {
+            return;
+        }
+        let task = hostile_task();
+        // A prompt as the tasks slice builds it: the instruction line, then the task's texts.
+        let prompt = format!("tcanvas: record your progress (k3f).\n\n--- task #k3f ---\n{}\n\n{}\n--- end of task #k3f ---", task.title, task.description.trim_end());
+        let env = TaskEnv { reference: task.reference.clone(), title: task.title.clone(), prompt };
+        assert!(env.prompt.len() > 30_000 && env.prompt.contains("$(touch pwned-desc)") && env.prompt.contains("{task}"));
+        let template = "printf '%s' {task} > a1.txt; printf '%s' {task_ref} > a2.txt; printf '%s' {task_title} > a3.txt; cat {task_file} > a4.txt; stat -c %a {task_file} > mode.txt\nprintf '[%s]' {task_ref} > a5.txt; echo done >> runs.txt";
+        let expanded = expand_task_command(template);
+        assert!(expanded.accepted(), "{:?}", expanded.refused);
+        let command = expanded.command;
+        for shell in ["bash", "zsh"] {
+            let Some(path) = shell_path(shell) else {
+                eprintln!("{shell} missing: skipped");
+                continue;
+            };
+            let live = Live::new(&format!("task-{shell}"));
+            std::fs::write(live.home.join(".zshrc"), format!("setopt noclobber append_create\n{HOSTILE_RC}")).unwrap();
+            std::fs::write(live.home.join(".bashrc"), format!("bind 'set enable-bracketed-paste off'\nset -o noclobber\n{HOSTILE_RC}")).unwrap();
+            std::fs::write(live.home.join(".bash_profile"), ". ~/.bashrc\n").unwrap();
+            for (session, setup) in [("tc_x", None), ("tc_y", Some("echo setup >> runs.txt"))] {
+                for k in 1..=5 {
+                    let _ = std::fs::remove_file(live.home.join(format!("a{k}.txt")));
+                    let _ = std::fs::remove_file(live.home.join("mode.txt"));
+                }
+                let start = Start::for_task(setup, &command, env.clone()).unwrap();
+                live.stage_start(session, &start);
+                live.create(session, &path);
+                assert_eq!(live.confirm(session, 300), Some(0), "{shell} {session}");
+                let runs = if setup.is_some() { "done\nsetup\ndone\n" } else { "done\n" };
+                assert_eq!(live.wait_file("runs.txt", runs), runs, "{shell} {session}");
+                let read = |name: &str| std::fs::read(live.home.join(name)).unwrap();
+                assert!(read("a1.txt") == env.prompt.as_bytes(), "{shell} {session}: the prompt, byte for byte");
+                assert_eq!(read("a2.txt"), b"k3f");
+                assert_eq!(String::from_utf8(read("a3.txt")).unwrap(), env.title, "{shell} {session}: the title on one line");
+                assert!(read("a4.txt") == format!("{}\n", env.prompt).as_bytes(), "{shell} {session}: the prompt file");
+                assert_eq!(read("a5.txt"), b"[k3f]");
+                assert_eq!(read("mode.txt"), b"600\n", "{shell}: the prompt file is the user's only");
+                let pwned: Vec<String> = std::fs::read_dir(&live.home).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("pwned")).collect();
+                assert!(pwned.is_empty(), "{shell} {session}: the task's text ran: {pwned:?}");
+                let screen = live.tmux(&["capture-pane", "-p", "-t", &format!("={session}:")]);
+                assert!(screen.contains("printf '%s' \"$TCANVAS_TASK\" > a1.txt"), "{shell}: the command is shown\n{screen}");
+                assert!(!screen.contains("UNSEEN-MARKER") && !screen.contains("pwned"), "{shell}: never the task's text\n{screen}");
+                assert!(!["fn-rm", "alias-sed", "fn-tail", "alias-mv", "fn-source"].iter().any(|m| screen.contains(m)), "{shell}: {screen}");
+            }
+            // Once the commands ended, nothing is left staged.
+            let left: Vec<String> = std::fs::read_dir(live.staged()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+            assert!(left.is_empty(), "{shell}: {left:?}");
+        }
+    }
+
+    #[test]
+    fn a_task_start_stages_its_texts_as_comments_and_shows_only_the_command() {
+        let task = TaskEnv { reference: "k3f".into(), title: "Fix 'it'".into(), prompt: "Line one\n# two\n\nfour $(x)".into() };
+        let file = Start::for_task(None, "claude \"$TCANVAS_TASK\"", task.clone()).unwrap().file("tc_x");
+        let lines: Vec<&str> = file.lines().collect();
+        let dir = "~/.local/share/tcanvas/commands";
+        let home = "$HOME/.local/share/tcanvas/commands";
+        assert_eq!(
+            lines[0],
+            format!(
+                "/bin/mv {dir}/tc_x {dir}/tc_x-run 2>/dev/null || return; /bin/sed -n -e '11s/^/\x1b[2m/' -e '11s/$/\x1b[0m/' -e '11,11p' {dir}/tc_x-run; (umask 077; /bin/sed -n -e '2,2s/^#//' -e \"2,2w {home}/tc_x-title\" -e '3,6s/^#//' -e \"3,6w {home}/tc_x-task\" {dir}/tc_x-run); /bin/rm -f {dir}/tc_x-run"
+            )
+        );
+        assert_eq!(
+            lines[1..],
+            [
+                "#Fix 'it'",
+                "#Line one",
+                "## two",
+                "#",
+                "#four $(x)",
+                "export TCANVAS_TASK_REF='k3f'",
+                &format!("export TCANVAS_TASK_FILE=\"{home}/tc_x-task\""),
+                "export TCANVAS_TASK=\"$(/bin/cat \"$TCANVAS_TASK_FILE\")\"",
+                &format!("export TCANVAS_TASK_TITLE=\"$(/bin/cat \"{home}/tc_x-title\")\"; /bin/rm -f \"{home}/tc_x-title\""),
+                "claude \"$TCANVAS_TASK\"",
+                "",
+                "/bin/rm -f \"$TCANVAS_TASK_FILE\"",
+            ]
+        );
+        // With a setup: shown with the command, written to its own file, sourced after the variables.
+        let with = Start::for_task(Some("npm ci"), "claude", task).unwrap().file("tc_x");
+        let lines: Vec<&str> = with.lines().collect();
+        assert!(lines[0].contains("-e '3,3s/^#//' -e '3s/^/\x1b[2m/' -e '15s/$/\x1b[0m/' -e '3,3p' -e '15,15p'"), "{}", lines[0]);
+        assert!(lines[0].contains(&format!("-e '2,3s/^#//' -e \"2,3w {home}/tc_x-setup\" -e '4,4s/^#//' -e \"4,4w {home}/tc_x-title\" -e '5,8s/^#//' -e \"5,8w {home}/tc_x-task\"")), "{}", lines[0]);
+        assert_eq!(lines[1..4], [format!("#/bin/rm -f {dir}/tc_x-setup").as_str(), "#npm ci", "#Fix 'it'"]);
+        assert_eq!(
+            lines[12..],
+            [
+                format!("builtin source {dir}/tc_x-setup || ! /bin/rm -f {dir}/tc_x-setup \"$TCANVAS_TASK_FILE\" || return").as_str(),
+                &format!("/bin/rm -f {dir}/tc_x-setup"),
+                "claude",
+                "",
+                "/bin/rm -f \"$TCANVAS_TASK_FILE\"",
+            ]
+        );
+        assert_eq!(Start::for_task(None, " \n ", TaskEnv { reference: "a".into(), title: "b".into(), prompt: "c".into() }), None, "no command, nothing to start");
+    }
+
     #[test]
     fn a_start_is_a_setup_a_command_or_both() {
         assert_eq!(Start::new(None, Some(" ")), None);
         assert_eq!(Start::new(Some("\r\n"), None), None);
-        assert_eq!(Start::new(Some("npm ci\r\n"), Some("claude")), Some(Start { setup: Some("npm ci".into()), command: Some("claude".into()) }));
+        assert_eq!(Start::new(Some("npm ci\r\n"), Some("claude")), Some(Start { setup: Some("npm ci".into()), command: Some("claude".into()), task: None }));
         let both = Start::new(Some("npm ci\nnpm run seed"), Some("claude")).unwrap();
         assert_eq!(both.text(), "npm ci\nnpm run seed\nclaude");
         // Alone, either is the plain staged file.
@@ -871,6 +1099,30 @@ mod tests {
         let left: std::collections::BTreeSet<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
         assert_eq!(left, ["other_old", "tc_link", "tc_new", "tc_x"].map(String::from).into());
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "keep", "never through a link");
+    }
+
+    /// A prompt file whose session is gone (its card closed, its command killed before it could
+    /// delete it) goes at the next staging; one whose session lives stays.
+    #[cfg(unix)]
+    #[test]
+    fn staging_sweeps_the_prompt_files_of_sessions_that_are_gone() {
+        if !tmux_available() {
+            return;
+        }
+        let live = Live::new("task-sweep");
+        let dir = live.staged();
+        std::fs::create_dir_all(&dir).unwrap();
+        live.tmux(&["new-session", "-d", "-s", "tc_live"]);
+        for f in ["tc_live-task", "tc_gone-task"] {
+            std::fs::write(dir.join(f), "the task's text").unwrap();
+        }
+        live.stage("tc_x", "echo x");
+        let left: std::collections::BTreeSet<String> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(left, ["tc_live-task", "tc_x"].map(String::from).into());
+        // Its card removed: the file goes at once.
+        let l = sh_launch(false, Some(&live.home.display().to_string()), DISCARD_TASK_SCRIPT.into(), vec!["tcanvas-discard".into(), "tc_live".into()]);
+        assert_eq!(live.sh(&l, b""), Some(0));
+        assert!(!dir.join("tc_live-task").exists());
     }
 
     #[test]

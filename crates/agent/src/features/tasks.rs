@@ -51,8 +51,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protocol::{
-    AgentEvent, Extra, FoundList, FoundWhy, MAX_TASK_DESCRIPTION, MAX_TASK_NOTE, MAX_TASK_NOTES, MAX_TASK_TITLE, MAX_TASKS, MAX_TRASH, Problem, TASKS_FORMAT, Task, TaskBoard, TaskField, TaskList,
-    TaskNote, TaskOp,
+    AgentEvent, Extra, FoundList, FoundWhy, LinkChange, MAX_TASK_DESCRIPTION, MAX_TASK_LINK, MAX_TASK_NOTE, MAX_TASK_NOTES, MAX_TASK_TITLE, MAX_TASKS, MAX_TRASH, Problem, TASKS_FORMAT, Task,
+    TaskBoard, TaskField, TaskList, TaskNote, TaskOp,
 };
 
 use super::changes::{git_command, resolve};
@@ -760,6 +760,11 @@ fn check_description(description: &str) -> Result<(), Problem> {
     Ok(())
 }
 
+/// A link the store keeps: not empty, at most `MAX_TASK_LINK` bytes, no control character.
+fn link_valid(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_TASK_LINK && !value.chars().any(char::is_control)
+}
+
 /// Any change of a task.
 fn touch(t: &mut Task, now: u64) {
     t.updated = now;
@@ -837,13 +842,35 @@ pub fn apply_op(list: &mut TaskList, op: &TaskOp, expect: Option<u64>, now: u64,
                 t.content_rev = t.content_rev.saturating_add(1);
             }
         }
-        TaskOp::SetStatus { task, status } => {
+        TaskOp::SetStatus { task, status, from } => {
             let i = live(list, task)?;
+            if from.is_some_and(|f| f != list.tasks[i].status) {
+                return Err(Problem::TaskStatusChanged { task: list.tasks[i].reference.clone() });
+            }
             if list.tasks[i].status != *status {
                 let mut t = list.tasks.remove(i);
                 t.status = *status;
                 touch(&mut t, now);
                 list.tasks.push(t);
+            }
+        }
+        TaskOp::SetLinks { task, worktree, branch, session } => {
+            let i = live(list, task)?;
+            let changes = [worktree, branch, session];
+            if changes.iter().any(|c| matches!(c, Some(LinkChange::Set(v)) if !link_valid(v))) {
+                return Err(Problem::TaskLinkRefused);
+            }
+            let t = &mut list.tasks[i];
+            let before = (t.worktree.clone(), t.branch.clone(), t.session.clone());
+            for (field, change) in [(&mut t.worktree, worktree), (&mut t.branch, branch), (&mut t.session, session)] {
+                match change {
+                    Some(LinkChange::Set(v)) => *field = Some(v.clone()),
+                    Some(LinkChange::Clear) => *field = None,
+                    None => {}
+                }
+            }
+            if (t.worktree.clone(), t.branch.clone(), t.session.clone()) != before {
+                touch(t, now);
             }
         }
         TaskOp::Move { task, before } => {
@@ -1280,6 +1307,56 @@ mod tests {
     }
 
     #[test]
+    fn links_are_set_and_cleared_one_by_one() {
+        let s = Scratch::new("links");
+        let store = s.store();
+        let a = add(&store, "Invoice PDF");
+        let set = |v: &str| Some(LinkChange::Set(v.into()));
+        let link = TaskOp::SetLinks { task: a.clone(), worktree: set("/home/me/shop/.claude/worktrees/task-invoice-pdf-k3f"), branch: set("task/invoice-pdf-k3f"), session: set("tc_ab12cd34") };
+        assert_eq!(apply(&store, link.clone(), None).unwrap(), Done { task: Some(a.clone()), content_rev: Some(1) });
+        let t = read(&store).list.tasks[0].clone();
+        assert_eq!(
+            (t.worktree.as_deref(), t.branch.as_deref(), t.session.as_deref()),
+            (Some("/home/me/shop/.claude/worktrees/task-invoice-pdf-k3f"), Some("task/invoice-pdf-k3f"), Some("tc_ab12cd34"))
+        );
+        assert_eq!((t.rev, t.content_rev), (2, 1), "a change of the task, not of its content");
+        // The same links again: nothing written.
+        let revision = read(&store).list.revision;
+        apply(&store, link, None).unwrap();
+        assert_eq!(read(&store).list.revision, revision);
+        // One link cleared, the others left as they are.
+        apply(&store, TaskOp::SetLinks { task: a.clone(), worktree: Some(LinkChange::Clear), branch: None, session: None }, None).unwrap();
+        let t = read(&store).list.tasks[0].clone();
+        assert_eq!((t.worktree, t.branch.as_deref(), t.session.as_deref()), (None, Some("task/invoice-pdf-k3f"), Some("tc_ab12cd34")));
+        // Empty, too long, or with a control character: refused, nothing changed.
+        for bad in [String::new(), "x".repeat(MAX_TASK_LINK + 1), "tc_a\nb".into(), "a\u{1b}[2J".into()] {
+            let op = TaskOp::SetLinks { task: a.clone(), worktree: None, branch: None, session: Some(LinkChange::Set(bad)) };
+            assert_eq!(apply(&store, op, None), Err(Problem::TaskLinkRefused));
+        }
+        assert_eq!(read(&store).list.tasks[0].session.as_deref(), Some("tc_ab12cd34"));
+        // Kept as they are by every other change, and through a reload.
+        apply(&store, TaskOp::SetStatus { task: a.clone(), status: TaskStatus::Active, from: None }, None).unwrap();
+        assert_eq!(read(&store).list.tasks[0].branch.as_deref(), Some("task/invoice-pdf-k3f"));
+        assert!(matches!(apply(&store, TaskOp::SetLinks { task: "nope".into(), worktree: None, branch: None, session: None }, None), Err(Problem::TaskNotFound { .. })));
+    }
+
+    #[test]
+    fn a_status_change_naming_the_status_it_saw_never_overrides_another() {
+        let s = Scratch::new("from");
+        let store = s.store();
+        let a = add(&store, "Invoice PDF");
+        let to = |status, from| TaskOp::SetStatus { task: a.clone(), status, from };
+        apply(&store, to(TaskStatus::Active, Some(TaskStatus::Inbox)), None).unwrap();
+        // Someone moved it meanwhile: the automatic change is refused, naming the task.
+        apply(&store, to(TaskStatus::Todo, None), None).unwrap();
+        let reference = read(&store).list.tasks[0].reference.clone();
+        assert_eq!(apply(&store, to(TaskStatus::Review, Some(TaskStatus::Active)), None), Err(Problem::TaskStatusChanged { task: reference }));
+        assert_eq!(read(&store).list.tasks[0].status, TaskStatus::Todo);
+        apply(&store, to(TaskStatus::Active, Some(TaskStatus::Todo)), None).unwrap();
+        assert_eq!(read(&store).list.tasks[0].status, TaskStatus::Active);
+    }
+
+    #[test]
     fn a_missing_list_reads_empty_and_creates_nothing() {
         let s = Scratch::new("missing");
         assert_eq!(read(&s.store()), Loaded { list: TaskList::empty(KEY), read_only: None, set_aside: None });
@@ -1312,7 +1389,7 @@ mod tests {
         // Status: last of its new status.
         let c = add(&store, "About page");
         for id in [&c, &a] {
-            apply(&store, TaskOp::SetStatus { task: id.clone(), status: TaskStatus::Todo }, None).unwrap();
+            apply(&store, TaskOp::SetStatus { task: id.clone(), status: TaskStatus::Todo, from: None }, None).unwrap();
         }
         assert_eq!(titles(&store, TaskStatus::Todo), vec!["About page", "Invoice as PDF"]);
         assert_eq!(titles(&store, TaskStatus::Inbox), vec!["Customer search"]);
@@ -1345,7 +1422,7 @@ mod tests {
         let b = add(&store, "b");
         let c = add(&store, "c");
         let other = add(&store, "other");
-        apply(&store, TaskOp::SetStatus { task: other.clone(), status: TaskStatus::Todo }, None).unwrap();
+        apply(&store, TaskOp::SetStatus { task: other.clone(), status: TaskStatus::Todo, from: None }, None).unwrap();
         let mv = |task: &str, before: Option<&str>| apply(&store, TaskOp::Move { task: task.into(), before: before.map(String::from) }, None);
         mv(&c, Some(&a)).unwrap();
         assert_eq!(titles(&store, TaskStatus::Inbox), vec!["c", "a", "b"]);
@@ -1398,7 +1475,7 @@ mod tests {
         apply(&store, TaskOp::AddNote { task: a.clone(), text: "n".into(), author: Author::User }, None).unwrap();
         apply(&store, TaskOp::AddDependency { task: a.clone(), on: b.clone() }, None).unwrap();
         apply(&store, TaskOp::Move { task: a.clone(), before: None }, None).unwrap();
-        apply(&store, TaskOp::SetStatus { task: a.clone(), status: TaskStatus::Todo }, None).unwrap();
+        apply(&store, TaskOp::SetStatus { task: a.clone(), status: TaskStatus::Todo, from: None }, None).unwrap();
         let t = read(&store).list.tasks.iter().find(|t| t.id == a).unwrap().clone();
         assert!(t.rev > 3 && t.content_rev == 1, "{t:?}");
         assert_eq!(edit("seen at 1", Some(1)).unwrap().content_rev, Some(2), "a note then a save: fine");

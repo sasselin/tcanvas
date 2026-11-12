@@ -264,6 +264,8 @@ mod tests {
             agent_session_id: None,
             agent_transcript: None,
             last_prompt: None,
+            agent_prompt_mark: None,
+            agent_turn_mark: None,
         }
     }
 

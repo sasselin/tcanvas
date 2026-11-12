@@ -874,7 +874,7 @@ pub fn execute(cmd: &Cmd, ctx: &mut Ctx) -> Result<String, Fail> {
             let text = text_of(text, ctx, TaskField::Note, MAX_TASK_NOTE)?;
             write_one(ctx, reference, *json, |id| TaskOp::AddNote { task: id, text, author: Author::Agent })
         }
-        Cmd::Status { reference, status, json } => write_one(ctx, reference, *json, |id| TaskOp::SetStatus { task: id, status: *status }),
+        Cmd::Status { reference, status, json } => write_one(ctx, reference, *json, |id| TaskOp::SetStatus { task: id, status: *status, from: None }),
         Cmd::Dep { add, reference, on, json } => {
             let (r, list, read_only) = load(ctx)?;
             if let Some(p) = read_only {
@@ -1417,5 +1417,13 @@ mod tests {
         }
         assert_eq!(Fail::Refused(CLOSE_REFUSED.into()).code(), 1);
         assert!(p("status k3f review").is_ok() && p("list --status done").is_ok());
+    }
+
+    /// Where a task is worked on is the app's to say (it starts the task): no command sets it.
+    #[test]
+    fn the_command_line_never_sets_links() {
+        for line in ["link k3f", "links k3f --worktree /x", "set k3f --session tc_x", "status k3f review --session tc_x"] {
+            assert!(matches!(p(line), Err(Fail::Usage(_))), "{line}");
+        }
     }
 }

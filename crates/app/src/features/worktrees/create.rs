@@ -27,7 +27,7 @@ use protocol::{
 
 use super::cleanup::PENDING_TIMEOUT;
 use super::trust::Trust;
-use crate::shell::event::Event;
+use crate::shell::event::{Event, RecipeSummary, TaskCard, TaskWorktreeOrder, TaskWorktreePlan, TaskWorktreeSpec};
 use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::world::{ProjectId, World};
@@ -42,10 +42,10 @@ pub const PLAN_DEBOUNCE: Duration = Duration::from_millis(200);
 /// Plans asked again this many times without any answer: the agent is said to be silent.
 pub const SILENT_AFTER: u32 = 2;
 
-/// Ids of the plan and creation requests: answers carry them back.
+/// Ids of the plan and creation requests (the task starts too): answers carry them back.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-fn next_id() -> u64 {
+pub(super) fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
@@ -118,23 +118,7 @@ impl Form {
     }
 }
 
-/// A branch name git accepts, by the rules of `git check-ref-format --branch` (the agent asks
-/// git itself), never one that could pass for an option or a revision.
-pub fn branch_name_valid(name: &str) -> bool {
-    let bad_char = |c: char| c.is_control() || c.is_whitespace() || matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\');
-    !name.is_empty()
-        && !name.starts_with('-')
-        && name != "@"
-        && name != "HEAD"
-        && !name.contains("@{")
-        && !name.contains("..")
-        && !name.contains("//")
-        && !name.starts_with('/')
-        && !name.ends_with('/')
-        && !name.ends_with('.')
-        && !name.chars().any(bad_char)
-        && name.split('/').all(|part| !part.starts_with('.') && !part.ends_with(".lock"))
-}
+pub use protocol::branch_name_valid;
 
 /// The field an agent's problem is about.
 pub fn field_of(problem: &Problem) -> Field {
@@ -276,6 +260,16 @@ pub struct Sent {
     pub repo: Option<String>,
     /// The location used, saved with the group once it went through.
     pub location: Option<String>,
+    /// Created for a task: its card (with the task its command reads) opens in the new folder.
+    pub task: Option<Box<SentTask>>,
+}
+
+/// A creation for a task: which one, its branch, and the card to open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SentTask {
+    pub task: String,
+    pub branch: String,
+    pub card: TaskCard,
 }
 
 impl Sent {
@@ -313,7 +307,73 @@ pub fn open_card(sent: &Sent, path: &str, world: &World) -> Vec<Event> {
     if world.project(&sent.project).is_none() {
         return vec![Event::Inform { title: t().worktree_created_title.into(), body: (t().worktree_group_gone)(path) }];
     }
+    if let Some(task) = &sent.task {
+        let card = TaskCard { cwd: path.to_string(), setup: sent.setup.clone(), ..task.card.clone() };
+        return vec![Event::NewTaskCard(Box::new(card))];
+    }
     vec![Event::NewCard { at: None, project: Some(sent.project.clone()), command: sent.command.clone(), setup: sent.setup.clone(), cwd: Some(path.to_string()) }]
+}
+
+/// The form a task's worktree is checked as, like the dialog's.
+pub fn task_form(spec: &TaskWorktreeSpec) -> Form {
+    let location = spec.location.clone().unwrap_or_else(|| DEFAULT_WORKTREE_LOCATION.to_string());
+    match &spec.branch {
+        WorktreeBranch::New { name, base } => Form { mode: Mode::New, name: name.clone(), base: base.clone(), existing: None, location, folder: spec.folder.clone() },
+        WorktreeBranch::Existing { name } => Form { mode: Mode::Existing, name: String::new(), base: String::new(), existing: Some(name.clone()), location, folder: spec.folder.clone() },
+    }
+}
+
+/// What the recipe will do, as the start's confirmation shows it.
+pub fn recipe_summary(recipe: &Recipe, trust: &Trust) -> RecipeSummary {
+    let mut lines: Vec<(String, bool)> = recipe.problem.iter().map(|p| (t().problem(p), true)).collect();
+    lines.extend(recipe_lines(recipe).into_iter().map(|(line, color)| (line, color == ERROR)));
+    let setup_accepted = recipe.setup.as_deref().is_some_and(|s| trust.accepted(&recipe.main, s));
+    RecipeSummary { lines, setup: recipe.setup.as_deref().map(visible_setup), setup_accepted }
+}
+
+/// The answer to a task's plan request: the plan, with what the dialog's checks find wrong with
+/// that very request.
+pub fn task_plan(spec: &TaskWorktreeSpec, plan: &WorktreePlan, trust: &Trust) -> TaskWorktreePlan {
+    let problems = check(&task_form(spec), Some(plan))
+        .into_iter()
+        .filter_map(|(_, issue)| match issue {
+            Issue::Refused(p) => Some(p),
+            Issue::Missing => None,
+        })
+        .collect();
+    TaskWorktreePlan {
+        spec: spec.clone(),
+        branches: plan.branches.clone(),
+        default_branch: plan.default_branch.clone(),
+        path: plan.path.clone(),
+        free_folder: plan.free_folder.clone(),
+        exclude: plan.exclude.clone(),
+        problems,
+        recipe: plan.recipe.as_ref().map(|r| recipe_summary(r, trust)),
+    }
+}
+
+/// The creation a task's start asks for, checked against the last plan for it: what to send, or
+/// why not.
+pub fn task_creation(order: &TaskWorktreeOrder, plan: Option<&WorktreePlan>, id: u64) -> Result<(CreateWorktree, Sent), Problem> {
+    let form = task_form(&order.spec);
+    let plan = plan.filter(|p| p.folder == order.spec.folder && p.location == form.location_sent());
+    let request = form.request(plan, order.exclude && plan.is_some_and(|p| p.exclude.is_some())).ok_or_else(|| {
+        check(&form, plan).into_iter().find_map(|(_, i)| if let Issue::Refused(p) = i { Some(p) } else { None }).unwrap_or(Problem::InvalidFolder { folder: order.spec.folder.clone() })
+    })?;
+    let recipe = plan.and_then(|p| p.recipe.as_ref());
+    let setup = recipe.and_then(|r| r.setup.clone()).filter(|_| order.run_setup);
+    let repo = setup.as_ref().and(recipe).map(|r| r.main.clone());
+    let sent = Sent {
+        id,
+        project: order.spec.project.clone(),
+        command: Some(order.card.command.clone()),
+        setup,
+        repo,
+        location: request.location.clone(),
+        task: Some(Box::new(SentTask { task: order.spec.task.clone(), branch: order.spec.branch.name().to_string(), card: order.card.clone() })),
+    };
+    Ok((request, sent))
 }
 
 /// The creation this dialog sent, not answered for good yet.
@@ -499,7 +559,7 @@ impl CreateDialog {
         self.pending = Some(Pending { id, at: now, running: false });
         self.refused = None;
         self.no_answer = false;
-        Some(Sent { id, project: self.project.clone(), command, setup, repo, location })
+        Some(Sent { id, project: self.project.clone(), command, setup, repo, location, task: None })
     }
 
     /// The problems to show next to `field`: the form's own, then the agent's refusal of this very
@@ -826,7 +886,7 @@ mod tests {
 
     fn shop() -> World {
         let mut world = World::default();
-        let templates = vec![CommandTemplate { name: "Claude".into(), command: "claude".into() }];
+        let templates = vec![CommandTemplate { name: "Claude".into(), command: "claude".into(), task: false }];
         world.projects.push(Project {
             id: "p".into(),
             name: "shop".into(),
@@ -836,6 +896,7 @@ mod tests {
             templates,
             messages: Vec::new(),
             worktree_location: None,
+            task_settings: Default::default(),
         });
         world
     }
@@ -983,7 +1044,7 @@ mod tests {
         let mut sent = vec![];
         let first_sent = d.submit(&world, &Trust::default(), &mut sent, t0).expect("sent");
         assert!(d.submit(&world, &Trust::default(), &mut sent, t0).is_none(), "once");
-        assert_eq!(first_sent, Sent { id: first_sent.id, project: "p".into(), command: Some("claude".into()), setup: None, repo: None, location: None });
+        assert_eq!(first_sent, Sent { id: first_sent.id, project: "p".into(), command: Some("claude".into()), setup: None, repo: None, location: None, task: None });
         let Event::ToAgent(AgentCmd::CreateWorktree { id, request, .. }) = &sent[0] else { panic!("a creation") };
         assert_eq!(*id, first_sent.id);
         assert!(!request.exclude, "the plan found the folder ignored: nothing to add");
@@ -1019,7 +1080,7 @@ mod tests {
     fn any_success_opens_the_card_whatever_became_of_the_dialog() {
         i18n::set(Lang::Fr);
         let world = shop();
-        let sent = Sent { id: 4, project: "p".into(), command: Some("claude".into()), setup: None, repo: None, location: Some("../{repo}-{name}".into()) };
+        let sent = Sent { id: 4, project: "p".into(), command: Some("claude".into()), setup: None, repo: None, location: Some("../{repo}-{name}".into()), task: None };
         let path = "/home/me/shop-a";
         let (events, keep) = on_created(&sent, Some(path), None, false, &world);
         assert!(!keep);

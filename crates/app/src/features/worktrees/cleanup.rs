@@ -474,6 +474,7 @@ mod tests {
             templates: Vec::new(),
             messages: Vec::new(),
             worktree_location: None,
+            task_settings: Default::default(),
         });
         assert_eq!(verdict(&l.worktrees[1], &l, &w), Some(KeepReason::GroupFolder));
         assert!(paths(&l, &w).is_empty());

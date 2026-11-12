@@ -230,6 +230,7 @@ mod tests {
             templates: Vec::new(),
             messages: Vec::new(),
             worktree_location: None,
+            task_settings: Default::default(),
         });
         let mut a = Card::new(Rect::from_min_size(pos2(10.0, 10.0), Vec2::splat(100.0)), Some("/srv/api".into()));
         a.info = Some(SessionInfo {
@@ -243,6 +244,8 @@ mod tests {
             agent_session_id: None,
             agent_transcript: None,
             last_prompt: None,
+            agent_prompt_mark: None,
+            agent_turn_mark: None,
         });
         a.name = Some("server".into());
         a.project = Some("api".into());
@@ -340,7 +343,17 @@ mod tests {
         let mut w = world();
         let stalled = StatusKind::ALL.iter().position(|k| *k == StatusKind::Stalled).unwrap();
         assert_eq!(counts(&w)[stalled], 1);
-        w.projects.push(Project { id: "other".into(), name: "other".into(), color: [0; 3], rect: Rect::NOTHING, cwd: None, templates: Vec::new(), messages: Vec::new(), worktree_location: None });
+        w.projects.push(Project {
+            id: "other".into(),
+            name: "other".into(),
+            color: [0; 3],
+            rect: Rect::NOTHING,
+            cwd: None,
+            templates: Vec::new(),
+            messages: Vec::new(),
+            worktree_location: None,
+            task_settings: Default::default(),
+        });
         w.space = Some("other".into());
         assert_eq!(counts(&w), [0; 6], "the stalled terminal is in another space");
     }

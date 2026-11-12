@@ -454,6 +454,11 @@ impl TerminalCards {
         self.pending_start(id)?.setup.as_deref()
     }
 
+    /// The task a card's command will read when its terminal starts.
+    pub fn pending_task(&self, id: &str) -> Option<&crate::shell::event::TaskEnv> {
+        self.pending_start(id)?.task.as_ref()
+    }
+
     fn pending_start(&self, id: &str) -> Option<&Start> {
         match self.commands.get(id)? {
             CommandRun::Pending(start) | CommandRun::Staging(start, ..) => Some(start),
@@ -821,7 +826,37 @@ impl TerminalCards {
         let worktree = world.card_worktrees.get(&id);
         let badge_pad = 6.0 * zoom;
         let badge = worktree.map(|w| (badge_label(w), w)).map(|(label, w)| (title_painter.layout_no_wrap(format!("⎇ {label}"), FontId::proportional(11.0 * zoom), theme::TEXT), label, w));
-        let layout = header_layout(label_rect.max.x, right, cwd.as_ref().map(|g| g.size().x), badge.as_ref().map(|(g, ..)| g.size().x + 2.0 * badge_pad), prompt.is_some(), zoom);
+        // The task the card was started for: `#ref title`, its title elided first.
+        let task = world.card_tasks.get(&id).cloned();
+        let task_font = FontId::proportional(11.0 * zoom);
+        let task_widths = task.as_ref().map(|task| {
+            let reference = title_painter.layout_no_wrap(format!("#{}", task.reference), task_font.clone(), theme::TEXT).size().x;
+            let full = title_painter.layout_no_wrap(task_label(task), task_font.clone(), theme::TEXT).size().x.min(TASK_CHIP_MAX * zoom);
+            (full + 2.0 * badge_pad, reference + 2.0 * badge_pad)
+        });
+        let layout = header_layout(label_rect.max.x, right, cwd.as_ref().map(|g| g.size().x), badge.as_ref().map(|(g, ..)| g.size().x + 2.0 * badge_pad), task_widths, prompt.is_some(), zoom);
+        if let Some(task) = &task
+            && let Some((x0, x1)) = layout.task
+        {
+            // Too narrow for the reference and some of the title: the bare reference, whole.
+            let room = x1 - x0 - 2.0 * badge_pad;
+            let reference = format!("#{}", task.reference);
+            let reference_w = title_painter.layout_no_wrap(reference.clone(), task_font.clone(), theme::TEXT).size().x;
+            let full_w = task_widths.map_or(0.0, |(full, _)| full - 2.0 * badge_pad);
+            let text = if room + 0.5 < full_w && room < reference_w + 40.0 * zoom { reference } else { task_label(task) };
+            let mut job = egui::text::LayoutJob::single_section(text, egui::TextFormat::simple(task_font.clone(), theme::TEXT));
+            job.wrap = egui::text::TextWrapping::truncate_at_width(room.max(reference_w));
+            let galley = title_painter.layout_job(job);
+            let size = galley.size();
+            let rect = Rect::from_min_max(pos2(x0, dot.y - size.y / 2.0 - 2.0 * zoom), pos2(x1, dot.y + size.y / 2.0 + 2.0 * zoom));
+            title_painter.rect_filled(rect, CornerRadius::same((rect.height() / 2.0).min(255.0) as u8), TASK_BG);
+            title_painter.galley(pos2(x0 + badge_pad, dot.y - size.y / 2.0), galley, theme::TEXT);
+            // Hover only: the title bar underneath keeps clicks and drags.
+            let full = task_label(task);
+            let r = ui.interact(rect, eid.with("task"), Sense::hover()).on_hover_text(&full);
+            let a11y = (t().task_chip_a11y)(&task.reference, &task.title);
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &a11y));
+        }
         if let Some(cwd) = cwd.filter(|_| layout.cwd) {
             title_painter.galley(pos2(right - cwd.size().x, dot.y - cwd.size().y / 2.0), cwd, theme::TEXT_DIM);
         }
@@ -1100,32 +1135,52 @@ impl TerminalCards {
         }
     }
 
+    /// A new terminal (`id`: chosen by the caller, else a new one), in `project` (else the open
+    /// space), at `at` (else right of the group's terminals), in `cwd` (else the group's folder),
+    /// running `start` once.
+    #[allow(clippy::too_many_arguments)]
+    fn new_card(&mut self, world: &mut World, id: Option<CardId>, at: Option<Pos2>, project: Option<&str>, cwd: Option<String>, start: Option<Start>, out: &mut Vec<Event>) {
+        let cell = base_cell(&self.ctx);
+        let size = card_size(cell, DEFAULT_COLS, DEFAULT_ROWS);
+        // With no project given, the terminal is born in the open space.
+        let project = project.or(world.space.as_deref());
+        let project = project.and_then(|p| world.project(p));
+        // With no position: right of the group's terminals (or in the center of an empty group).
+        let beside = project.map(|p| match world.members(&p.id).map(|c| c.rect).reduce(|a, b| a.union(b)) {
+            Some(r) => pos2(r.max.x + crate::shell::world::CARD_GAP + size.x / 2.0, r.min.y + size.y / 2.0),
+            None => p.rect.center(),
+        });
+        let near = at.or(beside).unwrap_or(world.camera.center);
+        let rect = world.free_spot(near, size);
+        let cwd = cwd.or_else(|| project.and_then(|p| p.cwd.clone()));
+        let mut card = match id {
+            Some(id) => Card::with_id(id, rect, cwd),
+            None => Card::new(rect, cwd),
+        };
+        card.project = project.map(|p| p.id.clone());
+        let id = card.id.clone();
+        if let Some(start) = start {
+            self.commands.insert(id.clone(), CommandRun::Pending(start));
+        }
+        world.add_card(card);
+        // Always fly to the new terminal: visible and large enough to type in.
+        // First make room (nothing overlaps), then fly there.
+        out.push(Event::SettleCard(id.clone()));
+        out.push(Event::FlyTo(id));
+    }
+
     pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
         match ev {
             Event::NewCard { at, project, command, setup, cwd } => {
-                let cell = base_cell(&self.ctx);
-                let size = card_size(cell, DEFAULT_COLS, DEFAULT_ROWS);
-                // With no project given, the terminal is born in the open space.
-                let project = project.as_deref().or(world.space.as_deref());
-                let project = project.and_then(|p| world.project(p));
-                // With no position: right of the group's terminals (or in the center of an empty group).
-                let beside = project.map(|p| match world.members(&p.id).map(|c| c.rect).reduce(|a, b| a.union(b)) {
-                    Some(r) => pos2(r.max.x + crate::shell::world::CARD_GAP + size.x / 2.0, r.min.y + size.y / 2.0),
-                    None => p.rect.center(),
-                });
-                let near = at.or(beside).unwrap_or(world.camera.center);
-                let rect = world.free_spot(near, size);
-                let mut card = Card::new(rect, cwd.clone().or_else(|| project.and_then(|p| p.cwd.clone())));
-                card.project = project.map(|p| p.id.clone());
-                let id = card.id.clone();
-                if let Some(start) = Start::new(setup.as_deref(), command.as_deref()) {
-                    self.commands.insert(id.clone(), CommandRun::Pending(start));
+                let start = Start::new(setup.as_deref(), command.as_deref());
+                self.new_card(world, None, *at, project.as_deref(), cwd.clone(), start, out);
+            }
+            Event::NewTaskCard(card) => {
+                // Never a second card for the same id (an event handled twice).
+                if world.card(&card.card).is_none() {
+                    let start = Start::for_task(card.setup.as_deref(), &card.command, card.task.clone());
+                    self.new_card(world, Some(card.card.clone()), None, Some(&card.project), Some(card.cwd.clone()), start, out);
                 }
-                world.add_card(card);
-                // Always fly to the new terminal: visible and large enough to type in.
-                // First make room (nothing overlaps), then fly there.
-                out.push(Event::SettleCard(id.clone()));
-                out.push(Event::FlyTo(id));
             }
             Event::FocusCard(id) => {
                 if let Some(card) = world.card_mut(id) {
@@ -1160,6 +1215,7 @@ impl TerminalCards {
                     self.forget_command(id, &session);
                     self.forget_texts(id, out);
                     if self.launcher == Launcher::Tmux {
+                        pty::discard_task_file_in_background(session.clone());
                         pty::kill_session_in_background(session);
                     }
                 }
@@ -1171,6 +1227,9 @@ impl TerminalCards {
                 if let Some(card) = world.card(id) {
                     let session = card.session();
                     self.forget_command(id, &session);
+                    if self.launcher == Launcher::Tmux {
+                        pty::discard_task_file_in_background(session);
+                    }
                 }
                 self.forget_texts(id, out);
                 world.remove_card(id);
@@ -1224,6 +1283,10 @@ impl TerminalCards {
                 }
             }
             Event::Agent(AgentEvent::Gone { session }) => {
+                // Its command is over: a task's prompt file goes with it.
+                if self.launcher == Launcher::Tmux {
+                    pty::discard_task_file_in_background(session.clone());
+                }
                 if let Some(card) = world.cards.iter_mut().find(|c| &c.session() == session) {
                     card.info = None;
                 }
@@ -1278,21 +1341,21 @@ pub fn header_prompt(card: &Card) -> Option<&str> {
     card.info.as_ref()?.last_prompt.as_deref().map(str::trim).filter(|p| !p.is_empty())
 }
 
+/// What a card's task chip says: its reference, then its title.
+pub fn task_label(task: &crate::shell::world::CardTask) -> String {
+    format!("#{} {}", task.reference, task.title)
+}
+
+/// Widest task chip, at zoom 1 (its title is elided past it).
+const TASK_CHIP_MAX: f32 = 260.0;
+/// Background of the task chip in the title bar.
+const TASK_BG: Color32 = Color32::from_rgb(52, 62, 52);
+
 /// Longest branch and worktree names shown whole in a card's badge.
 const BADGE_BRANCH_CHARS: usize = 24;
 const BADGE_WORKTREE_CHARS: usize = 16;
 
-/// `feat/very-long-branch-name` -> `feat/ver…anch-name`: keeps both ends, which tell branches apart.
-pub fn elide_middle(s: &str, max: usize) -> String {
-    let n = s.chars().count();
-    if n <= max || max < 3 {
-        return s.to_string();
-    }
-    let tail = (max - 1) / 2;
-    let head = max - 1 - tail;
-    let chars: Vec<char> = s.chars().collect();
-    format!("{}…{}", chars[..head].iter().collect::<String>(), chars[n - tail..].iter().collect::<String>())
-}
+pub use crate::shell::widgets::elide_middle;
 
 /// What a card's branch badge says: its branch (or detached HEAD), then the linked worktree's
 /// folder name; nothing more for the main checkout.
@@ -1311,16 +1374,44 @@ struct HeaderLayout {
     cwd: bool,
     /// Left edge (screen x) of the branch badge, which sits just left of the folder.
     badge: Option<f32>,
+    /// Horizontal span (screen x) of the task chip, right after the title.
+    task: Option<(f32, f32)>,
     /// Horizontal span (screen x) of the prompt.
     prompt: Option<(f32, f32)>,
+}
+
+/// Lays out the task chip, the folder, the branch badge and the prompt between the end of the
+/// title and `right` (the close button).
+///
+/// The task chip (`task`: its full width, and the least it may shrink to, its reference) comes
+/// right after the title and goes last: the folder, then the badge, then the room of the prompt
+/// (down to its hover target) give way first; then the chip shrinks (its title elided), and below
+/// its reference it goes, the other extras with it. Narrowing never brings anything back. Without
+/// a task, see `extras_layout`.
+fn header_layout(title_end: f32, right: f32, cwd_width: Option<f32>, badge_width: Option<f32>, task: Option<(f32, f32)>, has_prompt: bool, zoom: f32) -> HeaderLayout {
+    let Some((full, least)) = task else { return extras_layout(title_end, right, cwd_width, badge_width, has_prompt, zoom, true) };
+    let gap = 14.0 * zoom;
+    let min_target = 16.0 * zoom;
+    let x0 = title_end + gap;
+    // The prompt keeps its hover target against the close button.
+    let reserve = if has_prompt { min_target + gap } else { 0.0 };
+    let room = right - x0 - reserve;
+    if room < least {
+        let prompt = has_prompt.then_some((right - min_target, right));
+        return HeaderLayout { cwd: false, badge: None, task: None, prompt };
+    }
+    let end = x0 + full.min(room);
+    // The folder no longer runs over what is left of it: the chip is there.
+    HeaderLayout { task: Some((x0, end)), ..extras_layout(end, right, cwd_width, badge_width, has_prompt, zoom, false) }
 }
 
 /// Lays out the folder, the branch badge and the prompt between the end of the title and
 /// `right` (the close button). When space is short, the folder goes first, then the badge, and
 /// narrowing never brings either back. The prompt keeps at least 120 points next to them,
 /// otherwise it takes the whole room, down to a small hover target (an ellipsis) so its full text
-/// stays reachable.
-fn header_layout(title_end: f32, right: f32, cwd_width: Option<f32>, badge_width: Option<f32>, has_prompt: bool, zoom: f32) -> HeaderLayout {
+/// stays reachable. `cwd_over_title`: without a badge nor a prompt, the folder stays even over a
+/// long title (as before badges); otherwise only where it fits.
+fn extras_layout(title_end: f32, right: f32, cwd_width: Option<f32>, badge_width: Option<f32>, has_prompt: bool, zoom: f32, cwd_over_title: bool) -> HeaderLayout {
     let gap = 14.0 * zoom;
     // Between the badge and the folder.
     let inner = 8.0 * zoom;
@@ -1333,27 +1424,28 @@ fn header_layout(title_end: f32, right: f32, cwd_width: Option<f32>, badge_width
         if let Some(c) = cwd_width {
             let left = right - c - inner - b;
             if fits(left) {
-                return HeaderLayout { cwd: true, badge: Some(left), prompt: prompt(left) };
+                return HeaderLayout { cwd: true, badge: Some(left), task: None, prompt: prompt(left) };
             }
         }
         if fits(right - b) {
-            return HeaderLayout { cwd: false, badge: Some(right - b), prompt: prompt(right - b) };
+            return HeaderLayout { cwd: false, badge: Some(right - b), task: None, prompt: prompt(right - b) };
         }
     }
     // The folder went before the badge: once the badge is gone, it does not come back.
     let cwd_width = cwd_width.filter(|_| badge_width.is_none());
     if !has_prompt {
         // Without a badge, as before badges: the folder stays, even over a long title.
-        return HeaderLayout { cwd: cwd_width.is_some(), badge: None, prompt: None };
+        let cwd = cwd_width.is_some_and(|c| cwd_over_title || right - c >= x0);
+        return HeaderLayout { cwd, badge: None, task: None, prompt: None };
     }
     if let Some(c) = cwd_width
         && fits(right - c)
     {
-        return HeaderLayout { cwd: true, badge: None, prompt: prompt(right - c) };
+        return HeaderLayout { cwd: true, badge: None, task: None, prompt: prompt(right - c) };
     }
     let min_target = 16.0 * zoom;
     let span = if right - x0 >= min_target { (x0, right) } else { (right - min_target, right) };
-    HeaderLayout { cwd: false, badge: None, prompt: Some(span) }
+    HeaderLayout { cwd: false, badge: None, task: None, prompt: Some(span) }
 }
 
 /// Height of a strip at the bottom of a card (screen points).
@@ -1457,6 +1549,8 @@ mod tests {
             agent_session_id: None,
             agent_transcript: None,
             last_prompt: None,
+            agent_prompt_mark: None,
+            agent_turn_mark: None,
         }
     }
 
@@ -1471,7 +1565,11 @@ mod tests {
             ids.push(card.id.clone());
             world.add_card(card);
         }
-        cards.handle(&Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None }), &mut world, &mut vec![]);
+        cards.handle(
+            &Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, shell: None }),
+            &mut world,
+            &mut vec![],
+        );
         (cards, world, ids[0].clone(), ids[1].clone())
     }
 
@@ -1636,7 +1734,11 @@ mod tests {
         let (_, mut world, id, _) = ready();
         let mut cards = TerminalCards::new(egui::Context::default(), Launcher::Disabled);
         assert_eq!(outcome_of(&send(&mut cards, &mut world, &id, "x", true), &id).0, Some(SendOutcome::Refused(SendRefusal::NoAgent)));
-        cards.handle(&Event::Agent(AgentEvent::Hello { version: "0.1".into(), hooks: protocol::Hooks::Installed, send_text: false, tasks: false, task_hooks: None }), &mut world, &mut vec![]);
+        cards.handle(
+            &Event::Agent(AgentEvent::Hello { version: "0.1".into(), hooks: protocol::Hooks::Installed, send_text: false, tasks: false, task_hooks: None, task_links: true, shell: None }),
+            &mut world,
+            &mut vec![],
+        );
         assert_eq!(outcome_of(&send(&mut cards, &mut world, &id, "x", true), &id).0, Some(SendOutcome::Refused(SendRefusal::AgentTooOld)));
         assert_eq!(cards.unsent_text(&id), Some(("x", &SendRefusal::AgentTooOld)));
     }
@@ -1748,6 +1850,8 @@ mod tests {
             agent_session_id: None,
             agent_transcript: None,
             last_prompt: None,
+            agent_prompt_mark: None,
+            agent_turn_mark: None,
         });
         assert!(close_message(&card).1.starts_with("« cargo run » est en cours"));
     }
@@ -1769,6 +1873,8 @@ mod tests {
             agent_session_id: None,
             agent_transcript: None,
             last_prompt: prompt.map(String::from),
+            agent_prompt_mark: None,
+            agent_turn_mark: None,
         };
         card.info = Some(info(Some("  ajoute le total TTC ")));
         assert_eq!(header_prompt(&card), Some("ajoute le total TTC"));
@@ -1782,40 +1888,40 @@ mod tests {
 
     #[test]
     fn the_prompt_wins_over_the_folder_when_space_is_short() {
-        let layout = |cwd, prompt| HeaderLayout { cwd, badge: None, prompt };
+        let layout = |cwd, prompt| HeaderLayout { cwd, badge: None, task: None, prompt };
         // No prompt: the folder, as before.
-        assert_eq!(header_layout(100.0, 500.0, Some(80.0), None, false, 1.0), layout(true, None));
+        assert_eq!(header_layout(100.0, 500.0, Some(80.0), None, None, false, 1.0), layout(true, None));
         // Room for both: the prompt sits between the title and the folder.
-        assert_eq!(header_layout(100.0, 500.0, Some(80.0), None, true, 1.0), layout(true, Some((114.0, 406.0))));
-        assert_eq!(header_layout(100.0, 500.0, None, None, true, 1.0), layout(false, Some((114.0, 500.0))));
+        assert_eq!(header_layout(100.0, 500.0, Some(80.0), None, None, true, 1.0), layout(true, Some((114.0, 406.0))));
+        assert_eq!(header_layout(100.0, 500.0, None, None, None, true, 1.0), layout(false, Some((114.0, 500.0))));
         // Short: the folder goes, the prompt takes its room.
-        assert_eq!(header_layout(100.0, 300.0, Some(80.0), None, true, 1.0), layout(false, Some((114.0, 300.0))));
+        assert_eq!(header_layout(100.0, 300.0, Some(80.0), None, None, true, 1.0), layout(false, Some((114.0, 300.0))));
         // No room at all: still a small hover target against the close button.
-        assert_eq!(header_layout(290.0, 300.0, Some(80.0), None, true, 1.0), layout(false, Some((284.0, 300.0))));
-        assert_eq!(header_layout(290.0, 300.0, Some(80.0), None, true, 0.5), layout(false, Some((292.0, 300.0))));
+        assert_eq!(header_layout(290.0, 300.0, Some(80.0), None, None, true, 1.0), layout(false, Some((284.0, 300.0))));
+        assert_eq!(header_layout(290.0, 300.0, Some(80.0), None, None, true, 0.5), layout(false, Some((292.0, 300.0))));
     }
 
     #[test]
     fn the_branch_badge_sits_left_of_the_folder_and_gives_way_to_the_prompt() {
-        let at = |cwd, badge: Option<f32>, prompt| HeaderLayout { cwd, badge, prompt };
+        let at = |cwd, badge: Option<f32>, prompt| HeaderLayout { cwd, badge, task: None, prompt };
         // Wide card, no prompt: badge then folder against the close button.
-        assert_eq!(header_layout(100.0, 600.0, Some(80.0), Some(60.0), false, 1.0), at(true, Some(452.0), None));
+        assert_eq!(header_layout(100.0, 600.0, Some(80.0), Some(60.0), None, false, 1.0), at(true, Some(452.0), None));
         // With a prompt: prompt | badge | folder.
-        assert_eq!(header_layout(100.0, 600.0, Some(80.0), Some(60.0), true, 1.0), at(true, Some(452.0), Some((114.0, 438.0))));
+        assert_eq!(header_layout(100.0, 600.0, Some(80.0), Some(60.0), None, true, 1.0), at(true, Some(452.0), Some((114.0, 438.0))));
         // Twice the zoom: every gap doubles.
-        assert_eq!(header_layout(100.0, 1200.0, Some(160.0), Some(120.0), true, 2.0), at(true, Some(904.0), Some((128.0, 876.0))));
+        assert_eq!(header_layout(100.0, 1200.0, Some(160.0), Some(120.0), None, true, 2.0), at(true, Some(904.0), Some((128.0, 876.0))));
         // Less room: the folder goes first, the badge moves against the close button.
-        assert_eq!(header_layout(100.0, 380.0, Some(80.0), Some(60.0), true, 1.0), at(false, Some(320.0), Some((114.0, 306.0))));
-        assert_eq!(header_layout(100.0, 220.0, Some(80.0), Some(60.0), false, 1.0), at(false, Some(160.0), None));
+        assert_eq!(header_layout(100.0, 380.0, Some(80.0), Some(60.0), None, true, 1.0), at(false, Some(320.0), Some((114.0, 306.0))));
+        assert_eq!(header_layout(100.0, 220.0, Some(80.0), Some(60.0), None, false, 1.0), at(false, Some(160.0), None));
         // Narrow card: no badge; the prompt keeps its hover target.
-        assert_eq!(header_layout(100.0, 300.0, Some(80.0), Some(60.0), true, 1.0), at(false, None, Some((114.0, 300.0))));
-        assert_eq!(header_layout(290.0, 300.0, Some(80.0), Some(60.0), true, 1.0), at(false, None, Some((284.0, 300.0))));
+        assert_eq!(header_layout(100.0, 300.0, Some(80.0), Some(60.0), None, true, 1.0), at(false, None, Some((114.0, 300.0))));
+        assert_eq!(header_layout(290.0, 300.0, Some(80.0), Some(60.0), None, true, 1.0), at(false, None, Some((284.0, 300.0))));
         // Narrow card without a prompt: neither, the folder does not come back once the badge went.
-        assert_eq!(header_layout(100.0, 160.0, Some(80.0), Some(60.0), false, 1.0), at(false, None, None));
+        assert_eq!(header_layout(100.0, 160.0, Some(80.0), Some(60.0), None, false, 1.0), at(false, None, None));
         // No badge (cwd outside any known worktree): the folder as before badges.
-        assert_eq!(header_layout(100.0, 160.0, Some(80.0), None, false, 1.0), at(true, None, None));
+        assert_eq!(header_layout(100.0, 160.0, Some(80.0), None, None, false, 1.0), at(true, None, None));
         // No folder known: the badge alone.
-        assert_eq!(header_layout(100.0, 600.0, None, Some(60.0), true, 1.0), at(false, Some(540.0), Some((114.0, 526.0))));
+        assert_eq!(header_layout(100.0, 600.0, None, Some(60.0), None, true, 1.0), at(false, Some(540.0), Some((114.0, 526.0))));
     }
 
     #[test]
@@ -1825,7 +1931,7 @@ mod tests {
             for prompt in [false, true] {
                 let mut shown = (true, true);
                 for right in (110..=700).rev().step_by(5) {
-                    let l = header_layout(100.0, right as f32, Some(cwd), Some(badge), prompt, 1.0);
+                    let l = header_layout(100.0, right as f32, Some(cwd), Some(badge), None, prompt, 1.0);
                     let now = (l.cwd, l.badge.is_some());
                     assert!((now.0 <= shown.0) && (now.1 <= shown.1), "came back at right={right} (cwd {cwd}, badge {badge}, prompt {prompt}): {shown:?} -> {now:?}");
                     shown = now;
@@ -1833,6 +1939,60 @@ mod tests {
                 assert_eq!(shown, (false, false), "all gone on the narrowest card");
             }
         }
+    }
+
+    #[test]
+    fn the_task_chip_follows_the_title_and_gives_way_last() {
+        let task = Some((150.0, 40.0));
+        let l = |right, cwd, badge, prompt| header_layout(100.0, right, cwd, badge, task, prompt, 1.0);
+        // Wide card: chip | prompt | badge | folder.
+        assert_eq!(l(900.0, Some(80.0), Some(60.0), true), HeaderLayout { cwd: true, badge: Some(752.0), task: Some((114.0, 264.0)), prompt: Some((278.0, 738.0)) });
+        // Without a prompt: the chip, then the badge and the folder against the close button.
+        assert_eq!(l(900.0, Some(80.0), Some(60.0), false), HeaderLayout { cwd: true, badge: Some(752.0), task: Some((114.0, 264.0)), prompt: None });
+        // Less room: the folder goes, then the badge; the chip keeps its whole width.
+        assert_eq!(l(400.0, Some(80.0), Some(60.0), false), HeaderLayout { cwd: false, badge: Some(340.0), task: Some((114.0, 264.0)), prompt: None });
+        assert_eq!(l(300.0, Some(80.0), Some(60.0), false), HeaderLayout { cwd: false, badge: None, task: Some((114.0, 264.0)), prompt: None });
+        // The folder never runs over the chip (it does over a plain title).
+        assert_eq!(l(300.0, Some(80.0), None, false), HeaderLayout { cwd: false, badge: None, task: Some((114.0, 264.0)), prompt: None });
+        assert!(header_layout(100.0, 300.0, Some(80.0), None, None, false, 1.0).cwd);
+        // The prompt shrinks to its hover target before the chip shrinks.
+        assert_eq!(l(300.0, None, None, true), HeaderLayout { cwd: false, badge: None, task: Some((114.0, 264.0)), prompt: Some((278.0, 300.0)) });
+        assert_eq!(l(250.0, None, None, true), HeaderLayout { cwd: false, badge: None, task: Some((114.0, 220.0)), prompt: Some((234.0, 250.0)) });
+        // Narrow: the chip is elided down to its reference, then goes; the prompt keeps its target.
+        assert_eq!(l(184.0, Some(80.0), Some(60.0), true), HeaderLayout { cwd: false, badge: None, task: Some((114.0, 154.0)), prompt: Some((168.0, 184.0)) });
+        assert_eq!(l(180.0, Some(80.0), Some(60.0), true), HeaderLayout { cwd: false, badge: None, task: None, prompt: Some((164.0, 180.0)) });
+        assert_eq!(l(150.0, Some(80.0), Some(60.0), false), HeaderLayout { cwd: false, badge: None, task: None, prompt: None });
+        // Twice the zoom: every gap doubles.
+        let zoomed = header_layout(200.0, 1800.0, Some(160.0), Some(120.0), Some((300.0, 80.0)), true, 2.0);
+        assert_eq!(zoomed, HeaderLayout { cwd: true, badge: Some(1504.0), task: Some((228.0, 528.0)), prompt: Some((556.0, 1476.0)) });
+    }
+
+    #[test]
+    fn narrowing_a_card_with_a_task_only_ever_drops_header_extras() {
+        for (cwd, badge) in [(80.0, 60.0), (30.0, 90.0)] {
+            for prompt in [false, true] {
+                let mut shown = (true, true, f32::INFINITY);
+                for right in (110..=900).rev().step_by(3) {
+                    let l = header_layout(100.0, right as f32, Some(cwd), Some(badge), Some((150.0, 40.0)), prompt, 1.0);
+                    let chip = l.task.map_or(0.0, |(a, b)| b - a);
+                    let now = (l.cwd, l.badge.is_some(), chip);
+                    assert!(now.0 <= shown.0 && now.1 <= shown.1 && now.2 <= shown.2, "came back at right={right} (cwd {cwd}, badge {badge}, prompt {prompt}): {shown:?} -> {now:?}");
+                    // Nothing overlaps the chip.
+                    if let Some((_, end)) = l.task {
+                        assert!(l.badge.is_none_or(|b| b >= end) && l.prompt.is_none_or(|(p, _)| p >= end), "right={right}: {l:?}");
+                        assert!(!l.cwd || right as f32 - cwd >= end, "right={right}: {l:?}");
+                    }
+                    shown = now;
+                }
+                assert_eq!(shown, (false, false, 0.0), "all gone on the narrowest card");
+            }
+        }
+    }
+
+    #[test]
+    fn the_task_chip_names_the_reference_then_the_title() {
+        let task = crate::shell::world::CardTask { reference: "k3f".into(), title: "Fix the login redirect".into() };
+        assert_eq!(task_label(&task), "#k3f Fix the login redirect");
     }
 
     #[test]

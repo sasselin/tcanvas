@@ -44,7 +44,15 @@ pub fn run() -> io::Result<()> {
         }
     });
     let cmds = spawn_stdin_reader(watcher, sender, lists);
-    send(&AgentEvent::Hello { version: env!("CARGO_PKG_VERSION").into(), hooks: hooks::state(), send_text: true, tasks: true, task_hooks: Some(hooks::task_state()) })?;
+    send(&AgentEvent::Hello {
+        version: env!("CARGO_PKG_VERSION").into(),
+        hooks: hooks::state(),
+        send_text: true,
+        tasks: true,
+        task_hooks: Some(hooks::task_state()),
+        task_links: true,
+        shell: hooks::user_shell_path().map(|p| protocol::ShellKind::from_path(&p)),
+    })?;
 
     let mut tracked: HashMap<String, Tracked> = HashMap::new();
     loop {
@@ -169,6 +177,8 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64) -> SessionInfo {
         agent_session_id: agent_hooks::trusted(row.agent_session.as_ref(), agent_pid),
         agent_transcript: agent_hooks::trusted(row.transcript.as_ref(), agent_pid),
         last_prompt: agent_hooks::trusted(row.prompt.as_ref(), agent_pid),
+        agent_prompt_mark: row.prompts.clone(),
+        agent_turn_mark: row.turns.clone(),
     }
 }
 

@@ -1,9 +1,92 @@
 //! Event bus: the only way for one slice to act on another.
 
 use egui::{Pos2, Rect};
-use protocol::{AgentCmd, AgentEvent};
+use protocol::{AgentCmd, AgentEvent, LocalBranch, Problem, WorktreeBranch};
 
-use super::world::{Camera, CardId, CommandTemplate, ProjectId, QuickMessage};
+use super::world::{Camera, CardId, CommandTemplate, ProjectId, QuickMessage, TaskSettings};
+
+/// The task a card is started for, as its staged file hands it to the command: never spliced
+/// into a command line, only written to private files the shell reads into variables.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskEnv {
+    pub reference: String,
+    /// One line.
+    pub title: String,
+    /// The whole prompt (`features::tasks::start::build_prompt`).
+    pub prompt: String,
+}
+
+/// A card started for a task: its id is chosen up front (the task records its session).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskCard {
+    pub card: CardId,
+    pub project: ProjectId,
+    /// Its folder: the task's worktree, or the group's folder outside git.
+    pub cwd: String,
+    /// The group's task command, its placeholders expanded (`features::tasks::start::expand_command`).
+    pub command: String,
+    /// A worktree recipe's setup command, accepted: run first, the command only if it succeeded.
+    pub setup: Option<String>,
+    pub task: TaskEnv,
+}
+
+/// The worktree a task's start would create (the `tasks` slice asks, the `worktrees` slice
+/// answers).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskWorktreeSpec {
+    pub project: ProjectId,
+    /// The task's id.
+    pub task: String,
+    pub branch: WorktreeBranch,
+    /// Its folder name (`protocol::folder_for_branch`).
+    pub folder: String,
+    /// The group's location template (`None`: the default one).
+    pub location: Option<String>,
+}
+
+/// What a repository's recipe will do to a new worktree, as the start's confirmation shows it
+/// (translated by the `worktrees` slice).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecipeSummary {
+    /// The recipe's file and its problem, if any, then one line per pattern: (text, refused).
+    pub lines: Vec<(String, bool)>,
+    /// The setup command, every character shown for what it is.
+    pub setup: Option<String>,
+    /// The user accepted that very setup command for this repository before.
+    pub setup_accepted: bool,
+}
+
+/// The `worktrees` slice's answer to `Event::PlanTaskWorktree`, with its checks of that very
+/// request (the same as the new-worktree dialog's).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskWorktreePlan {
+    pub spec: TaskWorktreeSpec,
+    /// The repository's local branches, sorted, with where each is checked out.
+    pub branches: Vec<LocalBranch>,
+    pub default_branch: Option<String>,
+    /// The folder the worktree would get.
+    pub path: Option<String>,
+    /// When the folder is taken: the first free one.
+    pub free_folder: Option<String>,
+    /// The folder is not ignored by git: the pattern that would be added to `info/exclude`.
+    pub exclude: Option<String>,
+    /// What is wrong with the request (empty: it can be created).
+    pub problems: Vec<Problem>,
+    pub recipe: Option<RecipeSummary>,
+}
+
+/// A worktree to create for a task, through the same creation as the new-worktree dialog: once it
+/// went through (and the recipe's copies and links are done), its card opens in it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskWorktreeOrder {
+    pub spec: TaskWorktreeSpec,
+    /// Add the folder to `info/exclude` (ticked by the user).
+    pub exclude: bool,
+    /// Run the recipe's setup command in the card first (ticked by the user).
+    pub run_setup: bool,
+    /// The card to open (its `cwd` is the new worktree's folder once it is there).
+    pub card: TaskCard,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Notice {
@@ -81,6 +164,33 @@ pub enum Event {
         setup: Option<String>,
         cwd: Option<String>,
     },
+    /// A card started for a task, in a folder that exists (a worktree reused, a folder outside
+    /// git), or once its worktree was created.
+    NewTaskCard(Box<TaskCard>),
+    /// Asks what creating a task's worktree would give (`worktrees` slice); answered by
+    /// `TaskWorktreePlanned`.
+    PlanTaskWorktree(Box<TaskWorktreeSpec>),
+    TaskWorktreePlanned(Box<TaskWorktreePlan>),
+    /// Creates a worktree for a task, then opens its card (`worktrees` slice); answered by
+    /// `TaskWorktreeCreated` or `TaskWorktreeFailed`.
+    CreateTaskWorktree(Box<TaskWorktreeOrder>),
+    TaskWorktreeCreated {
+        project: ProjectId,
+        task: String,
+        path: String,
+        branch: String,
+    },
+    TaskWorktreeFailed {
+        project: ProjectId,
+        task: String,
+        problem: Problem,
+    },
+    /// Makes the group's template `n` the one that starts its tasks (`projects` slice).
+    UseTaskTemplate(ProjectId, usize),
+    /// Adds a command template to a group, as the one that starts its tasks.
+    AddTaskTemplate(ProjectId, CommandTemplate),
+    /// Replaces how a group starts its tasks.
+    SetProjectTaskSettings(ProjectId, TaskSettings),
     /// Sets where a group's new worktrees go (`None`: the default location).
     SetProjectWorktreeLocation(ProjectId, Option<String>),
     /// Opens the new-worktree dialog of a group.

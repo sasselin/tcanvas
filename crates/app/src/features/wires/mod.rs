@@ -258,7 +258,17 @@ mod tests {
     fn two_projects() -> World {
         let mut w = World::default();
         for (id, x) in [("api", 0.0), ("web", 900.0)] {
-            w.projects.push(Project { id: id.into(), name: id.into(), color: [1, 2, 3], rect: r(x, 0.0), cwd: None, templates: Vec::new(), messages: Vec::new(), worktree_location: None });
+            w.projects.push(Project {
+                id: id.into(),
+                name: id.into(),
+                color: [1, 2, 3],
+                rect: r(x, 0.0),
+                cwd: None,
+                templates: Vec::new(),
+                messages: Vec::new(),
+                worktree_location: None,
+                task_settings: Default::default(),
+            });
         }
         w
     }
@@ -281,7 +291,17 @@ mod tests {
     #[test]
     fn removing_a_group_drops_its_wires() {
         let mut w = two_projects();
-        w.projects.push(Project { id: "db".into(), name: "db".into(), color: [0; 3], rect: r(0.0, 900.0), cwd: None, templates: Vec::new(), messages: Vec::new(), worktree_location: None });
+        w.projects.push(Project {
+            id: "db".into(),
+            name: "db".into(),
+            color: [0; 3],
+            rect: r(0.0, 900.0),
+            cwd: None,
+            templates: Vec::new(),
+            messages: Vec::new(),
+            worktree_location: None,
+            task_settings: Default::default(),
+        });
         let mut wires = Wires;
         wires.handle(&Event::AddWire("api".into(), "web".into()), &mut w, &mut vec![]);
         wires.handle(&Event::AddWire("web".into(), "db".into()), &mut w, &mut vec![]);
