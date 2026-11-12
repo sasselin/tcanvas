@@ -2,10 +2,11 @@
 //! Skipped cleanly if tmux (or the shell under test) is not installed.
 
 use std::io::{BufRead, BufReader, Write};
+use std::ops::RangeInclusive;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use protocol::{AgentCmd, AgentEvent, Hooks, SessionInfo, TermStatus};
 
@@ -97,6 +98,36 @@ impl Drop for Agent {
     }
 }
 
+/// Watches the wall clock against the monotonic one while a command runs. The shell hooks
+/// time commands with the wall clock, which WSL steps back to follow Windows (about 1.8 s
+/// every 30 s on some machines): a step during a command shortens its reported duration by
+/// as much, so the expected range widens by the steps seen.
+struct ClockWatch {
+    wall: SystemTime,
+    mono: Instant,
+}
+
+impl ClockWatch {
+    fn start() -> Self {
+        ClockWatch { wall: SystemTime::now(), mono: Instant::now() }
+    }
+
+    /// Whole seconds the hooks may report for a `secs`-long command (plus under a second of
+    /// shell overhead) run since `start`: each end is truncated to the second, hence +-1, and
+    /// the steps are rounded (that +-1 already covers a fraction of a second; rounding up would
+    /// widen the range for the usual milliseconds of drift).
+    fn expected_duration(&self, secs: u64) -> RangeInclusive<u64> {
+        let wall = match SystemTime::now().duration_since(self.wall) {
+            Ok(d) => d.as_secs_f64(),
+            Err(e) => -e.duration().as_secs_f64(),
+        };
+        let drift = wall - self.mono.elapsed().as_secs_f64();
+        let back = (-drift).max(0.0).round() as u64;
+        let ahead = drift.max(0.0).round() as u64;
+        secs.saturating_sub(1 + back)..=secs + 1 + ahead
+    }
+}
+
 fn has(bin: &str) -> bool {
     Command::new(bin).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok()
 }
@@ -125,12 +156,16 @@ fn reports_running_stalled_failed_question_and_gone() {
     agent.send(&AgentCmd::SetStall { session: session.into(), secs: 2 });
     agent.wait_status(session, "Idle", |i| i.status == TermStatus::Idle);
 
-    server.type_line(session, "sleep 4");
+    // Stalled needs a poll (about every second) seeing 2 s of silence on the wall clock,
+    // which a step back (up to 2 s, see `ClockWatch`) can cut from the sleep: 6 s leaves room.
+    let clock = ClockWatch::start();
+    server.type_line(session, "sleep 6");
     let running = agent.wait_status(session, "Running", |i| i.status == TermStatus::Running);
-    assert_eq!(running.command.as_deref(), Some("sleep 4"));
+    assert_eq!(running.command.as_deref(), Some("sleep 6"));
     agent.wait_status(session, "Stalled", |i| i.status == TermStatus::Stalled);
     let done = agent.wait_status(session, "Idle after sleep", |i| i.status == TermStatus::Idle && i.last_exit == Some(0));
-    assert!(matches!(done.last_duration_secs, Some(3..=5)), "duration {:?}", done.last_duration_secs);
+    let expected = clock.expected_duration(6);
+    assert!(done.last_duration_secs.is_some_and(|d| expected.contains(&d)), "duration {:?}, expected {expected:?}", done.last_duration_secs);
 
     server.type_line(session, "false");
     let failed = agent.wait_status(session, "Exited(1)", |i| i.status == TermStatus::Exited(1));
@@ -216,10 +251,12 @@ fn bash_hooks_report_exit_code_and_duration() {
     agent.wait_for("Hello", |ev| matches!(ev, AgentEvent::Hello { .. }));
     agent.wait_status(session, "Idle", |i| i.status == TermStatus::Idle);
 
+    let clock = ClockWatch::start();
     server.type_line(session, "sleep 2; false");
     let failed = agent.wait_status(session, "Exited(1)", |i| i.status == TermStatus::Exited(1));
     assert_eq!(failed.last_exit, Some(1));
-    assert!(matches!(failed.last_duration_secs, Some(1..=3)), "duration {:?}", failed.last_duration_secs);
+    let expected = clock.expected_duration(2);
+    assert!(failed.last_duration_secs.is_some_and(|d| expected.contains(&d)), "duration {:?}, expected {expected:?}", failed.last_duration_secs);
 
     // The user's $? is untouched by the hooks.
     server.type_line(session, "(exit 7); echo \"code=$?\"");

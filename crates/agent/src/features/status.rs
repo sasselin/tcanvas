@@ -1,6 +1,7 @@
 //! Computes a terminal's status from tmux and /proc.
 
 use std::fs;
+use std::time::Instant;
 
 use protocol::TermStatus;
 
@@ -77,6 +78,18 @@ pub fn classify(o: &Observation) -> TermStatus {
         (Some(code), _) if code != 0 => TermStatus::Exited(code),
         _ => TermStatus::Idle,
     }
+}
+
+/// Tracks a run of screen output: from its start `since` (none yet) and the time since the
+/// last output, `quiet_secs`, returns the run's new start and its length in seconds. The
+/// length is the agent's own duration, so it is measured on the monotonic clock: the wall
+/// clock can step back (WSL syncs it with Windows) and land before the start.
+pub fn busy_run(since: Option<Instant>, now: Instant, quiet_secs: u64) -> (Option<Instant>, u64) {
+    if quiet_secs > BUSY_GAP_SECS {
+        return (None, 0);
+    }
+    let since = since.unwrap_or(now);
+    (Some(since), now.saturating_duration_since(since).as_secs())
 }
 
 /// Exit code and duration of the last finished command, from the hooks.
@@ -227,6 +240,25 @@ mod tests {
         for c in ["vim notes.md", "sleep 4", "node server.js", "claude-squad"] {
             assert!(!is_coding_agent(c), "{c}");
         }
+    }
+
+    #[test]
+    fn busy_run_lasts_while_output_keeps_coming() {
+        use std::time::Duration;
+        let t0 = Instant::now();
+        let (since, secs) = busy_run(None, t0, 0);
+        assert_eq!((since, secs), (Some(t0), 0), "output starts a run");
+        assert_eq!(busy_run(since, t0 + Duration::from_secs(3), BUSY_GAP_SECS), (Some(t0), 3), "a short pause keeps it");
+        assert_eq!(busy_run(since, t0 + Duration::from_secs(4), BUSY_GAP_SECS + 1), (None, 0), "a longer one ends it");
+        assert_eq!(busy_run(None, t0, BUSY_GAP_SECS + 1), (None, 0));
+    }
+
+    #[test]
+    fn busy_run_start_in_the_future_counts_as_zero() {
+        use std::time::Duration;
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_secs(5);
+        assert_eq!(busy_run(Some(later), t0, 0), (Some(later), 0));
     }
 
     #[test]

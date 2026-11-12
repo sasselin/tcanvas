@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protocol::{AgentCmd, AgentEvent, DEFAULT_STALL_SECS, Problem, SessionInfo, TermStatus};
 
@@ -16,14 +16,14 @@ const TAIL_LINES: usize = 3;
 #[derive(Default)]
 struct Tracked {
     stall_secs: u64,
-    /// `window_activity` at the last screen capture.
-    captured_activity: Option<u64>,
+    /// The last screen capture.
+    captured: Option<tmux::Capture>,
     tail: Vec<String>,
     /// (foreground pid, CPU ticks) at the previous observation.
     prev_cpu: Option<(u32, u64)>,
     last_sent: Option<SessionInfo>,
     /// Start of the current run of screen output (no pause over `BUSY_GAP_SECS`).
-    busy_since: Option<u64>,
+    busy_since: Option<Instant>,
 }
 
 pub fn run() -> io::Result<()> {
@@ -61,10 +61,11 @@ pub fn run() -> io::Result<()> {
             }
         };
         let now = unix_now();
+        let mono = Instant::now();
 
         for row in &rows {
             let t = tracked.entry(row.session.clone()).or_default();
-            let info = observe(row, t, now);
+            let info = observe(row, t, now, mono);
             if t.last_sent.as_ref() != Some(&info) {
                 send(&AgentEvent::Session(info.clone()))?;
                 t.last_sent = Some(info);
@@ -81,10 +82,12 @@ pub fn run() -> io::Result<()> {
     }
 }
 
-fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64) -> SessionInfo {
-    if t.captured_activity != Some(row.activity) {
+/// `now`: wall clock (s), the clock of tmux and of the shell hooks; `mono`: the same moment
+/// on the monotonic clock, for durations the agent measures itself.
+fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64, mono: Instant) -> SessionInfo {
+    if !tmux::capture_is_current(t.captured, row.activity, now) {
         t.tail = tmux::capture_tail(&row.session, TAIL_LINES);
-        t.captured_activity = Some(row.activity);
+        t.captured = Some(tmux::Capture { activity: row.activity, at: now });
     }
 
     let fg = if row.dead { None } else { status::foreground(row.pane_pid) };
@@ -94,11 +97,9 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64) -> SessionInfo {
     });
     t.prev_cpu = fg.as_ref().map(|f| (f.pid, f.cpu_ticks));
 
-    if now.saturating_sub(row.activity) > status::BUSY_GAP_SECS {
-        t.busy_since = None;
-    } else {
-        t.busy_since.get_or_insert(now);
-    }
+    // Output stamped after `now` (the clock stepped back) is recent output.
+    let (busy_since, busy_secs) = status::busy_run(t.busy_since, mono, now.saturating_sub(row.activity));
+    t.busy_since = busy_since;
 
     let obs = status::Observation {
         now,
@@ -115,7 +116,7 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64) -> SessionInfo {
         // A mark left by an agent that has since quit names other processes: ignored.
         agent: row.agent.as_ref().filter(|m| fg.as_ref().is_some_and(|f| m.pids.contains(&f.pid))).map(|m| m.state),
         coding_agent: fg.as_ref().is_some_and(|f| status::is_coding_agent(&f.cmdline)),
-        busy_secs: t.busy_since.map_or(0, |since| now - since),
+        busy_secs,
         was_waiting: t.last_sent.as_ref().is_some_and(|i| i.status == TermStatus::WaitingInput),
     };
     let status = status::classify(&obs);
