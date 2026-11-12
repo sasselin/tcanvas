@@ -15,6 +15,7 @@ mod features {
     pub mod agent_hooks;
     pub mod changes;
     pub mod cleanup;
+    pub mod create;
     pub mod hooks;
     pub mod kill;
     pub mod send;

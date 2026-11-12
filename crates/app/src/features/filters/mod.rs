@@ -145,7 +145,7 @@ impl Filters {
     /// Creation buttons (first row of the bar).
     pub fn actions_ui(ui: &mut Ui, events: &mut Vec<Event>) {
         if ui.button(t().new_terminal_button).on_hover_text(t().new_terminal_hint).clicked() {
-            events.push(Event::NewCard { at: None, project: None, command: None });
+            events.push(Event::NewCard { at: None, project: None, command: None, cwd: None });
         }
         if ui.button(t().new_project_button).clicked() {
             events.push(Event::NewProject { at: None });
@@ -229,6 +229,7 @@ mod tests {
             cwd: None,
             templates: Vec::new(),
             messages: Vec::new(),
+            worktree_location: None,
         });
         let mut a = Card::new(Rect::from_min_size(pos2(10.0, 10.0), Vec2::splat(100.0)), Some("/srv/api".into()));
         a.info = Some(SessionInfo {
@@ -339,7 +340,7 @@ mod tests {
         let mut w = world();
         let stalled = StatusKind::ALL.iter().position(|k| *k == StatusKind::Stalled).unwrap();
         assert_eq!(counts(&w)[stalled], 1);
-        w.projects.push(Project { id: "other".into(), name: "other".into(), color: [0; 3], rect: Rect::NOTHING, cwd: None, templates: Vec::new(), messages: Vec::new() });
+        w.projects.push(Project { id: "other".into(), name: "other".into(), color: [0; 3], rect: Rect::NOTHING, cwd: None, templates: Vec::new(), messages: Vec::new(), worktree_location: None });
         w.space = Some("other".into());
         assert_eq!(counts(&w), [0; 6], "the stalled terminal is in another space");
     }

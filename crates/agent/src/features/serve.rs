@@ -61,6 +61,8 @@ pub fn run() -> io::Result<()> {
                 | AgentCmd::ListDir { .. }
                 | AgentCmd::Cleanup { .. }
                 | AgentCmd::WorktreeSizes { .. }
+                | AgentCmd::PlanWorktree { .. }
+                | AgentCmd::CreateWorktree { .. }
                 | AgentCmd::SendText { .. } => {}
             }
         }
@@ -188,6 +190,12 @@ fn spawn_stdin_reader(watcher: Sender<changes::Cmd>, sender: Sender<send_text::R
                 }
                 Ok(AgentCmd::WorktreeSizes { key, paths }) => {
                     let _ = watcher.send(changes::Cmd::Sizes { key, paths });
+                }
+                Ok(AgentCmd::PlanWorktree { id, key, folder, location }) => {
+                    let _ = watcher.send(changes::Cmd::PlanWorktree { id, key, folder, location });
+                }
+                Ok(AgentCmd::CreateWorktree { id, key, request }) => {
+                    let _ = watcher.send(changes::Cmd::CreateWorktree { id, key, request });
                 }
                 Ok(AgentCmd::SendText { id, session, text, enter, limit_ms }) => {
                     // Measured from now, on this machine's monotonic clock.

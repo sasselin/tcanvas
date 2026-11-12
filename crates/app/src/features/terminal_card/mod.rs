@@ -1094,7 +1094,7 @@ impl TerminalCards {
 
     pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
         match ev {
-            Event::NewCard { at, project, command } => {
+            Event::NewCard { at, project, command, cwd } => {
                 let cell = base_cell(&self.ctx);
                 let size = card_size(cell, DEFAULT_COLS, DEFAULT_ROWS);
                 // With no project given, the terminal is born in the open space.
@@ -1107,7 +1107,7 @@ impl TerminalCards {
                 });
                 let near = at.or(beside).unwrap_or(world.camera.center);
                 let rect = world.free_spot(near, size);
-                let mut card = Card::new(rect, project.and_then(|p| p.cwd.clone()));
+                let mut card = Card::new(rect, cwd.clone().or_else(|| project.and_then(|p| p.cwd.clone())));
                 card.project = project.map(|p| p.id.clone());
                 let id = card.id.clone();
                 if let Some(text) = command.as_deref().and_then(pty::staged_text) {

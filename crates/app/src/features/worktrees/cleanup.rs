@@ -465,7 +465,16 @@ mod tests {
         w.card_worktrees.insert(card.id.clone(), CardWorktree { path: "/home/me/shop/.claude/worktrees/busy".into(), branch: Some("busy".into()), linked: Some("busy".into()) });
         assert_eq!(verdict(&l.worktrees[4], &l, &w), Some(KeepReason::HasTerminal));
         // A group whose folder is in a worktree.
-        w.projects.push(Project { id: "q".into(), name: "taxes".into(), color: [0; 3], rect: Rect::ZERO, cwd: Some("/home/me/shop-taxes/web".into()), templates: Vec::new(), messages: Vec::new() });
+        w.projects.push(Project {
+            id: "q".into(),
+            name: "taxes".into(),
+            color: [0; 3],
+            rect: Rect::ZERO,
+            cwd: Some("/home/me/shop-taxes/web".into()),
+            templates: Vec::new(),
+            messages: Vec::new(),
+            worktree_location: None,
+        });
         assert_eq!(verdict(&l.worktrees[1], &l, &w), Some(KeepReason::GroupFolder));
         assert!(paths(&l, &w).is_empty());
         assert_eq!(verdict(&l.worktrees[0], &l, &w), Some(KeepReason::MainCheckout));

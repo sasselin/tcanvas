@@ -3,16 +3,20 @@
 //! keeps the lists, tells which worktree each card's folder is in (`World::card_worktrees`, read
 //! by the card's branch badge) and draws a one-line strip under the toolbar when the open group's
 //! repository has more than its main checkout. The strip opens the cleanup window (`cleanup`),
-//! the only place that asks the agent to delete anything, always after a confirmation.
+//! the only place that asks the agent to delete anything, always after a confirmation, and the
+//! new-worktree dialog (`create`), also opened from the group's menus (`Event::NewWorktree`) since
+//! the strip is hidden while the repository has only its main checkout.
 
 pub mod cleanup;
+pub mod create;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use egui::{Color32, Panel, RichText, ScrollArea, Ui};
 use protocol::{AgentEvent, Worktree, WorktreeList};
 
 use cleanup::CleanupWindow;
+use create::CreateDialog;
 
 use crate::shell::event::Event;
 use crate::shell::i18n::t;
@@ -60,6 +64,10 @@ pub struct Worktrees {
     /// received for.
     lists: BTreeMap<ProjectId, (String, WorktreeList)>,
     cleanup: Option<CleanupWindow>,
+    create: Option<CreateDialog>,
+    /// Creations sent and not answered for good: their card opens whenever they go through,
+    /// with or without the dialog.
+    sent: Vec<create::Sent>,
 }
 
 impl Worktrees {
@@ -71,9 +79,31 @@ impl Worktrees {
         self.cleanup.is_some()
     }
 
-    /// A confirmation is up (it takes Enter and Escape).
+    /// A confirmation or the new-worktree dialog is up (it takes Enter and Escape).
     pub fn has_dialog(&self) -> bool {
-        self.cleanup.as_ref().is_some_and(|c| c.confirm.is_some())
+        self.cleanup.as_ref().is_some_and(|c| c.confirm.is_some()) || self.create.is_some()
+    }
+
+    pub fn create_open(&self) -> bool {
+        self.create.is_some()
+    }
+
+    /// Creations sent and still waited for.
+    pub fn creations_waiting(&self) -> usize {
+        self.sent.len()
+    }
+
+    /// The new-worktree dialog's form, while it is open.
+    pub fn create_form(&self) -> Option<create::Form> {
+        self.create.as_ref().map(CreateDialog::form)
+    }
+
+    /// Opens the new-worktree dialog of a group whose folder is in a git repository.
+    pub fn open_create(&mut self, world: &World, project: &str) {
+        let Some(p) = world.project(project).filter(|_| self.lists.contains_key(project)) else { return };
+        if self.create.as_ref().is_none_or(|c| c.project != project) {
+            self.create = Some(CreateDialog::new(project.to_string(), p.worktree_location.clone()));
+        }
     }
 
     pub fn open_cleanup(&mut self, project: &str) {
@@ -84,6 +114,13 @@ impl Worktrees {
 
     /// The cleanup window and its confirmation. Call with the other dialogs.
     pub fn dialogs(&mut self, ctx: &egui::Context, world: &World, events: &mut Vec<Event>) {
+        if let Some(dialog) = self.create.as_mut() {
+            // Closed, or the group went or left git.
+            let open = self.lists.contains_key(&dialog.project) && dialog.ui(ctx, world, events, &mut self.sent);
+            if !open {
+                self.create = None;
+            }
+        }
         let Some(window) = self.cleanup.as_mut() else { return };
         let open = match self.lists.get(&window.project) {
             Some((_, list)) => window.ui(ctx, list, world, events),
@@ -102,10 +139,31 @@ impl Worktrees {
         if found != world.card_worktrees {
             world.card_worktrees = found;
         }
+        let git: BTreeSet<ProjectId> = self.lists.keys().cloned().collect();
+        if git != world.git_groups {
+            world.git_groups = git;
+        }
     }
 
-    pub fn handle(&mut self, ev: &Event, world: &mut World, _out: &mut Vec<Event>) {
+    pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
         match ev {
+            Event::NewWorktree(project) => self.open_create(world, project),
+            Event::Agent(ev @ (AgentEvent::WorktreePlan(_) | AgentEvent::WorktreeCreated { .. })) => {
+                if let AgentEvent::WorktreeCreated { id, path, problem, .. } = ev
+                    && let Some(i) = self.sent.iter().position(|s| s.id == *id)
+                {
+                    let (events, keep) = create::on_created(&self.sent[i], path.as_deref(), problem.as_ref(), world);
+                    out.extend(events);
+                    if !keep {
+                        self.sent.remove(i);
+                    }
+                }
+                if let Some(dialog) = self.create.as_mut()
+                    && dialog.handle(ev)
+                {
+                    self.create = None;
+                }
+            }
             Event::Agent(ev @ (AgentEvent::Cleaned { .. } | AgentEvent::WorktreeSizes { .. })) => {
                 if let Some(window) = self.cleanup.as_mut() {
                     window.handle(ev);
@@ -152,6 +210,7 @@ impl Worktrees {
         let worktrees: Vec<&Worktree> = list.worktrees.iter().filter(|w| !w.bare).collect();
         let removable = cleanup::removable(list, world).len();
         let mut open_cleanup = false;
+        let mut open_create = false;
         Panel::top("worktrees").resizable(false).show(ui, |ui| {
             // A floating scroll bar registers its drag area over the bottom of the content, which
             // in this short strip is the lower half of its buttons: the bar gets its own room.
@@ -161,6 +220,7 @@ impl Worktrees {
                 ui.label(RichText::new((t().worktrees_title)(worktrees.len())).strong().color(theme::TEXT_DIM)).on_hover_text(list.repo.as_deref().unwrap_or_default());
                 let label = RichText::new((t().cleanup_button)(removable)).color(if removable > 0 { MERGED } else { theme::TEXT_DIM });
                 open_cleanup = ui.small_button(label).on_hover_text(t().cleanup_button_hint).clicked();
+                open_create = ui.small_button(t().new_worktree_button).on_hover_text(t().new_worktree_hint).clicked();
                 ScrollArea::horizontal().id_salt("worktrees-strip").show(ui, |ui| {
                     ui.horizontal(|ui| {
                         for wt in worktrees {
@@ -171,9 +231,12 @@ impl Worktrees {
                 });
             });
         });
+        let project = list.key.clone();
         if open_cleanup {
-            let project = list.key.clone();
             self.open_cleanup(&project);
+        }
+        if open_create {
+            self.open_create(world, &project);
         }
     }
 }
@@ -286,7 +349,16 @@ mod tests {
 
     fn world_with_cards(cwds: &[&str]) -> (World, Vec<String>) {
         let mut w = World::default();
-        w.projects.push(Project { id: "p".into(), name: "shop".into(), color: [0; 3], rect: Rect::ZERO, cwd: Some("~/shop".into()), templates: Vec::new(), messages: Vec::new() });
+        w.projects.push(Project {
+            id: "p".into(),
+            name: "shop".into(),
+            color: [0; 3],
+            rect: Rect::ZERO,
+            cwd: Some("~/shop".into()),
+            templates: Vec::new(),
+            messages: Vec::new(),
+            worktree_location: None,
+        });
         let mut ids = vec![];
         for cwd in cwds {
             let card = Card::new(Rect::from_min_size(Pos2::ZERO, Vec2::splat(10.0)), Some(cwd.to_string()));
@@ -350,6 +422,84 @@ mod tests {
         // A group without a folder (or unknown) keeps nothing.
         s.handle(&Event::Agent(AgentEvent::Worktrees(list("ghost", shop()))), &mut w, &mut vec![]);
         assert!(s.list("ghost").is_none());
+    }
+
+    /// Opens the dialog of group `p`, answers its plan, and sends a creation of `name`.
+    fn send_creation(s: &mut Worktrees, w: &World, name: &str, now: std::time::Instant) -> u64 {
+        let dialog = s.create.as_mut().expect("open");
+        dialog.name = name.into();
+        let mut events = vec![];
+        dialog.ask_plan(&mut events, now);
+        let Some(Event::ToAgent(protocol::AgentCmd::PlanWorktree { id, folder, location, .. })) = events.pop() else { panic!("a plan") };
+        let plan = protocol::WorktreePlan {
+            id,
+            key: "p".into(),
+            branches: vec![],
+            current_branch: None,
+            default_branch: Some("main".into()),
+            path: Some(format!("/home/me/shop/.claude/worktrees/{folder}")),
+            folder,
+            location,
+            problem: None,
+            free_folder: None,
+            exclude: None,
+        };
+        dialog.handle(&AgentEvent::WorktreePlan(Box::new(plan)));
+        let sent = dialog.submit(w, &mut vec![], now).expect("sent");
+        let id = sent.id;
+        s.sent.push(sent);
+        id
+    }
+
+    fn created(id: u64, path: &str) -> Event {
+        Event::Agent(AgentEvent::WorktreeCreated { id, key: "p".into(), path: Some(path.into()), problem: None, excluded: false })
+    }
+
+    #[test]
+    fn a_creation_answered_after_its_dialog_expired_or_closed_still_opens_its_card() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::En);
+        let (mut w, _) = world_with_cards(&[]);
+        let mut s = Worktrees::default();
+        s.handle(&Event::Agent(AgentEvent::Worktrees(list("p", shop()))), &mut w, &mut vec![]);
+        let now = std::time::Instant::now();
+        let new_card = |out: &[Event], path: &str| out.iter().any(|e| matches!(e, Event::NewCard { project: Some(p), cwd: Some(c), .. } if p == "p" && c == path));
+
+        // The dialog gave up waiting (no answer in time); the answer comes later.
+        s.create = None;
+        s.handle(&Event::NewWorktree("p".into()), &mut w, &mut vec![]);
+        let id = send_creation(&mut s, &w, "slow", now);
+        s.create.as_mut().unwrap().expire(now + cleanup::PENDING_TIMEOUT);
+        assert!(!s.create.as_ref().unwrap().creating());
+        let mut out = vec![];
+        s.handle(&created(id, "/home/me/shop/.claude/worktrees/slow"), &mut w, &mut out);
+        assert!(new_card(&out, "/home/me/shop/.claude/worktrees/slow"), "{out:?}");
+        assert_eq!(s.creations_waiting(), 0);
+
+        // git still running, then the dialog closed: the final answer still opens the card.
+        s.create = None;
+        s.handle(&Event::NewWorktree("p".into()), &mut w, &mut vec![]);
+        let id = send_creation(&mut s, &w, "later", now);
+        let still = Event::Agent(AgentEvent::WorktreeCreated { id, key: "p".into(), path: None, problem: Some(protocol::Problem::GitStillRunning { secs: 60 }), excluded: false });
+        let mut out = vec![];
+        s.handle(&still, &mut w, &mut out);
+        assert!(out.is_empty() && s.creations_waiting() == 1, "still waited for");
+        s.create = None;
+        s.handle(&created(id, "/home/me/shop/.claude/worktrees/later"), &mut w, &mut out);
+        assert!(new_card(&out, "/home/me/shop/.claude/worktrees/later"), "{out:?}");
+
+        // The group went meanwhile: no card, a notice naming the folder.
+        s.create = None;
+        s.handle(&Event::NewWorktree("p".into()), &mut w, &mut vec![]);
+        let id = send_creation(&mut s, &w, "orphan", now);
+        w.projects.clear();
+        let mut out = vec![];
+        s.handle(&created(id, "/home/me/shop/.claude/worktrees/orphan"), &mut w, &mut out);
+        assert!(!out.iter().any(|e| matches!(e, Event::NewCard { .. })));
+        assert!(matches!(&out[..], [Event::Inform { body, .. }] if body.contains("/home/me/shop/.claude/worktrees/orphan")), "{out:?}");
+        // An answer nobody waits for opens nothing.
+        let mut out = vec![];
+        s.handle(&created(999, "/x"), &mut w, &mut out);
+        assert!(out.is_empty());
     }
 
     #[test]

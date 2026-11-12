@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use protocol::{BranchKeepReason, Cleanup, Ignored, KeepReason, Problem, Usage, Worktree, WorktreeSize, keep_reason, path_inside};
@@ -380,16 +380,105 @@ pub fn measure(dir: &Path, path: &str) -> WorktreeSize {
     size
 }
 
-/// A git command that writes: normal locking, no prompt, messages in English (the C locale),
-/// git's message as the problem.
-fn git_write(dir: &Path, args: &[&str]) -> Result<(), Problem> {
-    let out =
-        Command::new("git").arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0").env("LC_ALL", "C").stdin(Stdio::null()).output().map_err(|e| Problem::GitFailed { detail: e.to_string() })?;
-    if out.status.success() {
-        return Ok(());
+/// How long a git command that writes is waited for (`TCANVAS_WRITE_LIMIT_SECS` overrides it,
+/// for tests). Below the app's own wait for an answer.
+pub fn write_limit() -> Duration {
+    let secs = std::env::var("TCANVAS_WRITE_LIMIT_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(60);
+    Duration::from_secs(secs)
+}
+
+/// Most of git's message kept as the problem's detail.
+const MAX_DETAIL: u64 = 16 * 1024;
+
+/// What became of a command waited for within a time limit.
+pub enum Written {
+    /// It ended: `Ok`, or its message (stderr) as the problem.
+    Done(Result<(), Problem>),
+    /// Still running at the limit: it goes on; `Running::finish` waits for its end.
+    Running(Running),
+}
+
+/// A command still running after its time limit.
+pub struct Running {
+    child: Child,
+    err: PathBuf,
+}
+
+impl Running {
+    /// Waits for its end (blocking) and gives its result.
+    pub fn finish(mut self) -> Result<(), Problem> {
+        let status = self.child.wait();
+        ended(status, &self.err)
     }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    Err(Problem::GitFailed { detail: stderr.trim().to_string() })
+}
+
+/// A git command that writes: normal locking, no prompt, messages in English (the C locale),
+/// git's message as the problem. Waited for `write_limit()` at most: past that it goes on in the
+/// background (reaped there) and the answer is `GitStillRunning`. Stopping `git worktree remove`
+/// half-way would leave a half-deleted folder, and `git worktree add` a half checked out one
+/// with git's "initializing" lock: letting it finish leaves git's own end state.
+pub fn git_write(dir: &Path, args: &[&str]) -> Result<(), Problem> {
+    let limit = write_limit();
+    match git_write_within(dir, args, limit) {
+        Written::Done(result) => result,
+        Written::Running(running) => {
+            std::thread::spawn(move || running.finish());
+            Err(Problem::GitStillRunning { secs: limit.as_secs() })
+        }
+    }
+}
+
+pub fn git_write_within(dir: &Path, args: &[&str], limit: Duration) -> Written {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0").env("LC_ALL", "C");
+    run_within(cmd, limit)
+}
+
+/// Runs `cmd` with no input, its output thrown away, and its errors in a temporary file rather
+/// than a pipe: a process it leaves behind (a hook's background job) may keep the file open, it
+/// never keeps anyone waiting for the end of a pipe. Waits for the command itself, `limit` at
+/// most.
+pub fn run_within(mut cmd: Command, limit: Duration) -> Written {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let failed = |e: std::io::Error| Written::Done(Err(Problem::GitFailed { detail: e.to_string() }));
+    let err = std::env::temp_dir().join(format!("tcanvas-agent-{}-{}.err", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+    let file = match fs::OpenOptions::new().write(true).create_new(true).open(&err) {
+        Ok(file) => file,
+        Err(e) => return failed(e),
+    };
+    let child = cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::from(file)).spawn();
+    let mut child = match child {
+        Ok(child) => child,
+        Err(e) => {
+            let _ = fs::remove_file(&err);
+            return failed(e);
+        }
+    };
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Written::Done(ended(Ok(status), &err)),
+            Ok(None) if Instant::now() >= deadline => return Written::Running(Running { child, err }),
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => return Written::Done(ended(Err(e), &err)),
+        }
+    }
+}
+
+/// The result of an ended command whose errors went to `err` (removed here).
+fn ended(status: std::io::Result<std::process::ExitStatus>, err: &Path) -> Result<(), Problem> {
+    use std::io::Read;
+    let mut text = Vec::new();
+    if let Ok(file) = fs::File::open(err) {
+        let _ = file.take(MAX_DETAIL).read_to_end(&mut text);
+    }
+    let _ = fs::remove_file(err);
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(_) => Err(Problem::GitFailed { detail: String::from_utf8_lossy(&text).trim().to_string() }),
+        Err(e) => Err(Problem::GitFailed { detail: e.to_string() }),
+    }
 }
 
 /// Current folder of every process of this user but the agent itself (processes whose folder
@@ -551,6 +640,39 @@ mod tests {
         assert_eq!(device_step(true, Devices::Skip), Step::Visit);
         assert_eq!(device_step(false, Devices::Skip), Step::Skip, "sizes: like du -x");
         assert_eq!(device_step(false, Devices::Unknown), Step::GiveUp, "git's removal would cross it");
+    }
+
+    fn sh(script: &str) -> Command {
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(script);
+        cmd
+    }
+
+    #[test]
+    fn a_background_job_holding_stderr_does_not_keep_anyone_waiting() {
+        // Like a hook that starts a job in the background and ends: the job keeps stderr open.
+        let start = Instant::now();
+        let Written::Done(result) = run_within(sh("(sleep 5 >&2 &); echo 'fatal: refused' >&2; exit 3"), Duration::from_secs(4)) else { panic!("it ended") };
+        assert!(start.elapsed() < Duration::from_secs(3), "{:?}", start.elapsed());
+        assert_eq!(result, Err(Problem::GitFailed { detail: "fatal: refused".into() }), "its message, read from the file");
+        let Written::Done(ok) = run_within(sh("(sleep 5 &); exit 0"), Duration::from_secs(4)) else { panic!("it ended") };
+        assert_eq!(ok, Ok(()));
+    }
+
+    #[test]
+    fn a_command_past_its_limit_goes_on_and_can_be_waited_for() {
+        let marker = std::env::temp_dir().join(format!("tcanvas-limit-{}", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        let start = Instant::now();
+        let script = format!("sleep 1; echo late >&2; touch '{}'; exit 4", marker.display());
+        let Written::Running(running) = run_within(sh(&script), Duration::from_millis(200)) else { panic!("still running at the limit") };
+        assert!(start.elapsed() < Duration::from_millis(900));
+        assert!(!marker.exists(), "not stopped, not finished yet");
+        assert_eq!(running.finish(), Err(Problem::GitFailed { detail: "late".into() }), "its final result");
+        assert!(marker.exists(), "it went on to the end");
+        fs::remove_file(&marker).unwrap();
+        let Written::Done(missing) = run_within(Command::new("/nonexistent/git"), Duration::from_secs(1)) else { panic!("never started") };
+        assert!(matches!(missing, Err(Problem::GitFailed { .. })));
     }
 
     #[test]

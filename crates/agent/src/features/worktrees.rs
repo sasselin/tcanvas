@@ -183,7 +183,7 @@ pub fn parse_default_branch(out: &str, main_checkout: Option<(&str, &str)>) -> O
     named.or_else(|| main_checkout.filter(|(_, sha)| is_sha(sha)).map(|(branch, sha)| Base { name: branch.to_string(), sha: sha.to_string() }))
 }
 
-fn default_branch(dir: &Path, main_checkout: Option<(&str, &str)>) -> Option<Base> {
+pub fn default_branch(dir: &Path, main_checkout: Option<(&str, &str)>) -> Option<Base> {
     let out = git_ok(dir, &["for-each-ref", "--format=%(refname)%09%(objectname)%09%(symref)", ORIGIN_HEAD, ORIGIN_MAIN, ORIGIN_MASTER, MAIN, MASTER]).unwrap_or_default();
     parse_default_branch(&out, main_checkout)
 }

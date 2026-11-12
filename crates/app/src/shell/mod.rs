@@ -153,7 +153,7 @@ impl App {
             match s {
                 Shortcut::Jump => self.jump.open(),
                 Shortcut::Help => self.shortcuts_help.open(),
-                Shortcut::NewCard => events.push(Event::NewCard { at: None, project: None, command: None }),
+                Shortcut::NewCard => events.push(Event::NewCard { at: None, project: None, command: None, cwd: None }),
                 Shortcut::Search => {
                     events.push(Event::Unfocus);
                     ctx.memory_mut(|m| m.request_focus(Id::unique(filters::SEARCH_ID)));

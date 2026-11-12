@@ -384,10 +384,11 @@ impl Projects {
         self.messages = Some(RowEditor::open(&p.id, &p.messages));
     }
 
-    /// Menu of the arrow next to "+ Terminal": a plain shell, each template, then the editor.
-    fn new_terminal_menu(&mut self, ui: &mut Ui, p: &Project, events: &mut Vec<Event>) {
+    /// Menu of the arrow next to "+ Terminal": a plain shell, each template, then the editor, and
+    /// a terminal in a new worktree when the group's folder is in a git repository (`git`).
+    fn new_terminal_menu(&mut self, ui: &mut Ui, p: &Project, git: bool, events: &mut Vec<Event>) {
         if ui.button(t().plain_shell).clicked() {
-            events.push(Event::NewCard { at: None, project: Some(p.id.clone()), command: None });
+            events.push(Event::NewCard { at: None, project: Some(p.id.clone()), command: None, cwd: None });
             ui.close();
         }
         ui.separator();
@@ -397,11 +398,15 @@ impl Projects {
         for tpl in &p.templates {
             let hover = egui::RichText::new(format!("{}\n\n{}", tpl.name, tpl.command)).monospace();
             if ui.button(menu_name(&tpl.name)).on_hover_text(hover).clicked() {
-                events.push(Event::NewCard { at: None, project: Some(p.id.clone()), command: Some(tpl.command.clone()) });
+                events.push(Event::NewCard { at: None, project: Some(p.id.clone()), command: Some(tpl.command.clone()), cwd: None });
                 ui.close();
             }
         }
         ui.separator();
+        if git && ui.button(t().new_worktree_menu).on_hover_text(t().new_worktree_hint).clicked() {
+            events.push(Event::NewWorktree(p.id.clone()));
+            ui.close();
+        }
         if ui.button(t().edit_templates).clicked() {
             self.edit_templates(p);
             ui.close();
@@ -508,7 +513,7 @@ impl Projects {
         painter.rect_filled(add_rect, CornerRadius::same(6), if add_r.hovered() { color.gamma_multiply(0.5) } else { color.gamma_multiply(0.22) });
         painter.text(add_rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, add_label, folder_font.clone(), theme::TEXT);
         if add_r.clicked() {
-            events.push(Event::NewCard { at: None, project: Some(id.clone()), command: None });
+            events.push(Event::NewCard { at: None, project: Some(id.clone()), command: None, cwd: None });
         }
         // Its arrow: the same, or a terminal started from one of the group's command templates.
         let more_rect = Rect::from_min_size(pos2(add_rect.max.x + 2.0, header.min.y), vec2(MORE_W, HEADER_H));
@@ -518,7 +523,8 @@ impl Projects {
         painter.rect_filled(more_rect, CornerRadius::same(6), if more_r.hovered() { color.gamma_multiply(0.5) } else { color.gamma_multiply(0.22) });
         let c = more_rect.center();
         painter.add(egui::Shape::convex_polygon(vec![c + vec2(-4.0, -2.0), c + vec2(4.0, -2.0), c + vec2(0.0, 3.0)], theme::TEXT, Stroke::NONE));
-        egui::Popup::menu(&more_r).show(|ui| self.new_terminal_menu(ui, p, events));
+        let git = world.git_groups.contains(&id);
+        egui::Popup::menu(&more_r).show(|ui| self.new_terminal_menu(ui, p, git, events));
 
         let mut bar = header.union(folder_rect).union(add_rect).union(more_rect);
         // Linked-folder changes: number of uncommitted files; click = diff panel.
@@ -552,7 +558,7 @@ impl Projects {
             painter.rect_filled(empty_rect, CornerRadius::same(8), if empty_r.hovered() { color.gamma_multiply(0.6) } else { color.gamma_multiply(0.35) });
             painter.text(empty_rect.center(), Align2::CENTER_CENTER, t().open_a_terminal, FontId::proportional(16.0), theme::TEXT);
             if empty_r.clicked() {
-                events.push(Event::NewCard { at: None, project: Some(id.clone()), command: None });
+                events.push(Event::NewCard { at: None, project: Some(id.clone()), command: None, cwd: None });
             }
         }
 
@@ -585,7 +591,8 @@ impl Projects {
             self.start_rename(&world.projects[i]);
         }
         let mut pick = false;
-        head.context_menu(|ui| pick = self.menu(ui, &world.projects[i], events));
+        let git = world.git_groups.contains(&id);
+        head.context_menu(|ui| pick = self.menu(ui, &world.projects[i], git, events));
         if pick {
             self.open_picker(world, &id, events);
         }
@@ -670,11 +677,16 @@ impl Projects {
         events.push(Event::ToAgent(cmd));
     }
 
-    /// Group menu. Returns `true` to open the folder picker.
-    fn menu(&mut self, ui: &mut Ui, p: &Project, events: &mut Vec<Event>) -> bool {
+    /// Group menu. Returns `true` to open the folder picker. `git`: the group's folder is in a git
+    /// repository (a new worktree is offered).
+    fn menu(&mut self, ui: &mut Ui, p: &Project, git: bool, events: &mut Vec<Event>) -> bool {
         let mut pick = false;
         if ui.button(t().new_terminal_here).clicked() {
-            events.push(Event::NewCard { at: Some(p.rect.center()), project: Some(p.id.clone()), command: None });
+            events.push(Event::NewCard { at: Some(p.rect.center()), project: Some(p.id.clone()), command: None, cwd: None });
+            ui.close();
+        }
+        if git && ui.button(t().new_worktree_menu).on_hover_text(t().new_worktree_hint).clicked() {
+            events.push(Event::NewWorktree(p.id.clone()));
             ui.close();
         }
         if ui.button(t().rename_group).clicked() {
@@ -823,6 +835,7 @@ impl Projects {
                     cwd: None,
                     templates: Vec::new(),
                     messages: Vec::new(),
+                    worktree_location: None,
                 };
                 self.start_rename(&p);
                 let id = p.id.clone();
@@ -857,6 +870,14 @@ impl Projects {
                     p.templates = templates.clone();
                 }
                 world.touch();
+            }
+            Event::SetProjectWorktreeLocation(id, location) => {
+                if let Some(p) = world.projects.iter_mut().find(|p| &p.id == id)
+                    && p.worktree_location != *location
+                {
+                    p.worktree_location = location.clone();
+                    world.touch();
+                }
             }
             Event::SetProjectMessages(id, messages) => {
                 if let Some(p) = world.projects.iter_mut().find(|p| &p.id == id) {
@@ -928,6 +949,7 @@ mod tests {
             cwd: None,
             templates: Vec::new(),
             messages: Vec::new(),
+            worktree_location: None,
         });
         let mut member = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::splat(50.0)), None);
         member.project = Some("p".into());
@@ -952,6 +974,7 @@ mod tests {
             cwd: None,
             templates: Vec::new(),
             messages: Vec::new(),
+            worktree_location: None,
         });
         let mut a = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::splat(50.0)), None);
         a.name = Some("server".into());
@@ -989,6 +1012,7 @@ mod tests {
                 cwd: None,
                 templates: Vec::new(),
                 messages: Vec::new(),
+                worktree_location: None,
             });
         }
         let mut c = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::new(300.0, 200.0)), None);
@@ -1128,6 +1152,7 @@ mod tests {
             cwd: None,
             templates: Vec::new(),
             messages: Vec::new(),
+            worktree_location: None,
         });
         w.space = Some("api".into());
         let mut out = vec![];
@@ -1148,6 +1173,7 @@ mod tests {
             cwd: None,
             templates: Vec::new(),
             messages: Vec::new(),
+            worktree_location: None,
         });
         // "All" view, camera centered on the existing group, or creation at a precise point inside it.
         for at in [None, Some(pos2(20.0, 10.0))] {

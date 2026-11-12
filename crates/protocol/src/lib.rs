@@ -122,6 +122,236 @@ pub enum Problem {
     },
     /// Text not sent: its time limit (`AgentCmd::SendText::limit_ms`) passed before it could be.
     Expired,
+    /// Worktree not created: git does not accept this branch name (`git check-ref-format
+    /// --branch`), or it could pass for an option or a revision (`-x`, `@{-1}`, `HEAD`).
+    InvalidBranchName {
+        branch: String,
+    },
+    /// Worktree not created: a new branch was asked, but a local branch has this name.
+    BranchExists {
+        branch: String,
+    },
+    /// Worktree not created: no local branch has this name.
+    BranchNotFound {
+        branch: String,
+    },
+    /// Worktree not created: this branch is checked out in the worktree at `path`.
+    BranchCheckedOut {
+        branch: String,
+        path: String,
+    },
+    /// Worktree not created: its folder already exists.
+    DestinationExists {
+        path: String,
+    },
+    /// Worktree not created: the base does not name a commit.
+    BaseNotFound {
+        base: String,
+    },
+    /// Worktree not created: the folder name is not one `folder_for_branch` would give.
+    InvalidFolder {
+        folder: String,
+    },
+    /// Worktree not created: the location template is refused, for this reason.
+    LocationRefused {
+        location: String,
+        issue: LocationIssue,
+    },
+    /// Worktree not created: git still records a worktree at this path whose folder is missing
+    /// (`git worktree prune`, from the cleanup window, forgets it).
+    WorktreeRegistered {
+        path: String,
+    },
+    /// A git command that writes was still running after `secs` seconds: the agent stopped
+    /// waiting for it, but it goes on (stopping a checkout or a removal half-way would leave
+    /// worse). For a worktree creation, the final answer follows when it ends.
+    GitStillRunning {
+        secs: u64,
+    },
+}
+
+/// Why a worktree location template (or the folder it gives) is refused.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LocationIssue {
+    Empty,
+    /// Longer than `MAX_LOCATION_CHARS`.
+    TooLong,
+    /// Starts with `/` or `~`: a location is relative to the repository.
+    Absolute,
+    /// `..` anywhere but as the single leading component, or a `.` component, or an empty one.
+    ParentDir,
+    /// `{name}` missing, more than once, or not in the last component.
+    NoName,
+    /// A `{...}` other than `{name}` and `{repo}`, or a lone brace.
+    UnknownPlaceholder,
+    /// A character outside letters, digits, `.`, `_`, `-` (glob characters, spaces, `\`...).
+    BadCharacter,
+    /// A `.git` component: never inside a repository's own files.
+    GitDir,
+    /// The repository is bare: a location inside it would sit in its git files.
+    InsideBare,
+    /// Resolved (symlinks followed), the folder is outside the repository (or, for a leading
+    /// `../`, outside the folder holding it).
+    Escapes,
+    /// Something on the way is a file, not a folder.
+    NotAFolder,
+    /// A component Windows cannot hold (the folder may live on a Windows drive, `/mnt/c/...`):
+    /// ending with `.`, or a reserved device name (`CON`, `NUL`, `COM1`, `LPT1`...).
+    WindowsName,
+}
+
+/// Where new worktrees go when a group sets nothing: inside the main checkout, where coding
+/// agents put theirs.
+pub const DEFAULT_WORKTREE_LOCATION: &str = ".claude/worktrees/{name}";
+/// Longest file name most file systems take, in bytes: the most a folder name (and any
+/// component of a location) may have.
+pub const MAX_NAME_BYTES: usize = 255;
+/// Longest location template, in characters.
+pub const MAX_LOCATION_CHARS: usize = 200;
+
+/// A name Windows reserves for a device, whatever its extension (`con`, `NUL.txt`, `com1`).
+pub fn windows_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default().trim_end().to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4 && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+}
+
+/// `s` cut to at most `max` bytes, on a character boundary.
+fn cut_bytes(s: &str, max: usize) -> &str {
+    let mut end = s.len().min(max);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// A folder name for a branch: slashes, spaces and every character other than letters, digits,
+/// `.`, `_` and `-` become `-`, runs of `-` are merged, no leading `.` or `-` (nor trailing `.`
+/// or `-`), at most `MAX_NAME_BYTES` bytes, a `_` after a Windows device name, never empty
+/// (`worktree`). Applying it twice changes nothing.
+pub fn folder_for_branch(branch: &str) -> String {
+    let mut out = String::new();
+    for c in branch.chars() {
+        let c = if c.is_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' };
+        if c == '-' && out.ends_with('-') {
+            continue;
+        }
+        out.push(c);
+    }
+    let trim = |s: &str| s.trim_matches(|c| c == '.' || c == '-').to_string();
+    let mut out = trim(&out);
+    if out.len() > MAX_NAME_BYTES {
+        out = trim(cut_bytes(&out, MAX_NAME_BYTES));
+    }
+    if windows_reserved(&out) {
+        // `con` -> `con_`, `nul.txt` -> `nul_.txt` (the stem is at most 4 bytes: the `_` stays).
+        let stem = out.find('.').unwrap_or(out.len());
+        out = format!("{}_{}", &out[..stem], &out[stem..]);
+        if out.len() > MAX_NAME_BYTES {
+            out = trim(cut_bytes(&out, MAX_NAME_BYTES));
+        }
+    }
+    // `.` inside is kept, but never `..` as a whole (trimmed above) nor a name git refuses.
+    if out.is_empty() { "worktree".into() } else { out }
+}
+
+/// A folder name the agent accepts: one `folder_for_branch` gives for itself.
+pub fn valid_folder(folder: &str) -> bool {
+    !folder.is_empty() && folder_for_branch(folder) == folder
+}
+
+/// A parsed location template: a relative path whose last component holds `{name}` (the folder
+/// name) and where `{repo}` stands for the main checkout's folder name. It is relative to the
+/// main checkout, or to the folder holding it when it starts with `../` (`../{repo}-{name}`: next
+/// to the repository). No other `..`, no `.`, no absolute path, no `.git` component.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Location {
+    /// Starts with `../`: relative to the folder holding the main checkout.
+    pub beside: bool,
+    /// The components after the optional `../`, placeholders not replaced yet.
+    pub parts: Vec<String>,
+}
+
+pub fn parse_location(template: &str) -> Result<Location, LocationIssue> {
+    let template = template.trim();
+    if template.is_empty() {
+        return Err(LocationIssue::Empty);
+    }
+    if template.chars().count() > MAX_LOCATION_CHARS {
+        return Err(LocationIssue::TooLong);
+    }
+    if template.starts_with('/') || template.starts_with('~') {
+        return Err(LocationIssue::Absolute);
+    }
+    let mut parts: Vec<&str> = template.trim_end_matches('/').split('/').collect();
+    let beside = parts.first() == Some(&"..");
+    if beside {
+        parts.remove(0);
+    }
+    if parts.is_empty() || parts.iter().any(|p| p.is_empty() || *p == "." || *p == "..") {
+        return Err(LocationIssue::ParentDir);
+    }
+    for part in &parts {
+        // Placeholders out, what is left must be plain.
+        let bare = part.replace("{name}", "").replace("{repo}", "");
+        if bare.contains(['{', '}']) {
+            return Err(LocationIssue::UnknownPlaceholder);
+        }
+        if !bare.chars().all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-')) {
+            return Err(LocationIssue::BadCharacter);
+        }
+        if part.eq_ignore_ascii_case(".git") {
+            return Err(LocationIssue::GitDir);
+        }
+        if part.ends_with('.') || (!part.contains('{') && windows_reserved(part)) {
+            return Err(LocationIssue::WindowsName);
+        }
+    }
+    let names = parts.iter().map(|p| p.matches("{name}").count()).sum::<usize>();
+    if names != 1 || !parts.last().is_some_and(|p| p.contains("{name}")) {
+        return Err(LocationIssue::NoName);
+    }
+    Ok(Location { beside, parts: parts.into_iter().map(String::from).collect() })
+}
+
+impl Location {
+    /// The worktree's path relative to its anchor (the main checkout, or the folder holding it
+    /// when `beside`), placeholders replaced. `repo`: the main checkout's folder name.
+    pub fn relative(&self, repo: &str, folder: &str) -> Result<String, LocationIssue> {
+        if !valid_folder(folder) {
+            return Err(LocationIssue::BadCharacter);
+        }
+        let parts: Vec<String> = self.parts.iter().map(|p| p.replace("{repo}", repo).replace("{name}", folder)).collect();
+        // `{repo}` comes from the file system: it may still make a component that is not plain.
+        if parts.iter().any(|p| p.is_empty() || p == "." || p == ".." || p.contains('/')) {
+            return Err(LocationIssue::ParentDir);
+        }
+        if parts.iter().any(|p| p.eq_ignore_ascii_case(".git")) {
+            return Err(LocationIssue::GitDir);
+        }
+        if parts.iter().any(|p| p.ends_with(['.', ' ']) || windows_reserved(p)) {
+            return Err(LocationIssue::WindowsName);
+        }
+        if parts.iter().any(|p| p.len() > MAX_NAME_BYTES) {
+            return Err(LocationIssue::TooLong);
+        }
+        Ok(parts.join("/"))
+    }
+}
+
+/// Where a worktree goes, as text (no file system access: the agent then resolves it): `main`
+/// is the main checkout's absolute path. `Ok((anchor, path))`: the folder it must stay in, and
+/// the worktree's own folder.
+pub fn worktree_destination(main: &str, template: &str, folder: &str) -> Result<(String, String), LocationIssue> {
+    let location = parse_location(template)?;
+    let main = main.trim_end_matches('/');
+    let (holder, repo) = main.rsplit_once('/').ok_or(LocationIssue::Escapes)?;
+    if repo.is_empty() {
+        return Err(LocationIssue::Escapes);
+    }
+    let anchor = if location.beside { if holder.is_empty() { "/".to_string() } else { holder.to_string() } } else { main.to_string() };
+    let relative = location.relative(repo, folder)?;
+    let path = format!("{}/{relative}", anchor.trim_end_matches('/'));
+    Ok((anchor, path))
 }
 
 /// Why a worktree is not offered for removal (and why the agent refuses to remove it).
@@ -457,6 +687,73 @@ pub enum Cleanup {
     DeleteBranch { branch: String },
 }
 
+/// The branch of a new worktree.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "kind")]
+pub enum WorktreeBranch {
+    /// `git worktree add -b <name> -- <path> <commit of base>`.
+    New { name: String, base: String },
+    /// `git worktree add -- <path> <name>`: a local branch no worktree has checked out.
+    Existing { name: String },
+}
+
+impl WorktreeBranch {
+    pub fn name(&self) -> &str {
+        match self {
+            WorktreeBranch::New { name, .. } | WorktreeBranch::Existing { name } => name,
+        }
+    }
+}
+
+/// A worktree to create for a watched folder's repository. The agent computes its path itself,
+/// from the main checkout, `location` and `folder`, and checks everything again.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct CreateWorktree {
+    pub branch: WorktreeBranch,
+    /// The worktree's folder name (`folder_for_branch`).
+    pub folder: String,
+    /// Location template (`parse_location`); `None`: `DEFAULT_WORKTREE_LOCATION`.
+    #[serde(default)]
+    pub location: Option<String>,
+    /// When git does not ignore the new folder inside the main checkout, add the pattern the
+    /// plan named (`WorktreePlan::exclude`) to the repository's local `info/exclude` first.
+    #[serde(default)]
+    pub exclude: bool,
+}
+
+/// A local branch, and the worktree that has it checked out.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct LocalBranch {
+    pub name: String,
+    pub checked_out: Option<String>,
+}
+
+/// What the new-worktree dialog needs to know, answering `AgentCmd::PlanWorktree`.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct WorktreePlan {
+    pub id: u64,
+    pub key: String,
+    /// The repository's local branches, sorted, with where each is checked out.
+    pub branches: Vec<LocalBranch>,
+    /// The branch the watched folder has checked out.
+    pub current_branch: Option<String>,
+    /// As in `WorktreeList` (`origin/main`, `main`...).
+    pub default_branch: Option<String>,
+    /// The folder name and location asked about.
+    pub folder: String,
+    pub location: Option<String>,
+    /// The folder the worktree would get (`None`: see `problem`).
+    pub path: Option<String>,
+    /// Why there is no such folder to create (refused location, folder already there...).
+    pub problem: Option<Problem>,
+    /// When the folder already exists: the first free one (`<folder>-2`, `-3`...).
+    pub free_folder: Option<String>,
+    /// The folder is inside the main checkout and git does not ignore it (the main checkout
+    /// would list it as untracked): the pattern `CreateWorktree::exclude` would add to
+    /// `info/exclude`.
+    pub exclude: Option<String>,
+}
+
 /// Disk space used by a worktree's folder, and what of it git ignores (what `git worktree
 /// remove` deletes without asking).
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -554,6 +851,20 @@ pub enum AgentEvent {
         #[serde(default)]
         pasted: bool,
     },
+    /// Answer to `AgentCmd::PlanWorktree`.
+    WorktreePlan(Box<WorktreePlan>),
+    /// Answer to `AgentCmd::CreateWorktree` with its `id`: `path` is the new worktree's folder,
+    /// `problem` why nothing was created. `excluded`: the location was added to `info/exclude`.
+    WorktreeCreated {
+        id: u64,
+        key: String,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        problem: Option<Problem>,
+        #[serde(default)]
+        excluded: bool,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -619,6 +930,23 @@ pub enum AgentCmd {
         enter: bool,
         #[serde(default)]
         limit_ms: Option<u64>,
+    },
+    /// What creating a worktree for a watched folder's repository would give: its local
+    /// branches, the folder `folder` would get with `location`, and whether git ignores it.
+    /// Read only. Response: `AgentEvent::WorktreePlan` with the same `id`.
+    PlanWorktree {
+        id: u64,
+        key: String,
+        folder: String,
+        #[serde(default)]
+        location: Option<String>,
+    },
+    /// Creates a worktree (never forced; checked again on fresh data first), then scans the
+    /// repository again. Response: `AgentEvent::WorktreeCreated` with the same `id`.
+    CreateWorktree {
+        id: u64,
+        key: String,
+        request: CreateWorktree,
     },
 }
 
@@ -948,6 +1276,172 @@ mod tests {
         let cmd = AgentCmd::SetStall { session: "tc_x".into(), secs: 5 };
         assert_eq!(decode::<AgentCmd>(&encode(&cmd)).unwrap(), cmd);
         assert_eq!(decode::<AgentCmd>(&encode(&AgentCmd::InstallHooks)).unwrap(), AgentCmd::InstallHooks);
+    }
+
+    #[test]
+    fn branch_names_become_safe_folder_names() {
+        let cases = [
+            ("invoices", "invoices"),
+            ("feat/invoices", "feat-invoices"),
+            ("feat//a b\\c:d*e?f", "feat-a-b-c-d-e-f"),
+            ("-x", "x"),
+            ("--force", "force"),
+            (".hidden", "hidden"),
+            ("..", "worktree"),
+            ("a..b", "a..b"),
+            ("fix/typo.", "fix-typo"),
+            ("release/1.2.x", "release-1.2.x"),
+            ("caf\u{e9}/cr\u{e8}me", "caf\u{e9}-cr\u{e8}me"),
+            ("x.lock", "x.lock"),
+            ("@{-1}", "1"),
+            ("", "worktree"),
+            ("///", "worktree"),
+            ("a\nb\tc", "a-b-c"),
+            // Windows device names, whatever the case or extension.
+            ("con", "con_"),
+            ("NUL.txt", "NUL_.txt"),
+            ("fix/com1", "fix-com1"),
+            ("lpt9", "lpt9_"),
+            ("com0", "com0"),
+        ];
+        for (branch, folder) in cases {
+            assert_eq!(folder_for_branch(branch), folder, "{branch:?}");
+            assert_eq!(folder_for_branch(folder), folder, "{branch:?}: applying it again changes nothing");
+            assert!(valid_folder(folder), "{folder:?}");
+        }
+        let long = folder_for_branch(&format!("feat/{}", "a".repeat(400)));
+        assert_eq!(long.len(), MAX_NAME_BYTES);
+        // Capped by bytes, cut on a character boundary: 2-byte letters.
+        let accents = folder_for_branch(&"\u{e9}".repeat(200));
+        assert!(accents.len() <= MAX_NAME_BYTES && accents.len() == 254 && valid_folder(&accents), "{}", accents.len());
+        // Cut right after a separator: no trailing dash.
+        let cut = folder_for_branch(&format!("{}/b", "a".repeat(MAX_NAME_BYTES - 1)));
+        assert_eq!(cut, "a".repeat(MAX_NAME_BYTES - 1));
+        for bad in ["", "a/b", "-x", ".x", "x-", "a b", "..", "a--b", "con", "Aux.log", &"a".repeat(MAX_NAME_BYTES + 1)] {
+            assert!(!valid_folder(bad), "{bad:?}");
+        }
+        assert!(windows_reserved("COM9") && windows_reserved("prn.x") && !windows_reserved("console") && !windows_reserved("com10"));
+    }
+
+    #[test]
+    fn location_templates_stay_in_the_repository_or_next_to_it() {
+        assert_eq!(parse_location(DEFAULT_WORKTREE_LOCATION), Ok(Location { beside: false, parts: vec![".claude".into(), "worktrees".into(), "{name}".into()] }));
+        assert_eq!(parse_location("../{repo}-{name}"), Ok(Location { beside: true, parts: vec!["{repo}-{name}".into()] }));
+        assert_eq!(parse_location(" wt/{name}/ ").map(|l| l.parts.len()), Ok(2), "trimmed, trailing slash ignored");
+        let refused = [
+            ("", LocationIssue::Empty),
+            ("/tmp/{name}", LocationIssue::Absolute),
+            ("~/wt/{name}", LocationIssue::Absolute),
+            ("../../{name}", LocationIssue::ParentDir),
+            ("wt/../../{name}", LocationIssue::ParentDir),
+            ("..", LocationIssue::ParentDir),
+            ("./{name}", LocationIssue::ParentDir),
+            ("wt//{name}", LocationIssue::ParentDir),
+            ("wt", LocationIssue::NoName),
+            ("{name}/src", LocationIssue::NoName),
+            ("{name}/{name}", LocationIssue::NoName),
+            ("wt/{branch}", LocationIssue::UnknownPlaceholder),
+            ("wt/{name", LocationIssue::UnknownPlaceholder),
+            ("wt/*/{name}", LocationIssue::BadCharacter),
+            ("wt dir/{name}", LocationIssue::BadCharacter),
+            ("wt\\x/{name}", LocationIssue::BadCharacter),
+            (".git/{name}", LocationIssue::GitDir),
+            ("x/.GIT/{name}", LocationIssue::GitDir),
+            ("wt./{name}", LocationIssue::WindowsName),
+            ("{name}.", LocationIssue::WindowsName),
+            ("con/{name}", LocationIssue::WindowsName),
+            ("x/NUL.d/{name}", LocationIssue::WindowsName),
+        ];
+        for (template, issue) in refused {
+            assert_eq!(parse_location(template), Err(issue), "{template:?}");
+        }
+        assert_eq!(parse_location(&format!("{}/{{name}}", "a".repeat(MAX_LOCATION_CHARS))), Err(LocationIssue::TooLong));
+
+        let dest = |template: &str, folder: &str| worktree_destination("/home/me/shop", template, folder);
+        assert_eq!(dest(DEFAULT_WORKTREE_LOCATION, "invoices"), Ok(("/home/me/shop".into(), "/home/me/shop/.claude/worktrees/invoices".into())));
+        assert_eq!(dest("../{repo}-{name}", "invoices"), Ok(("/home/me".into(), "/home/me/shop-invoices".into())));
+        assert_eq!(dest("../{repo}-worktrees/{name}", "a.b"), Ok(("/home/me".into(), "/home/me/shop-worktrees/a.b".into())));
+        // The folder name comes from the app: checked again.
+        assert_eq!(dest(DEFAULT_WORKTREE_LOCATION, "../../etc"), Err(LocationIssue::BadCharacter));
+        assert_eq!(dest(DEFAULT_WORKTREE_LOCATION, ".."), Err(LocationIssue::BadCharacter));
+        assert_eq!(dest(DEFAULT_WORKTREE_LOCATION, ""), Err(LocationIssue::BadCharacter));
+        assert_eq!(dest("{name}", ".git"), Err(LocationIssue::BadCharacter), "a leading dot is never a folder name");
+        // A repository at the root of the file system: next to it is `/`.
+        assert_eq!(worktree_destination("/shop", "../{name}", "x"), Ok(("/".into(), "/x".into())));
+        assert_eq!(worktree_destination("/", "{name}", "x"), Err(LocationIssue::Escapes));
+        // A repository folder whose name makes a component that is not plain.
+        assert_eq!(worktree_destination("/home/me/..", "{repo}/{name}", "x"), Err(LocationIssue::ParentDir));
+        assert_eq!(worktree_destination("/mnt/c/con", "../{repo}/{name}", "x"), Err(LocationIssue::WindowsName), "a device name from the repository's folder");
+        assert_eq!(worktree_destination("/mnt/c/shop.", "../wt/{repo}", "x").err(), Some(LocationIssue::NoName));
+        assert_eq!(worktree_destination("/mnt/c/shop.", "../{repo}/{name}", "x"), Err(LocationIssue::WindowsName), "a component ending with a dot");
+        // Every component within the file name limit, placeholders replaced.
+        let long = "a".repeat(MAX_NAME_BYTES);
+        assert_eq!(worktree_destination("/home/me/shop", "../{repo}-{name}", &long), Err(LocationIssue::TooLong));
+        assert!(worktree_destination("/home/me/shop", DEFAULT_WORKTREE_LOCATION, &long).is_ok());
+    }
+
+    #[test]
+    fn roundtrip_worktree_creation() {
+        let requests = [
+            CreateWorktree { branch: WorktreeBranch::New { name: "feat/invoices".into(), base: "origin/main".into() }, folder: "feat-invoices".into(), location: None, exclude: false },
+            CreateWorktree { branch: WorktreeBranch::Existing { name: "fix/typo".into() }, folder: "fix-typo".into(), location: Some("../{repo}-{name}".into()), exclude: true },
+        ];
+        for request in requests {
+            assert!(request.branch.name().contains('/'));
+            let cmd = AgentCmd::CreateWorktree { id: 3, key: "p".into(), request: request.clone() };
+            assert_eq!(decode::<AgentCmd>(&encode(&cmd)).unwrap(), cmd);
+            let ok = AgentEvent::WorktreeCreated { id: 3, key: "p".into(), path: Some("/home/me/shop/.claude/worktrees/x".into()), problem: None, excluded: true };
+            assert_eq!(decode::<AgentEvent>(&encode(&ok)).unwrap(), ok);
+        }
+        let cmd = AgentCmd::PlanWorktree { id: 4, key: "p".into(), folder: "invoices".into(), location: None };
+        assert_eq!(decode::<AgentCmd>(&encode(&cmd)).unwrap(), cmd);
+        let plan = AgentEvent::WorktreePlan(Box::new(WorktreePlan {
+            id: 4,
+            key: "p".into(),
+            branches: vec![LocalBranch { name: "main".into(), checked_out: Some("/home/me/shop".into()) }, LocalBranch { name: "wip".into(), checked_out: None }],
+            current_branch: Some("main".into()),
+            default_branch: Some("origin/main".into()),
+            folder: "invoices".into(),
+            location: Some("../{repo}-{name}".into()),
+            path: None,
+            problem: Some(Problem::DestinationExists { path: "/home/me/shop-invoices".into() }),
+            free_folder: Some("invoices-2".into()),
+            exclude: Some("/.claude/worktrees/".into()),
+        }));
+        assert_eq!(decode::<AgentEvent>(&encode(&plan)).unwrap(), plan);
+        let issues = [
+            LocationIssue::Empty,
+            LocationIssue::TooLong,
+            LocationIssue::Absolute,
+            LocationIssue::ParentDir,
+            LocationIssue::NoName,
+            LocationIssue::UnknownPlaceholder,
+            LocationIssue::BadCharacter,
+            LocationIssue::GitDir,
+            LocationIssue::InsideBare,
+            LocationIssue::Escapes,
+            LocationIssue::NotAFolder,
+            LocationIssue::WindowsName,
+        ];
+        let mut problems: Vec<Problem> = issues.into_iter().map(|issue| Problem::LocationRefused { location: "x".into(), issue }).collect();
+        problems.extend([
+            Problem::InvalidBranchName { branch: "-x".into() },
+            Problem::BranchExists { branch: "a".into() },
+            Problem::BranchNotFound { branch: "a".into() },
+            Problem::BranchCheckedOut { branch: "a".into(), path: "/w".into() },
+            Problem::DestinationExists { path: "/w".into() },
+            Problem::BaseNotFound { base: "nope".into() },
+            Problem::InvalidFolder { folder: "../x".into() },
+            Problem::WorktreeRegistered { path: "/w".into() },
+            Problem::GitStillRunning { secs: 60 },
+        ]);
+        for problem in problems {
+            let ev = AgentEvent::WorktreeCreated { id: 1, key: "p".into(), path: None, problem: Some(problem), excluded: false };
+            assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        }
+        // Without the optional fields.
+        let old = r#"{"type":"CreateWorktree","id":1,"key":"p","request":{"branch":{"kind":"Existing","name":"a"},"folder":"a"}}"#;
+        assert!(matches!(decode::<AgentCmd>(old).unwrap(), AgentCmd::CreateWorktree { request: CreateWorktree { location: None, exclude: false, .. }, .. }));
     }
 
     #[test]

@@ -298,7 +298,16 @@ fn steps(h: &mut Harness<'_, App>, n: usize) {
 fn add_project(h: &mut Harness<'_, App>, name: &str, color: [u8; 3], at: Pos2) -> String {
     let id = format!("p-{name}");
     let rect = Rect::from_min_size(at, Vec2::splat(100.0));
-    h.state_mut().world.projects.push(Project { id: id.clone(), name: name.into(), color, rect, cwd: Some(format!("/home/me/code/{name}")), templates: Vec::new(), messages: Vec::new() });
+    h.state_mut().world.projects.push(Project {
+        id: id.clone(),
+        name: name.into(),
+        color,
+        rect,
+        cwd: Some(format!("/home/me/code/{name}")),
+        templates: Vec::new(),
+        messages: Vec::new(),
+        worktree_location: None,
+    });
     id
 }
 
@@ -391,7 +400,16 @@ fn demo_canvas(h: &mut Harness<'_, App>) {
     }
     // A group just created: no folder, no terminal yet.
     let rect = Rect::from_min_size(pos2(1420.0, 1360.0), vec2(560.0, 300.0));
-    h.state_mut().world.projects.push(Project { id: "p-mobile-app".into(), name: "mobile-app".into(), color: [130, 110, 220], rect, cwd: None, templates: Vec::new(), messages: Vec::new() });
+    h.state_mut().world.projects.push(Project {
+        id: "p-mobile-app".into(),
+        name: "mobile-app".into(),
+        color: [130, 110, 220],
+        rect,
+        cwd: None,
+        templates: Vec::new(),
+        messages: Vec::new(),
+        worktree_location: None,
+    });
     h.state_mut().dispatch(vec![Event::AddWire(api.clone(), web), Event::AddWire(api, infra), Event::Agent(AgentEvent::Changes(api_changes()))]);
     steps(h, 5);
 }
@@ -547,9 +565,57 @@ fn folder() {
 fn worktrees() {
     let mut h = harness("worktrees");
     worktrees_canvas(&mut h, false);
-    assert!(h.query_by_label("⎇ 3 worktrees").is_some() && h.query_by_label_contains("Branch: feat/rate-limit").is_some());
+    // The badge elides a long branch in the middle.
+    assert!(h.query_by_label("⎇ 3 worktrees").is_some() && h.query_by_label("Branch: feat/rate-li…-and-signup · rate-limit").is_some());
     h.event(egui::Event::PointerGone);
     save(&mut h, "worktrees");
+}
+
+#[test]
+#[ignore = "renders README screenshots; run ./scripts/screenshots.sh"]
+fn new_worktree() {
+    let mut h = harness("new-worktree");
+    worktrees_canvas(&mut h, false);
+    h.state_mut().world.projects[0].templates = vec![tcanvas::shell::world::CommandTemplate { name: "Claude".into(), command: "claude".into() }];
+    h.get_by_label("+ Worktree").click();
+    steps(&mut h, 3);
+    assert!(h.state().worktrees.create_open());
+    // Typed into the dialog, then the agent's answer for that folder: free, not ignored by git.
+    let inputs = h.get_all_by_role(egui::accesskit::Role::TextInput).collect::<Vec<_>>();
+    inputs[inputs.len() - 2].focus();
+    inputs[inputs.len() - 2].type_text("feat/invoices-pdf");
+    steps(&mut h, 3);
+    // The dialog asks once the typing pauses.
+    std::thread::sleep(tcanvas::features::worktrees::create::PLAN_DEBOUNCE + std::time::Duration::from_millis(50));
+    steps(&mut h, 3);
+    let Some(protocol::AgentCmd::PlanWorktree { id, folder, location, .. }) = h.state().agent_sent().iter().rev().find(|c| matches!(c, protocol::AgentCmd::PlanWorktree { .. })).cloned() else {
+        panic!("the dialog asks the agent")
+    };
+    assert_eq!(folder, "feat-invoices-pdf");
+    let branch = |name: &str, at: Option<&str>| protocol::LocalBranch { name: name.into(), checked_out: at.map(String::from) };
+    let plan = protocol::WorktreePlan {
+        id,
+        key: "p-shop-api".into(),
+        branches: vec![
+            branch("auth/argon2", Some("/home/me/code/shop-api-argon2")),
+            branch("feat/rate-limit-login-and-signup", Some("/home/me/code/shop-api/.claude/worktrees/rate-limit")),
+            branch("fix/session-expiry", None),
+            branch("main", Some("/home/me/code/shop-api")),
+        ],
+        current_branch: Some("main".into()),
+        default_branch: Some("origin/main".into()),
+        path: Some(format!("/home/me/code/shop-api/.claude/worktrees/{folder}")),
+        folder,
+        location,
+        problem: None,
+        free_folder: None,
+        exclude: Some("/.claude/worktrees/".into()),
+    };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreePlan(Box::new(plan)))]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("New worktree in shop-api").is_some() && h.query_by_label("/home/me/code/shop-api/.claude/worktrees/feat-invoices-pdf").is_some());
+    h.event(egui::Event::PointerGone);
+    save(&mut h, "new-worktree");
 }
 
 #[test]
