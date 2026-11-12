@@ -84,7 +84,7 @@ impl App {
             canvas: Canvas::default(),
             cards: TerminalCards::new(ctx.clone(), config.launcher),
             changes: Changes::default(),
-            worktrees: Worktrees::default(),
+            worktrees: Worktrees::new(&config.config_dir),
             projects: Projects::default(),
             spaces: Spaces::default(),
             wires: Wires,
@@ -153,7 +153,7 @@ impl App {
             match s {
                 Shortcut::Jump => self.jump.open(),
                 Shortcut::Help => self.shortcuts_help.open(),
-                Shortcut::NewCard => events.push(Event::NewCard { at: None, project: None, command: None, cwd: None }),
+                Shortcut::NewCard => events.push(Event::NewCard { at: None, project: None, command: None, setup: None, cwd: None }),
                 Shortcut::Search => {
                     events.push(Event::Unfocus);
                     ctx.memory_mut(|m| m.request_focus(Id::unique(filters::SEARCH_ID)));

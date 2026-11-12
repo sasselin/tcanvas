@@ -239,6 +239,51 @@ stops following.
 A ✎ on another project's chip means files are being written there right now. Outside git: list
 of files modified since tracking started, without diffs.
 
+**Worktree recipe**: a fresh worktree lacks what git does not check out (`.env`, installed
+dependencies, a local database). A repository describes what a new worktree needs in
+`.tcanvas.toml`, at the root of its main checkout (commit it to share it):
+
+```toml
+[worktree]
+copy = [".env", "config/*.local"]   # copied (folders whole, permissions kept)
+symlink = ["node_modules"]          # linked to the main checkout's copy
+setup = "npm run db:seed"           # run in the new terminal, before the chosen command
+```
+
+The recipe is read from the main checkout's working tree as it is when the worktree is created,
+not from the new branch. When the new-worktree dialog creates a worktree, the agent copies and
+links right after `git worktree add`, and the dialog lists each pattern with what it matches
+beforehand, then what was done (a path already in the worktree, such as a tracked file, is never
+replaced). The new terminal opens once the copies and links are done, when it has a command to
+run. The folders in the repository's Claude Code settings (`.claude/settings.json`,
+`worktree.symlinkDirectories`) are linked too. Unknown keys are ignored; a malformed file, or one
+that is not a regular file (a symbolic link, a FIFO), is reported and the worktree is still
+created, without it.
+
+- **Patterns** are relative to the main checkout: `*` and `?` within a path component, `**` for
+  any number of folders, everything else literal. Wildcards skip hidden names unless the
+  pattern starts with `.` (`.env*`), `**` skips hidden folders, and nothing ever matches `.git`,
+  goes through a symbolic link or into another repository or worktree. Absolute paths, `~`, `..`,
+  `.git`, `[ ] { }` and `\` are refused.
+- **Copies** keep permissions, copy a symbolic link as a link when it points inside the main
+  checkout (and skip it otherwise), and stop after 4 GB or 200,000 entries in all.
+- **Links** are absolute (`<worktree>/node_modules -> <main checkout>/node_modules`), so they
+  survive `git worktree move`. A linked folder is shared, writable state: installing dependencies
+  in one worktree changes the main checkout's folder, and every worktree linked to it. Never a
+  link to another repository or worktree, nor to a folder holding the new worktree. Removing the
+  worktree deletes the link, never what it points to.
+  For the cleanup window to offer such a worktree, git must ignore the link: write `node_modules`
+  in `.gitignore`, not `node_modules/` (a trailing slash only matches real folders, and a link
+  is not one); otherwise the link counts as an untracked file and the worktree is kept.
+- **Setup** comes from the repository, so it never runs on its own: the dialog shows the whole
+  command, and it runs only when **Run this setup command** is ticked. The tick starts off until
+  you accepted that exact command for that repository once (remembered in tcanvas' own settings,
+  as a hash; an edited command asks again). Acceptance covers the command text only:
+  `setup = "./scripts/setup.sh"` accepted once keeps running after the script itself changes.
+  Characters that would not show (escape sequences, bidirectional marks...) are spelled out in
+  the dialog. It runs in the new terminal's shell, its output in the card; the chosen command
+  runs after it only if it succeeded (its last command's status).
+
 **Closing**: `tcanvas-agent kill` really stops everything: the shells' descendants, processes from
 the same session (`nohup`), and those that detached (`setsid`, daemons), found through their
 `TMUX_PANE`. SIGHUP + SIGTERM first, SIGKILL for the stubborn ones, then a check that nothing is

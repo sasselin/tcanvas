@@ -5,18 +5,23 @@
 //! repository has more than its main checkout. The strip opens the cleanup window (`cleanup`),
 //! the only place that asks the agent to delete anything, always after a confirmation, and the
 //! new-worktree dialog (`create`), also opened from the group's menus (`Event::NewWorktree`) since
-//! the strip is hidden while the repository has only its main checkout.
+//! the strip is hidden while the repository has only its main checkout. What the repository's
+//! recipe did to a worktree this app created is shown once it is there (`report_lines`); the
+//! recipe setup commands the user accepted are remembered in the app's config (`trust`).
 
 pub mod cleanup;
 pub mod create;
+pub mod trust;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use egui::{Color32, Panel, RichText, ScrollArea, Ui};
-use protocol::{AgentEvent, Worktree, WorktreeList};
+use protocol::{AgentEvent, RecipeAction, RecipeReport, Worktree, WorktreeList};
 
 use cleanup::CleanupWindow;
 use create::CreateDialog;
+use trust::Trust;
 
 use crate::shell::event::Event;
 use crate::shell::i18n::t;
@@ -58,6 +63,31 @@ fn age(now: u64, time: u64) -> String {
     }
 }
 
+/// What a recipe did, line by line (text, whether it went as asked): the recipe file's problem
+/// first, then each item, then how many are not listed.
+pub fn report_lines(report: &RecipeReport) -> Vec<(String, bool)> {
+    let mut lines = Vec::new();
+    if let Some(problem) = &report.problem {
+        lines.push((t().problem(problem), false));
+    }
+    for item in &report.items {
+        let line = match (&item.skipped, item.action) {
+            (None, RecipeAction::Copy) => ((t().recipe_copied)(&item.path), true),
+            (None, RecipeAction::Symlink) => ((t().recipe_linked)(&item.path), true),
+            (Some(reason), RecipeAction::Copy) => ((t().recipe_not_copied)(&item.path, &t().skip_reason(reason)), false),
+            (Some(reason), RecipeAction::Symlink) => ((t().recipe_not_linked)(&item.path, &t().skip_reason(reason)), false),
+        };
+        lines.push(line);
+    }
+    if report.omitted_failures > 0 {
+        lines.push(((t().recipe_omitted_failures)(report.omitted_failures), false));
+    }
+    if report.omitted > 0 {
+        lines.push(((t().recipe_omitted)(report.omitted), true));
+    }
+    lines
+}
+
 #[derive(Default)]
 pub struct Worktrees {
     /// Latest list of each group's repository (key: project id), with the group folder it was
@@ -68,9 +98,26 @@ pub struct Worktrees {
     /// Creations sent and not answered for good: their card opens whenever they go through,
     /// with or without the dialog.
     sent: Vec<create::Sent>,
+    /// What the recipe did to the last worktree created (its folder, the report: `None` while it
+    /// is being applied), until closed.
+    report: Option<(String, Option<RecipeReport>)>,
+    /// Creations whose recipe is being applied, with the creation whose card waits for it.
+    applying: Vec<(u64, Option<create::Sent>)>,
+    /// The recipe setup commands accepted.
+    trust: Trust,
 }
 
 impl Worktrees {
+    /// With the setup commands accepted so far, kept in `config_dir`.
+    pub fn new(config_dir: &Path) -> Self {
+        Self { trust: Trust::load(config_dir), ..Self::default() }
+    }
+
+    /// What the recipe did to the last worktree created, while it is shown.
+    pub fn recipe_report(&self) -> Option<&(String, Option<RecipeReport>)> {
+        self.report.as_ref()
+    }
+
     pub fn list(&self, project: &str) -> Option<&WorktreeList> {
         self.lists.get(project).map(|(_, l)| l)
     }
@@ -116,11 +163,12 @@ impl Worktrees {
     pub fn dialogs(&mut self, ctx: &egui::Context, world: &World, events: &mut Vec<Event>) {
         if let Some(dialog) = self.create.as_mut() {
             // Closed, or the group went or left git.
-            let open = self.lists.contains_key(&dialog.project) && dialog.ui(ctx, world, events, &mut self.sent);
+            let open = self.lists.contains_key(&dialog.project) && dialog.ui(ctx, world, &self.trust, events, &mut self.sent);
             if !open {
                 self.create = None;
             }
         }
+        self.report_ui(ctx);
         let Some(window) = self.cleanup.as_mut() else { return };
         let open = match self.lists.get(&window.project) {
             Some((_, list)) => window.ui(ctx, list, world, events),
@@ -149,11 +197,25 @@ impl Worktrees {
         match ev {
             Event::NewWorktree(project) => self.open_create(world, project),
             Event::Agent(ev @ (AgentEvent::WorktreePlan(_) | AgentEvent::WorktreeCreated { .. })) => {
-                if let AgentEvent::WorktreeCreated { id, path, problem, .. } = ev
+                if let AgentEvent::WorktreeCreated { id, path, problem, recipe_pending, .. } = ev
                     && let Some(i) = self.sent.iter().position(|s| s.id == *id)
                 {
-                    let (events, keep) = create::on_created(&self.sent[i], path.as_deref(), problem.as_ref(), world);
+                    let sent = self.sent[i].clone();
+                    // The card's setup or command may need what the recipe copies and links: it
+                    // opens once `RecipeApplied` says they are done.
+                    let hold = *recipe_pending && sent.starts_something();
+                    let (events, keep) = create::on_created(&sent, path.as_deref(), problem.as_ref(), hold, world);
                     out.extend(events);
+                    if let (Some(path), None) = (path, problem) {
+                        // Accepted only now that the creation went through.
+                        if let (Some(setup), Some(repo)) = (&sent.setup, &sent.repo) {
+                            self.trust.accept(repo, setup);
+                        }
+                        if *recipe_pending {
+                            self.report = Some((path.clone(), None));
+                            self.applying.push((sent.id, hold.then_some(sent)));
+                        }
+                    }
                     if !keep {
                         self.sent.remove(i);
                     }
@@ -162,6 +224,15 @@ impl Worktrees {
                     && dialog.handle(ev)
                 {
                     self.create = None;
+                }
+            }
+            Event::Agent(AgentEvent::RecipeApplied { id, path, report, .. }) => {
+                if let Some(i) = self.applying.iter().position(|(sent, _)| sent == id) {
+                    let (_, held) = self.applying.remove(i);
+                    self.report = Some((path.clone(), Some((**report).clone())));
+                    if let Some(sent) = held {
+                        out.extend(create::open_card(&sent, path, world));
+                    }
                 }
             }
             Event::Agent(ev @ (AgentEvent::Cleaned { .. } | AgentEvent::WorktreeSizes { .. })) => {
@@ -194,6 +265,38 @@ impl Worktrees {
                 self.lists.remove(id);
             }
             _ => {}
+        }
+    }
+
+    /// What the recipe did to the worktree just created, until the user closes it.
+    fn report_ui(&mut self, ctx: &egui::Context) {
+        let Some((path, report)) = &self.report else { return };
+        let mut open = true;
+        egui::Window::new(t().recipe_report_title).id(egui::Id::unique("recipe-report")).collapsible(false).resizable(false).show(ctx, |ui| {
+            ui.set_max_width(520.0);
+            ui.label((t().recipe_report_intro)(path));
+            match report {
+                Some(report) => {
+                    ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
+                        for (line, ok) in report_lines(report) {
+                            ui.label(RichText::new(line).color(if ok { theme::TEXT } else { DIRTY }));
+                        }
+                    });
+                }
+                None => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label(RichText::new(t().recipe_applying).color(theme::TEXT_DIM));
+                    });
+                    ctx.request_repaint_after(std::time::Duration::from_millis(200));
+                }
+            }
+            if ui.button(t().recipe_report_ok).clicked() {
+                open = false;
+            }
+        });
+        if !open {
+            self.report = None;
         }
     }
 
@@ -443,16 +546,17 @@ mod tests {
             problem: None,
             free_folder: None,
             exclude: None,
+            recipe: None,
         };
         dialog.handle(&AgentEvent::WorktreePlan(Box::new(plan)));
-        let sent = dialog.submit(w, &mut vec![], now).expect("sent");
+        let sent = dialog.submit(w, &Trust::default(), &mut vec![], now).expect("sent");
         let id = sent.id;
         s.sent.push(sent);
         id
     }
 
     fn created(id: u64, path: &str) -> Event {
-        Event::Agent(AgentEvent::WorktreeCreated { id, key: "p".into(), path: Some(path.into()), problem: None, excluded: false })
+        Event::Agent(AgentEvent::WorktreeCreated { id, key: "p".into(), path: Some(path.into()), problem: None, excluded: false, recipe_pending: false })
     }
 
     #[test]
@@ -479,7 +583,8 @@ mod tests {
         s.create = None;
         s.handle(&Event::NewWorktree("p".into()), &mut w, &mut vec![]);
         let id = send_creation(&mut s, &w, "later", now);
-        let still = Event::Agent(AgentEvent::WorktreeCreated { id, key: "p".into(), path: None, problem: Some(protocol::Problem::GitStillRunning { secs: 60 }), excluded: false });
+        let still =
+            Event::Agent(AgentEvent::WorktreeCreated { id, key: "p".into(), path: None, problem: Some(protocol::Problem::GitStillRunning { secs: 60 }), excluded: false, recipe_pending: false });
         let mut out = vec![];
         s.handle(&still, &mut w, &mut out);
         assert!(out.is_empty() && s.creations_waiting() == 1, "still waited for");
@@ -500,6 +605,110 @@ mod tests {
         let mut out = vec![];
         s.handle(&created(999, "/x"), &mut w, &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn the_recipe_report_says_what_was_done_and_why_not() {
+        use protocol::{RecipeItem, SkipReason};
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
+        let item = |action, path: &str, skipped| RecipeItem { action, path: path.into(), skipped };
+        let report = RecipeReport {
+            items: vec![
+                item(RecipeAction::Copy, ".env", None),
+                item(RecipeAction::Copy, "tracked.txt", Some(SkipReason::Exists)),
+                item(RecipeAction::Copy, "data", Some(SkipReason::CapReached { max_bytes: 4 << 30, max_entries: 200_000 })),
+                item(RecipeAction::Symlink, "node_modules", None),
+                item(RecipeAction::Symlink, "vendor", Some(SkipReason::NoMatch)),
+            ],
+            omitted: 3,
+            omitted_failures: 2,
+            problem: Some(protocol::Problem::RecipeWrongType { file: ".tcanvas.toml".into(), key: "worktree.copy".into() }),
+        };
+        assert_eq!(
+            report_lines(&report),
+            vec![
+                (".tcanvas.toml : worktree.copy n'a pas le type attendu (une liste de textes, ou un texte pour setup) : sa recette est ignorée".to_string(), false),
+                ("Copié : .env".into(), true),
+                ("Pas copié : tracked.txt (déjà dans le worktree, gardé)".into(), false),
+                ("Pas copié : data (limite de copie atteinte (4,0 Go ou 200000 entrées en tout) : copies arrêtées)".into(), false),
+                ("Lié : node_modules".into(), true),
+                ("Pas lié : vendor (rien ne correspond)".into(), false),
+                ("... et 2 de plus non faits".into(), false),
+                ("... et 3 de plus".into(), true),
+            ]
+        );
+    }
+
+    /// The agent's answers: the worktree created (recipe pending or not), then the recipe's report.
+    fn answer(id: u64, recipe_pending: bool) -> Event {
+        Event::Agent(AgentEvent::WorktreeCreated { id, key: "p".into(), path: Some("/w".into()), problem: None, excluded: false, recipe_pending })
+    }
+
+    fn applied(id: u64, report: &RecipeReport) -> Event {
+        Event::Agent(AgentEvent::RecipeApplied { id, key: "p".into(), path: "/w".into(), report: Box::new(report.clone()) })
+    }
+
+    fn new_cards(out: &[Event]) -> usize {
+        out.iter().filter(|e| matches!(e, Event::NewCard { .. })).count()
+    }
+
+    #[test]
+    fn a_card_with_something_to_run_waits_for_the_recipe() {
+        let (mut w, _) = world_with_cards(&[]);
+        w.projects[0].templates = vec![crate::shell::world::CommandTemplate { name: "Claude".into(), command: "claude".into() }];
+        let mut s = Worktrees::default();
+        s.handle(&Event::Agent(AgentEvent::Worktrees(list("p", shop()))), &mut w, &mut vec![]);
+        s.handle(&Event::NewWorktree("p".into()), &mut w, &mut vec![]);
+        s.create.as_mut().unwrap().template = Some(0);
+        let id = send_creation(&mut s, &w, "r", std::time::Instant::now());
+        let report = RecipeReport { items: vec![protocol::RecipeItem { action: RecipeAction::Copy, path: ".env".into(), skipped: None }], ..RecipeReport::default() };
+        // Someone else's: nothing.
+        let mut out = vec![];
+        s.handle(&applied(999, &report), &mut w, &mut out);
+        assert!(out.is_empty() && s.recipe_report().is_none());
+        // Created, recipe pending: the dialog is done, the card waits, the report says it runs.
+        s.handle(&answer(id, true), &mut w, &mut out);
+        assert_eq!(new_cards(&out), 0, "the command never starts before the copies: {out:?}");
+        assert!(s.create.is_none(), "the dialog is done: no \"no answer\"");
+        assert_eq!(s.recipe_report(), Some(&("/w".to_string(), None)));
+        // The copies are done: now the card opens, with its command.
+        let mut out = vec![];
+        s.handle(&applied(id, &report), &mut w, &mut out);
+        assert!(matches!(&out[..], [Event::NewCard { command: Some(c), cwd: Some(p), .. }] if c == "claude" && p == "/w"), "{out:?}");
+        assert_eq!(s.recipe_report(), Some(&("/w".to_string(), Some(report.clone()))));
+        let mut out = vec![];
+        s.handle(&applied(id, &report), &mut w, &mut out);
+        assert!(out.is_empty(), "once");
+    }
+
+    #[test]
+    fn a_plain_shell_opens_at_once_and_the_setup_is_accepted_only_on_success() {
+        let (mut w, _) = world_with_cards(&[]);
+        let mut s = Worktrees::default();
+        s.handle(&Event::Agent(AgentEvent::Worktrees(list("p", shop()))), &mut w, &mut vec![]);
+        s.handle(&Event::NewWorktree("p".into()), &mut w, &mut vec![]);
+        let id = send_creation(&mut s, &w, "r", std::time::Instant::now());
+        let mut out = vec![];
+        s.handle(&answer(id, true), &mut w, &mut out);
+        assert_eq!(new_cards(&out), 1, "nothing to run: no need to wait");
+        // A ticked setup: remembered when the creation goes through, not when it is refused.
+        let setup = |id| create::Sent { id, project: "p".into(), command: None, setup: Some("npm ci".into()), repo: Some("/home/me/shop".into()), location: None };
+        s.sent.push(setup(50));
+        let refused = Event::Agent(AgentEvent::WorktreeCreated {
+            id: 50,
+            key: "p".into(),
+            path: None,
+            problem: Some(protocol::Problem::BranchExists { branch: "a".into() }),
+            excluded: false,
+            recipe_pending: false,
+        });
+        s.handle(&refused, &mut w, &mut vec![]);
+        assert!(!s.trust.accepted("/home/me/shop", "npm ci"));
+        s.sent.push(setup(51));
+        let mut out = vec![];
+        s.handle(&answer(51, true), &mut w, &mut out);
+        assert!(s.trust.accepted("/home/me/shop", "npm ci"));
+        assert_eq!(new_cards(&out), 0, "the setup waits for the copies");
     }
 
     #[test]

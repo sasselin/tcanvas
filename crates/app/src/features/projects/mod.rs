@@ -388,7 +388,7 @@ impl Projects {
     /// a terminal in a new worktree when the group's folder is in a git repository (`git`).
     fn new_terminal_menu(&mut self, ui: &mut Ui, p: &Project, git: bool, events: &mut Vec<Event>) {
         if ui.button(t().plain_shell).clicked() {
-            events.push(Event::NewCard { at: None, project: Some(p.id.clone()), command: None, cwd: None });
+            events.push(Event::NewCard { at: None, project: Some(p.id.clone()), command: None, setup: None, cwd: None });
             ui.close();
         }
         ui.separator();
@@ -398,7 +398,7 @@ impl Projects {
         for tpl in &p.templates {
             let hover = egui::RichText::new(format!("{}\n\n{}", tpl.name, tpl.command)).monospace();
             if ui.button(menu_name(&tpl.name)).on_hover_text(hover).clicked() {
-                events.push(Event::NewCard { at: None, project: Some(p.id.clone()), command: Some(tpl.command.clone()), cwd: None });
+                events.push(Event::NewCard { at: None, project: Some(p.id.clone()), command: Some(tpl.command.clone()), setup: None, cwd: None });
                 ui.close();
             }
         }
@@ -513,7 +513,7 @@ impl Projects {
         painter.rect_filled(add_rect, CornerRadius::same(6), if add_r.hovered() { color.gamma_multiply(0.5) } else { color.gamma_multiply(0.22) });
         painter.text(add_rect.left_center() + vec2(8.0, 0.0), Align2::LEFT_CENTER, add_label, folder_font.clone(), theme::TEXT);
         if add_r.clicked() {
-            events.push(Event::NewCard { at: None, project: Some(id.clone()), command: None, cwd: None });
+            events.push(Event::NewCard { at: None, project: Some(id.clone()), command: None, setup: None, cwd: None });
         }
         // Its arrow: the same, or a terminal started from one of the group's command templates.
         let more_rect = Rect::from_min_size(pos2(add_rect.max.x + 2.0, header.min.y), vec2(MORE_W, HEADER_H));
@@ -558,7 +558,7 @@ impl Projects {
             painter.rect_filled(empty_rect, CornerRadius::same(8), if empty_r.hovered() { color.gamma_multiply(0.6) } else { color.gamma_multiply(0.35) });
             painter.text(empty_rect.center(), Align2::CENTER_CENTER, t().open_a_terminal, FontId::proportional(16.0), theme::TEXT);
             if empty_r.clicked() {
-                events.push(Event::NewCard { at: None, project: Some(id.clone()), command: None, cwd: None });
+                events.push(Event::NewCard { at: None, project: Some(id.clone()), command: None, setup: None, cwd: None });
             }
         }
 
@@ -682,7 +682,7 @@ impl Projects {
     fn menu(&mut self, ui: &mut Ui, p: &Project, git: bool, events: &mut Vec<Event>) -> bool {
         let mut pick = false;
         if ui.button(t().new_terminal_here).clicked() {
-            events.push(Event::NewCard { at: Some(p.rect.center()), project: Some(p.id.clone()), command: None, cwd: None });
+            events.push(Event::NewCard { at: Some(p.rect.center()), project: Some(p.id.clone()), command: None, setup: None, cwd: None });
             ui.close();
         }
         if git && ui.button(t().new_worktree_menu).on_hover_text(t().new_worktree_hint).clicked() {

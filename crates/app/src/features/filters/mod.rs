@@ -145,7 +145,7 @@ impl Filters {
     /// Creation buttons (first row of the bar).
     pub fn actions_ui(ui: &mut Ui, events: &mut Vec<Event>) {
         if ui.button(t().new_terminal_button).on_hover_text(t().new_terminal_hint).clicked() {
-            events.push(Event::NewCard { at: None, project: None, command: None, cwd: None });
+            events.push(Event::NewCard { at: None, project: None, command: None, setup: None, cwd: None });
         }
         if ui.button(t().new_project_button).clicked() {
             events.push(Event::NewProject { at: None });
