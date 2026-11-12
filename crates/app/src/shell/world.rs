@@ -118,6 +118,16 @@ pub struct Project {
     pub rect: Rect,
     /// Linked folder: the project's new terminals open there, and its changes are tracked.
     pub cwd: Option<String>,
+    /// Commands offered when adding a terminal to the group (missing from older layouts).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub templates: Vec<CommandTemplate>,
+}
+
+/// A named command line a group's new terminal can start with.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandTemplate {
+    pub name: String,
+    pub command: String,
 }
 
 pub const PROJECT_COLORS: [[u8; 3]; 8] = [[94, 129, 244], [46, 170, 140], [230, 150, 60], [200, 90, 160], [130, 110, 220], [220, 80, 80], [70, 160, 200], [160, 170, 70]];
@@ -551,7 +561,7 @@ mod tests {
     fn linked_groups_follow_the_whole_chain_sorted_by_name() {
         let mut w = World::default();
         for (id, name) in [("s", "shop"), ("w", "Wordpress"), ("o", "outils"), ("x", "alone")] {
-            w.projects.push(Project { id: id.into(), name: name.into(), color: [0; 3], rect: Rect::ZERO, cwd: None });
+            w.projects.push(Project { id: id.into(), name: name.into(), color: [0; 3], rect: Rect::ZERO, cwd: None, templates: Vec::new() });
         }
         let wire = |a: &str, b: &str| Wire { from: a.into(), to: b.into() };
         w.wires = vec![wire("s", "w"), wire("w", "o"), wire("o", "gone")];
@@ -594,7 +604,7 @@ mod tests {
     }
 
     fn project(id: &str, rect: Rect) -> Project {
-        Project { id: id.into(), name: id.into(), color: [0; 3], rect, cwd: None }
+        Project { id: id.into(), name: id.into(), color: [0; 3], rect, cwd: None, templates: Vec::new() }
     }
 
     fn member(x: f32, y: f32, project: &str) -> Card {

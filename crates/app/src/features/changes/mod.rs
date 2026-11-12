@@ -539,7 +539,7 @@ mod tests {
     use egui::{Pos2, Rect, Vec2};
 
     fn project(id: &str, cwd: Option<&str>) -> Project {
-        Project { id: id.into(), name: id.into(), color: [0; 3], rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.0)), cwd: cwd.map(Into::into) }
+        Project { id: id.into(), name: id.into(), color: [0; 3], rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.0)), cwd: cwd.map(Into::into), templates: Vec::new() }
     }
 
     fn file(path: &str, mtime: u64, added: u32) -> FileChange {

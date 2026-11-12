@@ -118,7 +118,7 @@ fn real_terminals_end_to_end() {
     // 1. A new terminal starts a tmux session and shows a shell.
     let mut h = harness(&dir);
     h.step();
-    h.state_mut().dispatch(vec![Event::NewCard { at: None, project: None }]);
+    h.state_mut().dispatch(vec![Event::NewCard { at: None, project: None, command: None }]);
     h.step();
     let id = h.state().world.cards[0].id.clone();
     let session = format!("tc_{id}");
@@ -187,11 +187,12 @@ fn real_terminals_end_to_end() {
         color: [94, 129, 244],
         rect: egui::Rect::from_min_size(egui::pos2(-3000.0, -3000.0), Vec2::new(4000.0, 2000.0)),
         cwd: Some(linked.clone()),
+        templates: Vec::new(),
     };
     h.state_mut().world.projects.push(group.clone());
     let new_card = |h: &mut Harness<'_, App>, at: egui::Pos2, project: Option<String>| {
         let before: Vec<String> = h.state().world.cards.iter().map(|c| c.id.clone()).collect();
-        h.state_mut().dispatch(vec![Event::NewCard { at: Some(at), project }]);
+        h.state_mut().dispatch(vec![Event::NewCard { at: Some(at), project, command: None }]);
         h.step();
         let id = h.state().world.cards.iter().map(|c| c.id.clone()).find(|c| !before.contains(c)).unwrap();
         wait(h, "shell ready", 30, |app| app.cards.is_running(&id) && !screen(app, &id).trim().is_empty());
