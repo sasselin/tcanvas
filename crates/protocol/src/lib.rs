@@ -171,6 +171,9 @@ pub struct DirEntry {
     pub name: String,
     /// Contains a git repository (`.git`).
     pub git: bool,
+    /// The repository is a linked worktree (its `.git` is a file, not a folder).
+    #[serde(default)]
+    pub worktree: bool,
 }
 
 /// Contents of a WSL folder, in response to `AgentCmd::ListDir`.
@@ -182,9 +185,59 @@ pub struct DirListing {
     pub path: Option<String>,
     pub parent: Option<String>,
     pub git: bool,
+    /// The folder is a linked worktree (`.git` is a file).
+    #[serde(default)]
+    pub worktree: bool,
     /// Visible subfolders (hidden folders are omitted), sorted by name.
     pub dirs: Vec<DirEntry>,
     pub error: Option<Problem>,
+}
+
+/// One worktree of a repository (`git worktree list --porcelain`), with its state.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct Worktree {
+    /// Absolute path of its folder.
+    pub path: String,
+    /// Commit checked out (`None`: bare entry, or a branch without commits yet).
+    pub head: Option<String>,
+    /// Branch checked out, without `refs/heads/` (`None` when detached or bare).
+    pub branch: Option<String>,
+    pub detached: bool,
+    /// The main checkout (always the first entry of the list).
+    pub main: bool,
+    /// The repository itself is bare: this entry has no working tree.
+    pub bare: bool,
+    pub locked: bool,
+    /// Reason given to `git worktree lock --reason`.
+    pub lock_reason: Option<String>,
+    /// Its folder is gone: `git worktree prune` would remove the entry.
+    pub prunable: bool,
+    /// Uncommitted or untracked changes (`None`: unknown, e.g. bare or missing folder).
+    pub dirty: Option<bool>,
+    /// Commits of `head` missing from the default branch, and the reverse (`None` without a
+    /// default branch).
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
+    /// The branch is fully merged into the default branch (`None` for the default branch itself,
+    /// a detached head, or without a default branch).
+    pub merged: Option<bool>,
+    /// Time of the commit at `head` (Unix seconds).
+    pub last_commit: Option<u64>,
+}
+
+/// The worktrees of the repository holding a watched folder, sent when they change.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct WorktreeList {
+    /// Key given by the app with `AgentCmd::Watch` (project id).
+    pub key: String,
+    /// Path of the repository's main worktree (the repository itself when bare): the same for
+    /// every folder of one repository. `None` outside git (the list is then empty).
+    pub repo: Option<String>,
+    /// Branch that ahead/behind/merged compare with: what `origin/HEAD` points to (e.g.
+    /// `origin/main`), else `main`, else `master`.
+    pub default_branch: Option<String>,
+    /// Main checkout first, then the linked worktrees sorted by path.
+    pub worktrees: Vec<Worktree>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -216,6 +269,9 @@ pub enum AgentEvent {
         problem: Option<Problem>,
     },
     DirListing(DirListing),
+    /// Worktrees of a watched folder's repository (follows `AgentCmd::Watch`). An app that
+    /// predates this event fails to decode the line and skips it.
+    Worktrees(WorktreeList),
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -363,7 +419,8 @@ mod tests {
             path: Some("/home/me".into()),
             parent: Some("/home".into()),
             git: false,
-            dirs: vec![DirEntry { name: "api".into(), git: true }],
+            worktree: false,
+            dirs: vec![DirEntry { name: "api".into(), git: true, worktree: false }, DirEntry { name: "api-fix".into(), git: true, worktree: true }],
             error: Some(Problem::Unreadable { detail: "denied".into() }),
         });
         assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
@@ -373,6 +430,69 @@ mod tests {
         assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
         let cmd = AgentCmd::Diff { key: "p1".into(), file: "src/a.rs".into() };
         assert_eq!(decode::<AgentCmd>(&encode(&cmd)).unwrap(), cmd);
+    }
+
+    fn worktree(path: &str) -> Worktree {
+        Worktree {
+            path: path.into(),
+            head: Some("a".repeat(40)),
+            branch: Some("main".into()),
+            detached: false,
+            main: true,
+            bare: false,
+            locked: false,
+            lock_reason: None,
+            prunable: false,
+            dirty: Some(false),
+            ahead: Some(0),
+            behind: Some(0),
+            merged: None,
+            last_commit: Some(1_700_000_000),
+        }
+    }
+
+    #[test]
+    fn roundtrip_worktrees() {
+        let linked = Worktree {
+            path: "/home/me/shop/.claude/worktrees/my invoices".into(),
+            branch: None,
+            detached: true,
+            main: false,
+            locked: true,
+            lock_reason: Some("on a USB drive".into()),
+            dirty: Some(true),
+            ahead: Some(6),
+            behind: Some(12),
+            merged: Some(false),
+            ..worktree("x")
+        };
+        let ev = AgentEvent::Worktrees(WorktreeList {
+            key: "p1".into(),
+            repo: Some("/home/me/shop".into()),
+            default_branch: Some("origin/main".into()),
+            worktrees: vec![worktree("/home/me/shop"), linked],
+        });
+        assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        let empty = AgentEvent::Worktrees(WorktreeList { key: "p2".into(), repo: None, default_branch: None, worktrees: vec![] });
+        assert_eq!(decode::<AgentEvent>(&encode(&empty)).unwrap(), empty);
+    }
+
+    #[test]
+    fn unknown_events_fail_to_decode_and_old_listings_still_decode() {
+        // An app built before `Worktrees` sees an unknown variant: `decode` returns an error for
+        // that line (the app logs it and reads the next one); it never mistakes it for another event.
+        let line = encode(&AgentEvent::Worktrees(WorktreeList { key: "p".into(), repo: None, default_branch: None, worktrees: vec![] }));
+        #[derive(Deserialize, Debug)]
+        #[serde(tag = "type")]
+        #[allow(dead_code)]
+        enum OldEvent {
+            Gone { session: String },
+        }
+        assert!(decode::<OldEvent>(&line).is_err());
+        // An older agent's listing has no `worktree` flags.
+        let old = r#"{"type":"DirListing","request":"~","path":"/home/me","parent":"/home","git":false,"dirs":[{"name":"api","git":true}],"error":null}"#;
+        let AgentEvent::DirListing(l) = decode::<AgentEvent>(old).unwrap() else { panic!("a listing") };
+        assert!(!l.worktree && !l.dirs[0].worktree && l.dirs[0].git);
     }
 
     #[test]

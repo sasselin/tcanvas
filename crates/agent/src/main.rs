@@ -17,6 +17,7 @@ mod features {
     pub mod serve;
     pub mod status;
     pub mod tmux;
+    pub mod worktrees;
 }
 
 use features::{hooks, serve};

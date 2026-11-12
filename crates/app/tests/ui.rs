@@ -1195,7 +1195,8 @@ fn linking_a_folder_from_the_label_opens_new_terminals_there_and_watches_it() {
             path: Some(path.into()),
             parent: Some("/home/me/code".into()),
             git: path.ends_with("web"),
-            dirs: dirs.iter().map(|(n, g)| protocol::DirEntry { name: (*n).into(), git: *g }).collect(),
+            worktree: false,
+            dirs: dirs.iter().map(|(n, g)| protocol::DirEntry { name: (*n).into(), git: *g, worktree: false }).collect(),
             error: None,
         }))
     };
@@ -2115,4 +2116,171 @@ fn few_groups_need_no_menu() {
     add_project(&mut h, "api", Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 500.0)));
     steps(&mut h, 4);
     assert!(h.query_by_label_contains("▾ ").is_none());
+}
+
+// --- Worktrees -------------------------------------------------------------------------------
+
+fn worktree(path: &str, main: bool, branch: &str) -> protocol::Worktree {
+    protocol::Worktree {
+        path: path.into(),
+        head: Some("a".repeat(40)),
+        branch: Some(branch.into()),
+        detached: false,
+        main,
+        bare: false,
+        locked: false,
+        lock_reason: None,
+        prunable: false,
+        dirty: Some(false),
+        ahead: Some(0),
+        behind: Some(0),
+        merged: None,
+        last_commit: Some(tcanvas::shell::world::unix_now() - 3600),
+    }
+}
+
+/// The `shop` repository: its main checkout, an unmerged and dirty worktree nested in it, and a
+/// merged one next to it.
+fn shop_worktrees(key: &str) -> Event {
+    let invoices = protocol::Worktree { dirty: Some(true), ahead: Some(6), behind: Some(12), merged: Some(false), ..worktree("/home/me/shop/.claude/worktrees/invoices", false, "feat/invoices") };
+    let taxes = protocol::Worktree { ahead: Some(0), behind: Some(3), merged: Some(true), ..worktree("/home/me/shop-taxes", false, "taxes") };
+    let list =
+        protocol::WorktreeList { key: key.into(), repo: Some("/home/me/shop".into()), default_branch: Some("main".into()), worktrees: vec![worktree("/home/me/shop", true, "main"), invoices, taxes] };
+    Event::Agent(AgentEvent::Worktrees(list))
+}
+
+/// Group `shop` linked to its repository and opened, with a terminal in the main checkout and
+/// one in the nested worktree.
+fn shop_group(h: &mut Harness<'_, App>) -> (String, String) {
+    let id = add_project(h, "shop", Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 500.0)));
+    h.state_mut().world.projects[0].cwd = Some("/home/me/shop".into());
+    let main = add_card(h, "front", pos2(40.0, 40.0));
+    let nested = add_card(h, "pdf", pos2(700.0, 40.0));
+    h.state_mut().world.card_mut(&main).unwrap().cwd = Some("/home/me/shop/src".into());
+    h.state_mut().world.card_mut(&nested).unwrap().cwd = Some("/home/me/shop/.claude/worktrees/invoices/".into());
+    h.state_mut().dispatch(vec![Event::EnterSpace(Some(id))]);
+    steps(h, 3);
+    (main, nested)
+}
+
+#[test]
+fn the_worktrees_strip_lists_the_repository_and_its_terminals() {
+    let dir = temp_dir("worktrees");
+    let mut h = harness(&dir);
+    let (main, nested) = shop_group(&mut h);
+    assert!(h.query_by_label_contains("worktrees").is_none(), "nothing before the agent answers");
+    h.state_mut().dispatch(vec![shop_worktrees("p-shop")]);
+    steps(&mut h, 3);
+
+    assert!(h.query_by_label("⎇ 3 worktrees").is_some());
+    for label in ["copie principale", "invoices", "shop-taxes", "⎇ feat/invoices", "↑6 ↓12", "✔ fusionnée", "aucun terminal"] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    // Each terminal under its worktree, the nested one under the linked worktree.
+    let attributed = |id: &str| h.state().world.card_worktrees.get(id).map(|w| w.path.clone());
+    assert_eq!(attributed(&main).as_deref(), Some("/home/me/shop"));
+    assert_eq!(attributed(&nested).as_deref(), Some("/home/me/shop/.claude/worktrees/invoices"));
+
+    // The badges in the card headers.
+    let badge = h.get_by_label("Branche : feat/invoices · invoices").rect();
+    let card = screen_of(&h, h.state().world.card(&nested).unwrap().rect);
+    assert!(card.contains_rect(badge) && badge.max.y <= card.min.y + 28.0 * h.state().world.camera.zoom + 1.0, "in the title bar: {badge:?} {card:?}");
+    assert!(h.query_by_label("Branche : main").is_some());
+
+    // Clicking a terminal in the strip flies to it.
+    h.get_by_label("pdf").click();
+    steps(&mut h, 60);
+    assert_eq!(h.state().world.focused.as_deref(), Some(nested.as_str()));
+
+    // With only the main checkout left, the strip goes away; the badge stays.
+    let only_main = protocol::WorktreeList { key: "p-shop".into(), repo: Some("/home/me/shop".into()), default_branch: Some("main".into()), worktrees: vec![worktree("/home/me/shop", true, "main")] };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Worktrees(only_main))]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label_contains("worktrees").is_none());
+    assert_eq!(h.query_all_by_label("Branche : main").count(), 2, "both terminals now in the main checkout");
+    assert!(h.query_by_label_contains("Branche : feat/invoices").is_none());
+}
+
+#[test]
+fn cards_stay_put_when_the_worktrees_strip_shows_or_hides() {
+    let dir = temp_dir("worktrees-still");
+    let mut h = harness(&dir);
+    let (main, _) = shop_group(&mut h);
+    let on_screen = |h: &Harness<'_, App>| screen_of(h, h.state().world.card(&main).unwrap().rect);
+    let before = on_screen(&h);
+    let viewport = h.state().viewport();
+    h.state_mut().dispatch(vec![shop_worktrees("p-shop")]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("⎇ 3 worktrees").is_some());
+    assert!(h.state().viewport().min.y > viewport.min.y, "the strip takes room above the canvas");
+    assert!((on_screen(&h).min - before.min).length() < 0.5, "moved: {before:?} -> {:?}", on_screen(&h));
+    // And back when the linked worktrees are gone.
+    let only_main = protocol::WorktreeList { key: "p-shop".into(), repo: Some("/home/me/shop".into()), default_branch: Some("main".into()), worktrees: vec![worktree("/home/me/shop", true, "main")] };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Worktrees(only_main))]);
+    steps(&mut h, 3);
+    assert_eq!(h.state().viewport(), viewport);
+    assert!((on_screen(&h).min - before.min).length() < 0.5, "moved: {before:?} -> {:?}", on_screen(&h));
+}
+
+#[test]
+fn relinking_the_same_folder_keeps_the_worktrees() {
+    let dir = temp_dir("worktrees-relink");
+    let mut h = harness(&dir);
+    shop_group(&mut h);
+    h.state_mut().dispatch(vec![shop_worktrees("p-shop")]);
+    steps(&mut h, 3);
+    h.state_mut().dispatch(vec![Event::SetProjectCwd("p-shop".into(), Some("/home/me/shop".into()))]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("⎇ 3 worktrees").is_some(), "same folder: strip kept");
+    assert!(h.query_by_label("Branche : feat/invoices · invoices").is_some(), "badges kept");
+    h.state_mut().dispatch(vec![Event::SetProjectCwd("p-shop".into(), Some("/home/me/blog".into()))]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("⎇ 3 worktrees").is_none(), "another folder: wait for its own list");
+}
+
+#[test]
+fn the_worktrees_strip_in_english() {
+    let dir = temp_dir("worktrees-en");
+    let mut h = harness_in(&dir, Lang::En);
+    shop_group(&mut h);
+    h.state_mut().dispatch(vec![shop_worktrees("p-shop")]);
+    steps(&mut h, 3);
+    for label in ["⎇ 3 worktrees", "main checkout", "✔ merged", "no terminal", "Branch: main", "Branch: feat/invoices · invoices"] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+}
+
+#[test]
+fn the_folder_picker_tells_a_worktree_from_a_repository() {
+    let dir = temp_dir("picker-worktree");
+    let mut h = harness(&dir);
+    add_project(&mut h, "api", Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 500.0)));
+    steps(&mut h, 3);
+    h.get_by_label("Dossier du groupe api").click();
+    steps(&mut h, 2);
+    let Some(protocol::AgentCmd::ListDir { path }) = h.state().agent_sent().last().cloned() else { panic!("the picker asks the agent") };
+    let listing = |worktree: bool| {
+        Event::Agent(AgentEvent::DirListing(protocol::DirListing {
+            request: path.clone(),
+            path: Some("/home/me/shop-taxes".into()),
+            parent: Some("/home/me".into()),
+            git: true,
+            worktree,
+            dirs: vec![],
+            error: None,
+        }))
+    };
+    h.state_mut().dispatch(vec![listing(true)]);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("⎇ worktree git").is_some());
+    assert!(h.query_by_label("⎇ dépôt git").is_none());
+    // A later answer for the same request is ignored once received: navigate again first.
+    h.get_by_label("⌂").click();
+    steps(&mut h, 2);
+    let Some(protocol::AgentCmd::ListDir { path: home }) = h.state().agent_sent().last().cloned() else { panic!("the picker asks the agent") };
+    let repo = protocol::DirListing { request: home, path: Some("/home/me/shop".into()), parent: Some("/home/me".into()), git: true, worktree: false, dirs: vec![], error: None };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::DirListing(repo))]);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("⎇ dépôt git").is_some());
+    assert!(h.query_by_label("⎇ worktree git").is_none());
 }

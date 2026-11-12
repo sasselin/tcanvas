@@ -28,6 +28,7 @@ use crate::features::spaces::Spaces;
 use crate::features::terminal_card::{Launcher, TerminalCards};
 use crate::features::updates::Updates;
 use crate::features::wires::Wires;
+use crate::features::worktrees::Worktrees;
 use event::Event;
 use i18n::t;
 use world::{Card, World};
@@ -52,6 +53,7 @@ pub struct App {
     canvas: Canvas,
     pub cards: TerminalCards,
     pub changes: Changes,
+    pub worktrees: Worktrees,
     projects: Projects,
     spaces: Spaces,
     wires: Wires,
@@ -82,6 +84,7 @@ impl App {
             canvas: Canvas::default(),
             cards: TerminalCards::new(ctx.clone(), config.launcher),
             changes: Changes::default(),
+            worktrees: Worktrees::default(),
             projects: Projects::default(),
             spaces: Spaces::default(),
             wires: Wires,
@@ -190,6 +193,7 @@ impl App {
         self.agent.poll(&mut events);
         self.cards.poll(&mut self.world, &mut events);
         self.changes.poll(&self.world, &mut events);
+        self.worktrees.poll(&mut self.world);
         self.notifications.poll(&ctx, &mut events);
         self.notifications.acknowledge_watched(&mut self.world);
         self.updates.poll(&mut events);
@@ -224,6 +228,8 @@ impl App {
             ui.add_space(2.0);
         });
 
+        // Under the toolbar, full width: only when the open group's repository has worktrees.
+        self.worktrees.ui(ui, &self.world, &mut events);
         self.changes.panel_ui(ui, &self.world, &mut events);
 
         CentralPanel::default().frame(Frame::NONE).show(ui, |ui| {
@@ -276,6 +282,7 @@ impl App {
             self.cards.handle(&ev, w, &mut out);
             self.projects.handle(&ev, w, &mut out);
             self.changes.handle(&ev, w, &mut out);
+            self.worktrees.handle(&ev, w, &mut out);
             // Before the camera: going to a hidden terminal opens its space first.
             self.spaces.handle(&ev, w, &mut out);
             self.wires.handle(&ev, w, &mut out);

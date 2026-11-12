@@ -37,10 +37,15 @@ impl Camera {
         self.center -= delta / self.zoom;
     }
 
-    /// Follows a viewport resize (side panel, window) so that content stays fixed relative
-    /// to the viewport's top-left corner instead of drifting with its center.
+    /// Follows a viewport resize (side panel, window, a bar appearing above) so that content
+    /// does not drift with the viewport's center. On each axis it stays fixed relative to the
+    /// viewport's top-left corner, except when only the top (left) edge moved: then it stays
+    /// where it is on screen, and the bar simply covers or uncovers a strip of it.
     pub fn keep_anchor(&mut self, old_vp: Rect, new_vp: Rect) {
-        let delta = (new_vp.center() - old_vp.center()) - (new_vp.min - old_vp.min);
+        let moved = |a: f32, b: f32| (a - b).abs() > 0.01;
+        let follow = |old_min: f32, new_min: f32, old_max: f32, new_max: f32| if moved(old_min, new_min) && !moved(old_max, new_max) { 0.0 } else { new_min - old_min };
+        let corner = Vec2::new(follow(old_vp.min.x, new_vp.min.x, old_vp.max.x, new_vp.max.x), follow(old_vp.min.y, new_vp.min.y, old_vp.max.y, new_vp.max.y));
+        let delta = (new_vp.center() - old_vp.center()) - corner;
         self.center += delta / self.zoom;
     }
 
@@ -127,10 +132,27 @@ mod tests {
         let narrower = Rect::from_min_max(vp().min, vp().max - Vec2::new(300.0, 0.0));
         cam.keep_anchor(vp(), narrower);
         assert!(close(cam.to_screen(p, narrower), before));
-        // The top edge moves down: content follows the corner.
+        // The whole viewport moves down: content follows the corner.
         let lower = narrower.translate(Vec2::new(0.0, 20.0));
         cam.keep_anchor(narrower, lower);
         assert!(close(cam.to_screen(p, lower), before + Vec2::new(0.0, 20.0)));
+    }
+
+    #[test]
+    fn a_bar_appearing_above_leaves_content_in_place() {
+        let mut cam = Camera { center: pos2(300.0, -80.0), zoom: 0.6 };
+        let p = pos2(512.0, 77.0);
+        let before = cam.to_screen(p, vp());
+        // Only the top edge moves down (a strip under the toolbar), then back up.
+        let shorter = Rect::from_min_max(vp().min + Vec2::new(0.0, 28.0), vp().max);
+        cam.keep_anchor(vp(), shorter);
+        assert!(close(cam.to_screen(p, shorter), before));
+        cam.keep_anchor(shorter, vp());
+        assert!(close(cam.to_screen(p, vp()), before));
+        // Same on the left edge.
+        let narrower = Rect::from_min_max(vp().min + Vec2::new(40.0, 0.0), vp().max);
+        cam.keep_anchor(vp(), narrower);
+        assert!(close(cam.to_screen(p, narrower), before));
     }
 
     #[test]
