@@ -188,6 +188,7 @@ fn real_terminals_end_to_end() {
         rect: egui::Rect::from_min_size(egui::pos2(-3000.0, -3000.0), Vec2::new(4000.0, 2000.0)),
         cwd: Some(linked.clone()),
         templates: Vec::new(),
+        messages: Vec::new(),
     };
     h.state_mut().world.projects.push(group.clone());
     let new_card = |h: &mut Harness<'_, App>, at: egui::Pos2, project: Option<String>| {

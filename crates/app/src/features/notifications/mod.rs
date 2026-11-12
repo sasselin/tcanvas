@@ -57,6 +57,8 @@ pub fn message(notice: &Notice, card: &Card) -> (String, String) {
         Notice::Moved(Some(group)) => ((t().notice_moved)(group), (t().notice_moved_body)(&title)),
         Notice::Moved(None) => (t().notice_left_group.into(), (t().notice_left_group_body)(&title)),
         Notice::Copied => (t().notice_copied.into(), t().notice_copied_body.into()),
+        Notice::NotSent(why) => (t().notice_not_sent.into(), (t().text_not_sent)(&title, &t().send_refusal(why))),
+        Notice::NotSubmitted(why) => (t().notice_not_submitted.into(), (t().text_not_submitted)(&title, &t().send_refusal(why))),
     }
 }
 
@@ -118,7 +120,7 @@ impl Notifications {
             card.attention = false;
         }
         let target = ToastTarget::Card(id);
-        self.toasts.retain(|t| t.target != target || matches!(t.notice, Some(Notice::Moved(_) | Notice::Copied)));
+        self.toasts.retain(|t| t.target != target || matches!(t.notice, Some(Notice::Moved(_) | Notice::Copied | Notice::NotSent(_) | Notice::NotSubmitted(_))));
     }
 
     pub fn pending(&self) -> usize {
@@ -153,8 +155,9 @@ impl Notifications {
         let window_focused = world.window_focused;
         let watching = window_focused && world.focused.as_ref() == Some(id);
         let Some(card) = world.card_mut(id) else { return };
-        // A move or a copy: plain information, no alert border, no Windows toast.
-        let info_only = matches!(notice, Notice::Moved(_) | Notice::Copied);
+        // A move, a copy, text not sent: shown even to a user watching the card (the text may
+        // have been sent from elsewhere), with no alert border and no Windows toast.
+        let info_only = matches!(notice, Notice::Moved(_) | Notice::Copied | Notice::NotSent(_) | Notice::NotSubmitted(_));
         if watching && !info_only {
             return;
         }
@@ -360,6 +363,23 @@ mod tests {
         n.handle(&Event::Notify(id, Notice::Copied), &mut w, &mut vec![]);
         assert_eq!(n.pending(), 1);
         assert!(!w.cards[0].attention);
+    }
+
+    #[test]
+    fn text_not_sent_is_told_naming_the_card_even_while_watching() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
+        let (mut w, id) = world_with_card();
+        w.cards[0].name = Some("api".into());
+        w.window_focused = true;
+        w.focused = Some(id.clone());
+        let mut n = Notifications::new(egui::Context::default(), false);
+        let notice = Notice::NotSent(crate::shell::event::SendRefusal::Ended);
+        n.handle(&Event::Notify(id.clone(), notice.clone()), &mut w, &mut vec![]);
+        assert_eq!(n.pending(), 1);
+        assert!(!w.cards[0].attention, "information, not an alert");
+        n.acknowledge_watched(&mut w);
+        assert_eq!(n.pending(), 1, "kept while the user looks at the card");
+        assert_eq!(message(&notice, &w.cards[0]), ("Texte non envoyé".into(), "Texte non envoyé à « api » : sa session est terminée.".into()));
     }
 
     #[test]

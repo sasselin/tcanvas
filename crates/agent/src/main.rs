@@ -8,6 +8,8 @@
 //! - `tcanvas-agent hook <event>`  : called by a coding agent's hook (working / waiting)
 //! - `tcanvas-agent hooks [bash|zsh]`: prints the hooks without installing anything
 //! - `tcanvas-agent kill <session>`: stops every process of the session, then the session
+//!
+//! In server mode, it also pastes text the app sends into a session (`AgentCmd::SendText`).
 
 mod features {
     pub mod agent_hooks;
@@ -15,6 +17,7 @@ mod features {
     pub mod cleanup;
     pub mod hooks;
     pub mod kill;
+    pub mod send;
     pub mod serve;
     pub mod status;
     pub mod tmux;

@@ -102,6 +102,7 @@ fn command_card(h: &mut Harness<'_, App>, folder: &str, command: &str) -> String
             rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), Vec2::new(2000.0, 1500.0)),
             cwd: Some(folder.into()),
             templates: Vec::new(),
+            messages: Vec::new(),
         };
         h.state_mut().world.projects.push(group);
     }

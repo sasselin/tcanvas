@@ -221,7 +221,15 @@ mod tests {
 
     fn world() -> World {
         let mut w = World::default();
-        w.projects.push(Project { id: "api".into(), name: "Backend API".into(), color: [0; 3], rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0)), cwd: None, templates: Vec::new() });
+        w.projects.push(Project {
+            id: "api".into(),
+            name: "Backend API".into(),
+            color: [0; 3],
+            rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0)),
+            cwd: None,
+            templates: Vec::new(),
+            messages: Vec::new(),
+        });
         let mut a = Card::new(Rect::from_min_size(pos2(10.0, 10.0), Vec2::splat(100.0)), Some("/srv/api".into()));
         a.info = Some(SessionInfo {
             session: a.session(),
@@ -331,7 +339,7 @@ mod tests {
         let mut w = world();
         let stalled = StatusKind::ALL.iter().position(|k| *k == StatusKind::Stalled).unwrap();
         assert_eq!(counts(&w)[stalled], 1);
-        w.projects.push(Project { id: "other".into(), name: "other".into(), color: [0; 3], rect: Rect::NOTHING, cwd: None, templates: Vec::new() });
+        w.projects.push(Project { id: "other".into(), name: "other".into(), color: [0; 3], rect: Rect::NOTHING, cwd: None, templates: Vec::new(), messages: Vec::new() });
         w.space = Some("other".into());
         assert_eq!(counts(&w), [0; 6], "the stalled terminal is in another space");
     }

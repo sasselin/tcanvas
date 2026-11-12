@@ -110,15 +110,34 @@ pub fn clip_action(key: Key, m: Modifiers) -> Option<ClipAction> {
     }
 }
 
-pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
-    let text = text.replace("\r\n", "\r").replace('\n', "\r");
-    if bracketed {
-        // Strip any markers so a paste cannot escape the mode.
-        let clean = text.replace("\x1b[201~", "");
-        format!("\x1b[200~{clean}\x1b[201~").into_bytes()
-    } else {
-        text.into_bytes()
+/// End of a bracketed paste.
+const PASTE_END: &str = "\x1b[201~";
+
+/// Pasted text as the terminal gets it: line breaks (CRLF or LF) become CR, what the Enter key
+/// sends, as in xterm. In a bracketed paste, the end marker is removed, again and again until
+/// none is left (removing one can join the pieces of another), so a paste cannot escape the mode.
+fn paste_text(text: &str, bracketed: bool) -> String {
+    let mut text = text.replace("\r\n", "\r").replace('\n', "\r");
+    while bracketed && text.contains(PASTE_END) {
+        text = text.replace(PASTE_END, "");
     }
+    text
+}
+
+pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    let text = paste_text(text, bracketed);
+    if bracketed { format!("\x1b[200~{text}{PASTE_END}").into_bytes() } else { text.into_bytes() }
+}
+
+/// Text sent to a session by the app (`Event::SendText`), as handed to the agent, which has tmux
+/// paste it (tmux turns each LF into CR, what the Enter key sends, and brackets the paste when
+/// the application asked for it): CRLF becomes LF; with `enter`, trailing line breaks go, so the
+/// text is submitted once (`"go on\n"` and Enter would answer a second prompt). `None`: nothing
+/// left to send.
+pub fn message_text(text: &str, enter: bool) -> Option<String> {
+    let text = text.replace("\r\n", "\n");
+    let text = if enter { text.trim_end_matches(['\r', '\n']) } else { text.as_str() };
+    (!text.is_empty()).then(|| text.to_string())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -211,6 +230,31 @@ mod tests {
     fn paste_normalizes_newlines_and_brackets() {
         assert_eq!(paste_bytes("a\r\nb\nc", false), b"a\rb\rc");
         assert_eq!(paste_bytes("x\x1b[201~y", true), b"\x1b[200~xy\x1b[201~");
+        // Removing one marker must not leave another made of its two halves.
+        assert_eq!(paste_bytes("a\x1b[20\x1b[201~1~b", true), b"\x1b[200~ab\x1b[201~");
+        assert_eq!(paste_bytes("\x1b[2\x1b[20\x1b[201~1~01~", true), b"\x1b[200~\x1b[201~");
+        // Without bracketed paste, the text goes as is (the application did not ask for markers).
+        assert_eq!(paste_bytes("x\x1b[201~y", false), b"x\x1b[201~y");
+    }
+
+    #[test]
+    fn a_message_is_sent_as_written_and_submitted_once() {
+        assert_eq!(message_text("echo one\r\necho two", true).as_deref(), Some("echo one\necho two"));
+        assert_eq!(message_text("echo one\necho two", false).as_deref(), Some("echo one\necho two"));
+        // With Enter, a trailing line break would submit twice: it goes.
+        assert_eq!(message_text("go on\n", true).as_deref(), Some("go on"));
+        assert_eq!(message_text("go on\r\n\r\n", true).as_deref(), Some("go on"));
+        assert_eq!(message_text("go on\r", true).as_deref(), Some("go on"));
+        // Without Enter, it is the text's own.
+        assert_eq!(message_text("go on\n", false).as_deref(), Some("go on\n"));
+        assert_eq!(message_text("\n", false).as_deref(), Some("\n"));
+        // Leading and inner blanks, non-ASCII, a marker: as written (the agent strips markers).
+        assert_eq!(message_text("  caf\u{e9} \u{65e5}\u{672c} \u{1f389}\n\tx", true).as_deref(), Some("  caf\u{e9} \u{65e5}\u{672c} \u{1f389}\n\tx"));
+        assert_eq!(message_text("a\x1b[201~b", true).as_deref(), Some("a\x1b[201~b"));
+        // Nothing left: nothing sent, not even Enter.
+        assert_eq!(message_text("", true), None);
+        assert_eq!(message_text("", false), None);
+        assert_eq!(message_text("\r\n\n", true), None);
     }
 
     #[test]

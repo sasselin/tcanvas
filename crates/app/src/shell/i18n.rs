@@ -7,6 +7,8 @@ use std::cell::Cell;
 
 use protocol::{BranchKeepReason, KeepReason, Problem, TermStatus};
 
+use super::event::SendRefusal;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lang {
     En,
@@ -85,6 +87,23 @@ impl Texts {
         if windows { self.wsl_path_hint } else { self.path_hint }
     }
 
+    /// Why a card did not take text sent to it (ends `text_not_sent`).
+    pub fn send_refusal(&self, why: &SendRefusal) -> String {
+        match why {
+            SendRefusal::NoCard => self.send_refused_no_card.into(),
+            SendRefusal::Starting => self.send_refused_starting.into(),
+            SendRefusal::NotStarted => self.send_refused_not_started.into(),
+            SendRefusal::Ended => self.send_refused_ended.into(),
+            SendRefusal::NoAgent => self.send_refused_no_agent.into(),
+            SendRefusal::AgentTooOld => self.send_refused_agent_too_old.into(),
+            SendRefusal::NoAnswer => self.send_refused_no_answer.into(),
+            SendRefusal::NoSession => self.send_refused_no_session.into(),
+            SendRefusal::Busy(mode) => (self.send_refused_busy)(mode),
+            SendRefusal::Expired => self.send_refused_expired.into(),
+            SendRefusal::Failed(detail) => (self.send_refused_failed)(detail),
+        }
+    }
+
     pub fn problem(&self, p: &Problem) -> String {
         match p {
             Problem::NotADir { path } => (self.not_a_dir)(path),
@@ -105,6 +124,11 @@ impl Texts {
             Problem::GitFailed { detail } => (self.git_failed)(detail),
             Problem::PruneNotConfirmed { path } => (self.prune_not_confirmed)(path),
             Problem::IgnoredChanged { path } => (self.ignored_changed)(path),
+            Problem::SessionNotFound { session } => (self.session_not_found)(session),
+            Problem::SendFailed { detail } => (self.send_refused_failed)(detail),
+            Problem::PaneDead { session } => (self.pane_dead)(session),
+            Problem::PaneBusy { mode, .. } => (self.send_refused_busy)(mode),
+            Problem::Expired => self.send_refused_expired.into(),
             Problem::BranchChanged { path, expected, found } => (self.branch_changed)(path, expected, found.as_deref().unwrap_or(self.detached_head)),
         }
     }
@@ -382,6 +406,46 @@ pub struct Texts {
     pub copy_command: &'static str,
     pub command_not_staged: fn(&str) -> String,
 
+    // Quick messages of a group, sent from a card's menu.
+    pub send_message_menu: &'static str,
+    pub no_messages: &'static str,
+    pub add_message: &'static str,
+    pub edit_messages: &'static str,
+    /// The card is outside any group: it has no quick messages.
+    pub messages_need_group: &'static str,
+    /// Hover of a quick message that presses Enter after its text.
+    pub then_enter: &'static str,
+    pub messages_title: fn(&str) -> String,
+    pub messages_help: &'static str,
+    pub message_text: &'static str,
+    pub message_name_hint: &'static str,
+    pub message_text_hint: &'static str,
+    pub message_enter: &'static str,
+    pub add_message_row: &'static str,
+    pub discard_message_changes: &'static str,
+    /// Text sent to a card that did not take it: card title, then why (`send_refused_*`).
+    pub text_not_sent: fn(&str, &str) -> String,
+    pub send_refused_no_card: &'static str,
+    pub send_refused_starting: &'static str,
+    pub send_refused_not_started: &'static str,
+    pub send_refused_ended: &'static str,
+    pub send_refused_no_agent: &'static str,
+    pub send_refused_agent_too_old: &'static str,
+    pub send_refused_no_answer: &'static str,
+    pub send_refused_no_session: &'static str,
+    pub send_refused_failed: fn(&str) -> String,
+    /// The pane shows a tmux screen; its tmux name (`clock-mode`...).
+    pub send_refused_busy: fn(&str) -> String,
+    pub send_refused_expired: &'static str,
+    /// Text typed into a card but not submitted: card title, then why (`send_refused_*`).
+    pub text_not_submitted: fn(&str, &str) -> String,
+    pub notice_not_submitted: &'static str,
+    pub copy_text: &'static str,
+    /// The × of the strip that keeps text not sent, for screen readers.
+    pub dismiss_text_a11y: &'static str,
+    /// Toast title: text sent to a terminal did not arrive.
+    pub notice_not_sent: &'static str,
+
     // Spaces.
     pub all_spaces: &'static str,
     pub all_spaces_hint: &'static str,
@@ -478,6 +542,8 @@ pub struct Texts {
     pub keep_reflog_commits: &'static str,
     pub keep_hidden_changes: &'static str,
     pub ignored_changed: fn(&str) -> String,
+    pub session_not_found: fn(&str) -> String,
+    pub pane_dead: fn(&str) -> String,
     pub cleanup_ignored_more: fn(usize) -> String,
     pub branch_keep_not_found: &'static str,
     pub branch_keep_default: &'static str,
@@ -731,6 +797,37 @@ pub const EN: Texts = Texts {
     command_not_run: "This terminal's command did not run.",
     copy_command: "Copy the command",
     command_not_staged: |e| format!("cannot hand the command over: {e}"),
+    send_message_menu: "Send a message",
+    no_messages: "No message yet",
+    add_message: "+ Add a message…",
+    edit_messages: "Edit messages…",
+    messages_need_group: "Quick messages belong to a group: move this terminal into one.",
+    then_enter: "then Enter",
+    messages_title: |n| format!("Quick messages · {n}"),
+    messages_help: "A message is typed into one terminal of the group, from its menu (right-click on its title bar), as a single paste. With “Press Enter after”, it is submitted too.",
+    message_text: "Text",
+    message_name_hint: "e.g. Commit",
+    message_text_hint: "e.g. Commit your changes with a clear message",
+    message_enter: "Press Enter after",
+    add_message_row: "+ Add a message",
+    discard_message_changes: "Discard the changes to these messages?",
+    text_not_sent: |card, why| format!("Text not sent to “{card}”: {why}"),
+    send_refused_no_card: "this terminal is gone.",
+    send_refused_starting: "its terminal is still starting.",
+    send_refused_not_started: "its terminal could not start.",
+    send_refused_ended: "its session has ended.",
+    send_refused_no_agent: "the agent (tcanvas-agent), which delivers it, is not connected.",
+    send_refused_agent_too_old: "the agent (tcanvas-agent) is too old to deliver it: update it.",
+    send_refused_no_answer: "the agent did not answer in time; it may have arrived anyway.",
+    send_refused_no_session: "its tmux session no longer exists.",
+    send_refused_failed: |d| format!("tmux refused it ({d})."),
+    send_refused_busy: |m| format!("its pane shows a tmux screen ({m}): close it first."),
+    send_refused_expired: "the agent could not get to it in time; it was not sent.",
+    text_not_submitted: |card, why| format!("Text typed into “{card}” but not submitted: {why}"),
+    notice_not_submitted: "Text not submitted",
+    copy_text: "Copy the text",
+    dismiss_text_a11y: "Dismiss the text not sent",
+    notice_not_sent: "Text not sent",
 
     all_spaces: "All",
     all_spaces_hint: "Overview: all projects",
@@ -820,6 +917,8 @@ pub const EN: Texts = Texts {
     keep_reflog_commits: "holds commits that are in no branch (only its reflog still has them)",
     keep_hidden_changes: "files flagged assume-unchanged or skip-worktree: git status does not show their changes",
     ignored_changed: |p| format!("{p} kept: its ignored files changed since the confirmation"),
+    session_not_found: |s| format!("no tmux session {s}"),
+    pane_dead: |s| format!("the pane of {s} is dead"),
     cleanup_ignored_more: |n| format!("and {n} more"),
     branch_keep_not_found: "it no longer exists",
     branch_keep_default: "it is the default branch",
@@ -1071,6 +1170,37 @@ pub const FR: Texts = Texts {
     command_not_run: "La commande de ce terminal n'a pas été lancée.",
     copy_command: "Copier la commande",
     command_not_staged: |e| format!("impossible de transmettre la commande : {e}"),
+    send_message_menu: "Envoyer un message",
+    no_messages: "Aucun message pour l'instant",
+    add_message: "+ Ajouter un message…",
+    edit_messages: "Modifier les messages…",
+    messages_need_group: "Les messages rapides appartiennent à un groupe : placez ce terminal dans un groupe.",
+    then_enter: "puis Entrée",
+    messages_title: |n| format!("Messages rapides · {n}"),
+    messages_help: "Un message est tapé dans un terminal du groupe, depuis son menu (clic droit sur sa barre de titre), en un seul collage. Avec « Appuyer sur Entrée après », il est aussi validé.",
+    message_text: "Texte",
+    message_name_hint: "ex. Commit",
+    message_text_hint: "ex. Commite tes changements avec un message clair",
+    message_enter: "Appuyer sur Entrée après",
+    add_message_row: "+ Ajouter un message",
+    discard_message_changes: "Abandonner les modifications de ces messages ?",
+    text_not_sent: |card, why| format!("Texte non envoyé à « {card} » : {why}"),
+    send_refused_no_card: "ce terminal n'existe plus.",
+    send_refused_starting: "son terminal démarre encore.",
+    send_refused_not_started: "son terminal n'a pas pu démarrer.",
+    send_refused_ended: "sa session est terminée.",
+    send_refused_no_agent: "l'agent (tcanvas-agent), qui le transmet, n'est pas connecté.",
+    send_refused_agent_too_old: "l'agent (tcanvas-agent) est trop ancien pour le transmettre : mettez-le à jour.",
+    send_refused_no_answer: "l'agent n'a pas répondu à temps ; le texte est peut-être arrivé quand même.",
+    send_refused_no_session: "sa session tmux n'existe plus.",
+    send_refused_failed: |d| format!("tmux l'a refusé ({d})."),
+    send_refused_busy: |m| format!("son volet affiche un écran tmux ({m}) : fermez-le d'abord."),
+    send_refused_expired: "l'agent n'a pas pu le transmettre à temps ; il n'a pas été envoyé.",
+    text_not_submitted: |card, why| format!("Texte tapé dans « {card} » mais pas validé : {why}"),
+    notice_not_submitted: "Texte non validé",
+    copy_text: "Copier le texte",
+    dismiss_text_a11y: "Fermer le texte non envoyé",
+    notice_not_sent: "Texte non envoyé",
 
     all_spaces: "Tous",
     all_spaces_hint: "Vue d'ensemble : tous les projets",
@@ -1164,6 +1294,8 @@ pub const FR: Texts = Texts {
     keep_reflog_commits: "contient des commits qui ne sont dans aucune branche (seul son reflog les a encore)",
     keep_hidden_changes: "fichiers marqués assume-unchanged ou skip-worktree : git status ne montre pas leurs modifications",
     ignored_changed: |p| format!("{p} conservé : ses fichiers ignorés ont changé depuis la confirmation"),
+    session_not_found: |s| format!("aucune session tmux {s}"),
+    pane_dead: |s| format!("le volet de {s} est mort"),
     cleanup_ignored_more: |n| format!("et {n} de plus"),
     branch_keep_not_found: "elle n'existe plus",
     branch_keep_default: "c'est la branche par défaut",

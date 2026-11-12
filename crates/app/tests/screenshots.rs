@@ -298,7 +298,7 @@ fn steps(h: &mut Harness<'_, App>, n: usize) {
 fn add_project(h: &mut Harness<'_, App>, name: &str, color: [u8; 3], at: Pos2) -> String {
     let id = format!("p-{name}");
     let rect = Rect::from_min_size(at, Vec2::splat(100.0));
-    h.state_mut().world.projects.push(Project { id: id.clone(), name: name.into(), color, rect, cwd: Some(format!("/home/me/code/{name}")), templates: Vec::new() });
+    h.state_mut().world.projects.push(Project { id: id.clone(), name: name.into(), color, rect, cwd: Some(format!("/home/me/code/{name}")), templates: Vec::new(), messages: Vec::new() });
     id
 }
 
@@ -391,7 +391,7 @@ fn demo_canvas(h: &mut Harness<'_, App>) {
     }
     // A group just created: no folder, no terminal yet.
     let rect = Rect::from_min_size(pos2(1420.0, 1360.0), vec2(560.0, 300.0));
-    h.state_mut().world.projects.push(Project { id: "p-mobile-app".into(), name: "mobile-app".into(), color: [130, 110, 220], rect, cwd: None, templates: Vec::new() });
+    h.state_mut().world.projects.push(Project { id: "p-mobile-app".into(), name: "mobile-app".into(), color: [130, 110, 220], rect, cwd: None, templates: Vec::new(), messages: Vec::new() });
     h.state_mut().dispatch(vec![Event::AddWire(api.clone(), web), Event::AddWire(api, infra), Event::Agent(AgentEvent::Changes(api_changes()))]);
     steps(h, 5);
 }
