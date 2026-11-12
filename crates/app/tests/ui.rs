@@ -168,6 +168,103 @@ fn dragging_the_title_bar_moves_the_card() {
     assert_eq!(after.size(), before.size());
 }
 
+/// A card whose coding agent reports `prompt` as its last one.
+fn card_with_prompt(h: &mut Harness<'_, App>, prompt: &str) -> String {
+    let id = add_card(h, "api", Pos2::ZERO);
+    let session = h.state().world.card(&id).unwrap().session();
+    let info = SessionInfo {
+        session,
+        status: TermStatus::Running,
+        command: Some("claude".into()),
+        cwd: Some("/home/me/api".into()),
+        last_exit: None,
+        last_duration_secs: None,
+        tail: vec![],
+        agent_session_id: Some("4f1c".into()),
+        agent_transcript: Some("/home/me/.claude/projects/-home-me-api/4f1c.jsonl".into()),
+        last_prompt: Some(prompt.into()),
+    };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
+    steps(h, 2);
+    id
+}
+
+#[test]
+fn the_header_shows_the_last_prompt_elided_with_the_full_text_on_hover() {
+    let dir = temp_dir("prompt");
+    let mut h = harness(&dir);
+    let prompt = format!("ajoute le total TTC au PDF {}", "et vérifie les arrondis ".repeat(10));
+    let prompt = prompt.trim_end();
+    let id = card_with_prompt(&mut h, prompt);
+    let card_rect = screen_of(&h, h.state().world.card(&id).unwrap().rect);
+    let shown = h.get_by_label(&format!("Dernier prompt : {prompt}")).rect();
+    assert!(shown.min.y >= card_rect.min.y && shown.max.y <= card_rect.min.y + 28.0 * h.state().world.camera.zoom + 1.0, "in the title bar: {shown:?}");
+    assert!(shown.max.x < card_rect.max.x, "elided inside the card: {shown:?} {card_rect:?}");
+
+    h.hover_at(shown.center());
+    steps(&mut h, 60);
+    assert!(h.query_by_label(prompt).is_some(), "full prompt in the tooltip");
+
+    // The prompt does not get in the way of the title bar: dragging from it moves the card.
+    let before = h.state().world.card(&id).unwrap().rect;
+    let from = shown.center();
+    h.drag_at(from);
+    h.step();
+    for k in 1..=10 {
+        h.hover_at(from + Vec2::new(10.0 * k as f32, 5.0 * k as f32));
+        h.step();
+    }
+    h.drop_at(from + Vec2::new(100.0, 50.0));
+    steps(&mut h, 2);
+    assert_ne!(h.state().world.card(&id).unwrap().rect.min, before.min, "dragged from the prompt");
+
+    // No agent prompt: nothing shown.
+    let session = h.state().world.card(&id).unwrap().session();
+    let info = SessionInfo {
+        session,
+        status: TermStatus::Idle,
+        command: None,
+        cwd: None,
+        last_exit: None,
+        last_duration_secs: None,
+        tail: vec![],
+        agent_session_id: None,
+        agent_transcript: None,
+        last_prompt: None,
+    };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
+    steps(&mut h, 2);
+    assert!(h.query_by_label_contains("Dernier prompt").is_none());
+}
+
+#[test]
+fn a_narrow_card_keeps_the_prompt_reachable() {
+    let dir = temp_dir("prompt-narrow");
+    let mut h = harness(&dir);
+    let prompt = "ajoute le total TTC au PDF";
+    let id = card_with_prompt(&mut h, prompt);
+    {
+        let card = h.state_mut().world.card_mut(&id).unwrap();
+        card.rect = Rect::from_min_size(card.rect.min, Vec2::new(200.0, 300.0));
+    }
+    steps(&mut h, 2);
+    let card_rect = screen_of(&h, h.state().world.card(&id).unwrap().rect);
+    let shown = h.get_by_label(&format!("Dernier prompt : {prompt}")).rect();
+    assert!(card_rect.contains_rect(shown), "inside the card: {shown:?} {card_rect:?}");
+    assert!(shown.width() >= 8.0, "a hover target: {shown:?}");
+    h.hover_at(shown.center());
+    steps(&mut h, 60);
+    assert!(h.query_by_label(prompt).is_some(), "full prompt in the tooltip");
+}
+
+#[test]
+fn the_header_prompt_in_english() {
+    let dir = temp_dir("prompt-en");
+    let mut h = harness_in(&dir, Lang::En);
+    card_with_prompt(&mut h, "add the total with taxes to the PDF");
+    assert!(h.query_by_label("Last prompt: add the total with taxes to the PDF").is_some());
+}
+
 /// Two groups side by side, each with a terminal, seen in "All".
 fn two_linked_groups(h: &mut Harness<'_, App>) -> (String, String) {
     let api = add_project(h, "api", Rect::from_min_size(pos2(-900.0, -200.0), Vec2::new(600.0, 400.0)));
@@ -331,7 +428,18 @@ fn agent_status_changes_raise_a_clickable_toast() {
     let mut h = harness(&dir);
     let id = add_card(&mut h, "build", pos2(5000.0, 5000.0));
     let session = h.state().world.card(&id).unwrap().session();
-    let info = |status| SessionInfo { session: session.clone(), status, command: Some("make".into()), cwd: None, last_exit: None, last_duration_secs: None, tail: vec![] };
+    let info = |status| SessionInfo {
+        session: session.clone(),
+        status,
+        command: Some("make".into()),
+        cwd: None,
+        last_exit: None,
+        last_duration_secs: None,
+        tail: vec![],
+        agent_session_id: None,
+        agent_transcript: None,
+        last_prompt: None,
+    };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info(TermStatus::Running)))]);
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info(TermStatus::Stalled)))]);
     steps(&mut h, 2);
@@ -398,7 +506,18 @@ fn missing_shell_hooks_can_be_installed_from_the_status_bar() {
 fn unknown_canvas_sessions_are_adopted() {
     let dir = temp_dir("adopt");
     let mut h = harness(&dir);
-    let info = SessionInfo { session: "tc_orphan1".into(), status: TermStatus::Idle, command: None, cwd: Some("/srv".into()), last_exit: None, last_duration_secs: None, tail: vec![] };
+    let info = SessionInfo {
+        session: "tc_orphan1".into(),
+        status: TermStatus::Idle,
+        command: None,
+        cwd: Some("/srv".into()),
+        last_exit: None,
+        last_duration_secs: None,
+        tail: vec![],
+        agent_session_id: None,
+        agent_transcript: None,
+        last_prompt: None,
+    };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
     steps(&mut h, 2);
     let app = h.state();
@@ -1213,7 +1332,7 @@ fn a_terminal_dropped_onto_another_takes_its_place_and_the_group_rearranges() {
 
 fn set_status(h: &mut Harness<'_, App>, id: &str, status: TermStatus) {
     let session = h.state().world.card(id).unwrap().session();
-    let info = SessionInfo { session, status, command: None, cwd: None, last_exit: None, last_duration_secs: None, tail: vec![] };
+    let info = SessionInfo { session, status, command: None, cwd: None, last_exit: None, last_duration_secs: None, tail: vec![], agent_session_id: None, agent_transcript: None, last_prompt: None };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
 }
 

@@ -622,6 +622,9 @@ mod tests {
             last_exit: None,
             last_duration_secs: None,
             tail: vec![],
+            agent_session_id: None,
+            agent_transcript: None,
+            last_prompt: None,
         });
         let (ia, outside) = (a.id.clone(), Card::new(Rect::from_min_size(pos2(5000.0, 0.0), Vec2::splat(50.0)), None));
         w.add_card(a);

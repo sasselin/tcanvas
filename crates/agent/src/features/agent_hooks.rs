@@ -4,7 +4,9 @@
 //! - Sink: `tcanvas-agent hook <event>` runs from any agent's hook. It sets the tmux pane
 //!   option `@tc_agent` to `<working|waiting> <pid,pid,...>` (the hook's ancestors, so the
 //!   status loop can check that the mark belongs to the process in the foreground), or unsets
-//!   it when the session ends. It only acts inside the tcanvas tmux server, prints `{}` (a
+//!   it when the session ends. From the JSON payload on stdin it also keeps the agent's
+//!   session id, transcript path and last prompt in pane options next to the mark (hex
+//!   encoded, tagged with the same pids), set in the same `tmux` call. It only acts inside the tcanvas tmux server, prints `{}` (a
 //!   valid "no decision" for every agent) and always exits 0: it can never block an agent.
 //! - Adapters: `install` writes one hook entry per useful event into each detected agent's
 //!   config, merged with what is already there; `uninstall` removes only those entries.
@@ -68,11 +70,171 @@ pub fn parse_mark(value: &str) -> Option<AgentMark> {
 fn ancestors() -> Vec<u32> {
     let mut pids = Vec::new();
     let mut pid = std::os::unix::process::parent_id();
-    while pid > 1 && pids.len() < 16 {
+    while pid > 1 && pids.len() < MAX_PIDS {
         pids.push(pid);
         pid = super::status::parent_of(pid).unwrap_or(0);
     }
     pids
+}
+
+// ---------------------------------------------------------------------------------------
+// Payload: what the agent tells about itself on stdin
+
+/// Pane options next to `@tc_agent`, as `<owner pids> <hex>` (see `encode_owned`).
+pub const SESSION_OPTION: &str = "@tc_agent_session";
+pub const TRANSCRIPT_OPTION: &str = "@tc_agent_transcript";
+pub const PROMPT_OPTION: &str = "@tc_agent_prompt";
+/// Longest prompt kept, in characters (the card shows one elided line of it).
+pub const PROMPT_MAX_CHARS: usize = 500;
+/// Longer session ids and transcript paths are dropped: hex doubles them, and the whole
+/// `tmux` call (mark included) must stay far below tmux's command size limit.
+const SESSION_ID_MAX_BYTES: usize = 512;
+const TRANSCRIPT_MAX_BYTES: usize = 1024;
+/// At most this many owner pids are recorded (in the mark and with each value).
+const MAX_PIDS: usize = 16;
+
+/// The useful part of a hook payload. Every field is optional: agents differ, and a
+/// malformed payload simply gives nothing.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct Payload {
+    pub session_id: Option<String>,
+    pub transcript: Option<String>,
+    /// Only on prompt-submit events; already one line and truncated.
+    pub prompt: Option<String>,
+}
+
+/// Events that carry the prompt the user just submitted.
+fn is_prompt_event(event: &str) -> bool {
+    matches!(event.to_ascii_lowercase().as_str(), "userpromptsubmit" | "userpromptsubmitted" | "beforeagent")
+}
+
+/// First JSON value of `reader`, without waiting for the end of the stream (some callers
+/// leave stdin open). `None` for empty or invalid input.
+pub fn read_payload(reader: impl Read) -> Option<Value> {
+    serde_json::Deserializer::from_reader(io::BufReader::new(reader)).into_iter::<Value>().next()?.ok()
+}
+
+/// Fields of a payload, under the names each agent uses (snake_case for Claude Code, Codex,
+/// Gemini CLI and Qwen Code; camelCase for Copilot CLI).
+pub fn payload_of(event: &str, value: Option<&Value>) -> Payload {
+    let Some(obj) = value.and_then(Value::as_object) else { return Payload::default() };
+    let field = |names: &[&str]| names.iter().find_map(|n| obj.get(*n).and_then(Value::as_str)).map(str::trim).filter(|s| !s.is_empty());
+    let bounded = |max: usize| move |s: &str| Some(s.to_string()).filter(|s| s.len() <= max && !s.chars().any(is_hidden_char));
+    Payload {
+        session_id: field(&["session_id", "sessionId"]).and_then(bounded(SESSION_ID_MAX_BYTES)),
+        transcript: field(&["transcript_path", "transcriptPath"]).and_then(bounded(TRANSCRIPT_MAX_BYTES)),
+        prompt: if is_prompt_event(event) { field(&["prompt"]).and_then(one_line) } else { None },
+    }
+}
+
+/// Control characters and Unicode bidi controls (marks, embeddings, overrides, isolates):
+/// invisible, and able to reorder the text drawn around them.
+fn is_hidden_char(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+}
+
+/// The prompt on one line (any run of whitespace becomes a space, control and bidi
+/// characters are dropped), at most `PROMPT_MAX_CHARS` characters with an ellipsis when cut.
+pub fn one_line(text: &str) -> Option<String> {
+    let visible: String = text.chars().filter(|&c| c.is_whitespace() || !is_hidden_char(c)).collect();
+    let line = visible.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.is_empty() {
+        return None;
+    }
+    if line.chars().count() <= PROMPT_MAX_CHARS {
+        return Some(line);
+    }
+    let mut cut: String = line.chars().take(PROMPT_MAX_CHARS - 1).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push('…');
+    Some(cut)
+}
+
+/// Hex of the UTF-8 bytes: nothing a prompt contains (tabs, newlines, `#{...}`) can then
+/// break the `list-panes` rows or be expanded by tmux.
+pub fn encode_value(text: &str) -> String {
+    text.bytes().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Inverse of `encode_value`; `None` for an empty, malformed or non UTF-8 value.
+pub fn decode_value(hex: &str) -> Option<String> {
+    let hex = hex.trim();
+    if hex.is_empty() || !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    let bytes: Option<Vec<u8>> = (0..hex.len()).step_by(2).map(|i| hex.get(i..i + 2).and_then(|b| u8::from_str_radix(b, 16).ok())).collect();
+    String::from_utf8(bytes?).ok()
+}
+
+/// A stored payload value and its owner: the ancestors of the hook that wrote it, as in
+/// the mark. Another agent started later in the same pane is not among them, so it never
+/// inherits a prompt or a transcript it did not send (with or without a session id).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Owned {
+    pub pids: Vec<u32>,
+    pub text: String,
+}
+
+impl Owned {
+    pub fn owned_by(&self, pid: u32) -> bool {
+        self.pids.contains(&pid)
+    }
+}
+
+/// The text of a stored value if `agent_pid` (the foreground process, when it holds a
+/// trusted mark) wrote it; `None` otherwise.
+pub fn trusted(value: Option<&Owned>, agent_pid: Option<u32>) -> Option<String> {
+    let pid = agent_pid?;
+    value.filter(|v| v.owned_by(pid)).map(|v| v.text.clone())
+}
+
+/// `<pid,pid,...> <hex>`.
+pub fn encode_owned(pids: &[u32], text: &str) -> String {
+    let pids: Vec<String> = pids.iter().take(MAX_PIDS).map(u32::to_string).collect();
+    format!("{} {}", pids.join(","), encode_value(text))
+}
+
+/// Inverse of `encode_owned`; `None` without an owner or with a malformed value.
+pub fn decode_owned(value: &str) -> Option<Owned> {
+    let (pids, hex) = value.trim().split_once(' ')?;
+    let pids: Vec<u32> = pids.split(',').filter_map(|p| p.parse().ok()).collect();
+    if pids.is_empty() {
+        return None;
+    }
+    Some(Owned { pids, text: decode_value(hex)? })
+}
+
+/// Arguments of the single `tmux` call a hook makes (commands chained with `;`):
+/// set the mark and whatever the payload brings, or unset all of it on `SessionEnd`.
+pub fn tmux_args(pane: &str, change: Option<AgentState>, pids: &[u32], payload: &Payload) -> Vec<String> {
+    let mut sets: Vec<(&str, Option<String>)> = Vec::new();
+    match change {
+        Some(state) => {
+            sets.push((PANE_OPTION, Some(format_mark(state, pids))));
+            // These stay set until `SessionEnd` or the pane closes (an agent killed without its
+            // hooks cannot clear them), so readers trust them only under a trusted mark and
+            // when their owner pids include the process in the foreground.
+            let fields = [(SESSION_OPTION, &payload.session_id), (TRANSCRIPT_OPTION, &payload.transcript), (PROMPT_OPTION, &payload.prompt)];
+            sets.extend(fields.into_iter().filter_map(|(option, v)| v.as_deref().map(|v| (option, Some(encode_owned(pids, v))))));
+        }
+        None => sets.extend([PANE_OPTION, SESSION_OPTION, TRANSCRIPT_OPTION, PROMPT_OPTION].map(|o| (o, None))),
+    }
+    let mut args = Vec::new();
+    for (k, (option, value)) in sets.into_iter().enumerate() {
+        if k > 0 {
+            args.push(";".to_string());
+        }
+        match value {
+            Some(v) => args.extend(["set", "-p", "-t", pane, option, &v].map(String::from)),
+            None => args.extend(["set", "-p", "-u", "-t", pane, option].map(String::from)),
+        }
+    }
+    args
+}
+
+fn run_tmux(args: &[String]) -> bool {
+    // Plain `tmux` talks to the server named by $TMUX, the one this pane belongs to.
+    Command::new("tmux").args(args).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
 /// `tcanvas-agent hook <event>`.
@@ -81,22 +243,25 @@ pub fn hook_cli(event: Option<&str>) -> io::Result<()> {
     // never wait long for it (Codex-style callers may leave stdin open).
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut sink = Vec::new();
-        let _ = io::stdin().lock().take(1 << 20).read_to_end(&mut sink);
-        let _ = tx.send(());
+        let mut stdin = io::stdin().lock().take(1 << 20);
+        let _ = tx.send(read_payload(&mut stdin));
+        let _ = io::copy(&mut stdin, &mut io::sink());
     });
 
     let in_tcanvas = std::env::var("TMUX").is_ok_and(|t| t.contains("tcanvas"));
-    if let (true, Some(change), Ok(pane)) = (in_tcanvas, event.and_then(state_of), std::env::var("TMUX_PANE")) {
-        // Plain `tmux` talks to the server named by $TMUX, the one this pane belongs to.
-        let mut cmd = Command::new("tmux");
-        match change {
-            Some(state) => cmd.args(["set", "-p", "-t", &pane, PANE_OPTION, &format_mark(state, &ancestors())]),
-            None => cmd.args(["set", "-p", "-u", "-t", &pane, PANE_OPTION]),
-        };
-        let _ = cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+    if let (true, Some(event), Ok(pane)) = (in_tcanvas, event, std::env::var("TMUX_PANE"))
+        && let Some(change) = state_of(event)
+    {
+        let value = rx.recv_timeout(Duration::from_millis(300)).ok().flatten();
+        let payload = payload_of(event, value.as_ref());
+        let pids = if change.is_some() { ancestors() } else { Vec::new() };
+        // The payload must never cost the mark: if the combined call fails, set the mark alone.
+        if !run_tmux(&tmux_args(&pane, change, &pids, &payload)) && payload != Payload::default() {
+            run_tmux(&tmux_args(&pane, change, &pids, &Payload::default()));
+        }
+    } else {
+        let _ = rx.recv_timeout(Duration::from_millis(300));
     }
-    let _ = rx.recv_timeout(Duration::from_millis(300));
     let mut out = io::stdout().lock();
     let _ = out.write_all(b"{}\n");
     let _ = out.flush();
@@ -409,6 +574,148 @@ mod tests {
         assert_eq!(parse_mark("working"), Some(AgentMark { state: AgentState::Working, pids: vec![] }));
         assert_eq!(parse_mark(""), None);
         assert_eq!(parse_mark("bogus 1"), None);
+    }
+
+    fn payload(event: &str, stdin: &str) -> Payload {
+        payload_of(event, read_payload(stdin.as_bytes()).as_ref())
+    }
+
+    #[test]
+    fn payload_fields_of_each_agent() {
+        // Claude Code, Codex and Qwen Code: snake_case, `prompt` on UserPromptSubmit.
+        let claude = r#"{"session_id":"abc-123","transcript_path":"/home/me/.claude/projects/-home-me-api/abc-123.jsonl","cwd":"/home/me/api","hook_event_name":"UserPromptSubmit","prompt":"add the total with taxes to the PDF"}"#;
+        assert_eq!(
+            payload("UserPromptSubmit", claude),
+            Payload { session_id: Some("abc-123".into()), transcript: Some("/home/me/.claude/projects/-home-me-api/abc-123.jsonl".into()), prompt: Some("add the total with taxes to the PDF".into()) }
+        );
+        // Gemini CLI: same names, the prompt comes with BeforeAgent.
+        let gemini = r#"{"session_id":"g1","transcript_path":"/tmp/g1.json","cwd":"/","hook_event_name":"BeforeAgent","timestamp":"2026-01-01T00:00:00Z","prompt":"fix the build"}"#;
+        assert_eq!(payload("BeforeAgent", gemini).prompt.as_deref(), Some("fix the build"));
+        // Copilot CLI: camelCase, maybe no session id at all.
+        let copilot = r#"{"timestamp":1704614600000,"cwd":"/home/me","prompt":"explain this repo"}"#;
+        assert_eq!(payload("userPromptSubmitted", copilot), Payload { session_id: None, transcript: None, prompt: Some("explain this repo".into()) });
+        assert_eq!(payload("postToolUse", r#"{"sessionId":"c9","transcriptPath":"/t.jsonl"}"#), Payload { session_id: Some("c9".into()), transcript: Some("/t.jsonl".into()), prompt: None });
+    }
+
+    #[test]
+    fn prompt_is_only_taken_from_prompt_events() {
+        let p = payload("PostToolUse", r#"{"session_id":"s","prompt":"not a user prompt","tool_input":{"prompt":"nested"}}"#);
+        assert_eq!(p, Payload { session_id: Some("s".into()), transcript: None, prompt: None });
+    }
+
+    #[test]
+    fn missing_or_odd_fields_give_nothing() {
+        assert_eq!(payload("Stop", r#"{"hook_event_name":"Stop"}"#), Payload::default());
+        assert_eq!(payload("UserPromptSubmit", r#"{"session_id":null,"transcript_path":42,"prompt":"   \n\t "}"#), Payload::default());
+        assert_eq!(payload("UserPromptSubmit", r#"["not", "an", "object"]"#), Payload::default());
+        let long_id = format!(r#"{{"session_id":"{}"}}"#, "x".repeat(SESSION_ID_MAX_BYTES + 1));
+        assert_eq!(payload("Stop", &long_id), Payload::default());
+        let long_path = format!(r#"{{"transcript_path":"/{}"}}"#, "x".repeat(TRANSCRIPT_MAX_BYTES));
+        assert_eq!(payload("Stop", &long_path), Payload::default());
+        let at_bounds = format!(r#"{{"session_id":"{}","transcript_path":"{}"}}"#, "x".repeat(SESSION_ID_MAX_BYTES), "y".repeat(TRANSCRIPT_MAX_BYTES));
+        assert!(payload("Stop", &at_bounds).session_id.is_some() && payload("Stop", &at_bounds).transcript.is_some());
+        assert_eq!(payload("Stop", "{\"session_id\":\"a\\u202eb\"}"), Payload::default(), "bidi controls in an id");
+    }
+
+    #[test]
+    fn the_worst_case_tmux_call_stays_far_below_tmux_limits() {
+        // tmux packs the whole command line in one message of at most 16 KiB.
+        let worst = Payload { session_id: Some("x".repeat(SESSION_ID_MAX_BYTES)), transcript: Some("y".repeat(TRANSCRIPT_MAX_BYTES)), prompt: one_line(&"\u{1f600}".repeat(PROMPT_MAX_CHARS * 2)) };
+        assert_eq!(payload_of("UserPromptSubmit", Some(&json!({"session_id": worst.session_id, "transcript_path": worst.transcript}))).session_id, worst.session_id, "the worst case is accepted");
+        let pids = vec![u32::MAX; MAX_PIDS];
+        let args = tmux_args("%4294967295", Some(AgentState::Working), &pids, &worst);
+        let size: usize = args.iter().map(|a| a.len() + 1).sum();
+        assert!(size <= 10 * 1024, "{size} bytes");
+    }
+
+    #[test]
+    fn invalid_or_empty_stdin_gives_nothing() {
+        assert_eq!(read_payload(&b""[..]), None);
+        assert_eq!(read_payload(&b"x\n"[..]), None);
+        assert_eq!(read_payload(&b"{ \"session_id\": "[..]), None);
+        assert_eq!(payload("UserPromptSubmit", "{ oops"), Payload::default());
+        assert_eq!(payload_of("UserPromptSubmit", None), Payload::default());
+        // A complete value is enough: the rest of the stream is not waited for.
+        assert_eq!(read_payload(&b"{\"prompt\":\"hi\"}\n{ garbage"[..]), Some(json!({"prompt": "hi"})));
+    }
+
+    #[test]
+    fn prompts_become_one_bounded_line() {
+        let p = payload("UserPromptSubmit", r#"{"prompt":"first line\n\n  second\tline\r\nthird  "}"#);
+        assert_eq!(p.prompt.as_deref(), Some("first line second line third"));
+
+        let long = "word ".repeat(300);
+        let cut = one_line(&long).unwrap();
+        assert_eq!(cut.chars().count(), PROMPT_MAX_CHARS);
+        assert!(cut.ends_with("word…"));
+        let at_space = format!("{} {}", "a".repeat(PROMPT_MAX_CHARS - 2), "b".repeat(10));
+        assert_eq!(one_line(&at_space), Some(format!("{}…", "a".repeat(PROMPT_MAX_CHARS - 2))), "no space before the ellipsis");
+
+        // Non-ASCII text is cut on a character boundary.
+        let accents = "\u{e9}".repeat(PROMPT_MAX_CHARS + 50);
+        let cut = one_line(&accents).unwrap();
+        assert_eq!(cut.chars().count(), PROMPT_MAX_CHARS);
+        assert!(cut.starts_with('\u{e9}') && cut.ends_with('…'));
+        let emoji = "\u{1f600} r\u{e9}sum\u{e9} \u{65e5}\u{672c}";
+        assert_eq!(one_line(emoji).as_deref(), Some(emoji));
+        let exact = "a".repeat(PROMPT_MAX_CHARS);
+        assert_eq!(one_line(&exact), Some(exact));
+
+        // Control and bidi characters are dropped; whitespace controls still separate words.
+        let hidden = "fix\u{7}\u{1b}[31m the\u{202e}gnp.exe\u{2066} bug\u{200f}\u{0}\nnow\u{85}ok";
+        assert_eq!(one_line(hidden).as_deref(), Some("fix[31m thegnp.exe bug now ok"));
+        assert_eq!(one_line("\u{202a}\u{2069}\u{7}"), None);
+    }
+
+    #[test]
+    fn stored_values_round_trip_through_hex() {
+        for text in ["", "plain", "tab\tnew\nline", "#{session_name} #(rm -rf /) ;", "\u{e9}t\u{e9} \u{1f600}"] {
+            let hex = encode_value(text);
+            assert!(hex.bytes().all(|b| b.is_ascii_hexdigit()), "{hex}");
+            assert_eq!(decode_value(&hex), Some(text.to_string()).filter(|t| !t.is_empty()));
+        }
+        assert_eq!(encode_value("Hi"), "4869");
+        assert_eq!(decode_value("486"), None, "odd length");
+        assert_eq!(decode_value("zz"), None, "not hex");
+        assert_eq!(decode_value("ff"), None, "not UTF-8");
+        assert_eq!(decode_value("\u{e9}9"), None, "not ASCII");
+    }
+
+    #[test]
+    fn stored_values_carry_their_owner() {
+        let v = encode_owned(&[42, 7], "Hi");
+        assert_eq!(v, "42,7 4869");
+        let owned = decode_owned(&v).unwrap();
+        assert_eq!(owned, Owned { pids: vec![42, 7], text: "Hi".into() });
+        assert!(owned.owned_by(7) && !owned.owned_by(8), "another agent in the pane does not own it");
+        assert_eq!(decode_owned("4869"), None, "no owner: never trusted");
+        assert_eq!(decode_owned(" 4869"), None);
+        assert_eq!(decode_owned("x,y 4869"), None);
+        assert_eq!(decode_owned("42 zz"), None);
+        assert_eq!(decode_owned(""), None);
+    }
+
+    #[test]
+    fn only_the_agent_that_wrote_a_value_gets_it() {
+        // Agent A (pids 42, 7) submitted a prompt, then quit without SessionEnd.
+        let prompt = decode_owned(&encode_owned(&[42, 7], "old prompt"));
+        assert_eq!(trusted(prompt.as_ref(), Some(42)).as_deref(), Some("old prompt"));
+        // Agent B (pid 99) now holds the mark: A's prompt is not reported as B's.
+        assert_eq!(trusted(prompt.as_ref(), Some(99)), None);
+        // No trusted mark at all: nothing.
+        assert_eq!(trusted(prompt.as_ref(), None), None);
+        assert_eq!(trusted(None, Some(42)), None);
+    }
+
+    #[test]
+    fn one_tmux_call_sets_the_mark_and_the_payload() {
+        let p = Payload { session_id: Some("s1".into()), transcript: None, prompt: Some("Hi".into()) };
+        let args = tmux_args("%3", Some(AgentState::Working), &[9, 8], &p);
+        assert_eq!(args.join(" "), "set -p -t %3 @tc_agent working 9,8 ; set -p -t %3 @tc_agent_session 9,8 7331 ; set -p -t %3 @tc_agent_prompt 9,8 4869");
+        // Nothing new in the payload: only the mark, as before.
+        assert_eq!(tmux_args("%3", Some(AgentState::Waiting), &[9], &Payload::default()).join(" "), "set -p -t %3 @tc_agent waiting 9");
+        // SessionEnd clears everything.
+        assert_eq!(tmux_args("%3", None, &[], &p).join(" "), "set -p -u -t %3 @tc_agent ; set -p -u -t %3 @tc_agent_session ; set -p -u -t %3 @tc_agent_transcript ; set -p -u -t %3 @tc_agent_prompt");
     }
 
     #[test]

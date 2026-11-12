@@ -564,6 +564,9 @@ mod tests {
             last_exit: None,
             last_duration_secs: None,
             tail: vec![],
+            agent_session_id: None,
+            agent_transcript: None,
+            last_prompt: None,
         });
         assert_eq!(c.title(), "python3 -m http.server");
         c.name = Some("API".into());
