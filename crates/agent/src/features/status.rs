@@ -33,9 +33,9 @@ pub struct Observation<'a> {
     /// CPU ticks used by the foreground since the last observation.
     pub cpu_delta: Option<u64>,
     pub last_line: Option<&'a str>,
-    pub hook_started: Option<u64>,
-    pub hook_ended: Option<u64>,
-    pub hook_exit: Option<i32>,
+    /// Exit code of the last finished command, from the shell hooks (see `timing`); `None`
+    /// while a new one runs or before any.
+    pub last_exit: Option<i32>,
     pub stall_secs: u64,
     /// State published by the hooks of the coding agent in the foreground (already checked
     /// to belong to that process).
@@ -74,8 +74,8 @@ pub fn classify(o: &Observation) -> TermStatus {
         }
         return TermStatus::Running;
     }
-    match last_command(o) {
-        (Some(code), _) if code != 0 => TermStatus::Exited(code),
+    match o.last_exit {
+        Some(code) if code != 0 => TermStatus::Exited(code),
         _ => TermStatus::Idle,
     }
 }
@@ -90,14 +90,6 @@ pub fn busy_run(since: Option<Instant>, now: Instant, quiet_secs: u64) -> (Optio
     }
     let since = since.unwrap_or(now);
     (Some(since), now.saturating_duration_since(since).as_secs())
-}
-
-/// Exit code and duration of the last finished command, from the hooks.
-pub fn last_command(o: &Observation) -> (Option<i32>, Option<u64>) {
-    match (o.hook_started, o.hook_ended) {
-        (Some(s), Some(e)) if e >= s => (o.hook_exit, Some(e - s)),
-        _ => (None, None),
-    }
 }
 
 pub fn looks_like_question(line: &str) -> bool {
@@ -195,14 +187,14 @@ mod tests {
     }
 
     #[test]
-    fn failed_command_until_next_one() {
-        let o = Observation { hook_started: Some(10), hook_ended: Some(45), hook_exit: Some(1), stall_secs: 60, ..Default::default() };
+    fn at_the_prompt_a_failed_last_command_shows() {
+        // Which command is the last one, across polls, is `timing`'s job.
+        let o = Observation { last_exit: Some(1), stall_secs: 60, ..Default::default() };
         assert_eq!(classify(&o), TermStatus::Exited(1));
-        assert_eq!(last_command(&o), (Some(1), Some(35)));
-        // New command started: started > ended.
-        let o = Observation { hook_started: Some(50), ..o };
+        let o = Observation { last_exit: None, ..o };
         assert_eq!(classify(&o), TermStatus::Idle);
-        assert_eq!(last_command(&o), (None, None));
+        let o = Observation { last_exit: Some(0), ..o };
+        assert_eq!(classify(&o), TermStatus::Idle);
     }
 
     #[test]
