@@ -9,7 +9,8 @@
 //! - `tcanvas-agent hooks [bash|zsh]`: prints the hooks without installing anything
 //! - `tcanvas-agent kill <session>`: stops every process of the session, then the session
 //!
-//! In server mode, it also pastes text the app sends into a session (`AgentCmd::SendText`).
+//! In server mode, it also pastes text the app sends into a session (`AgentCmd::SendText`), and
+//! keeps the task lists of the watched folders (`features::tasks`).
 
 mod features {
     pub mod agent_hooks;
@@ -22,6 +23,7 @@ mod features {
     pub mod send;
     pub mod serve;
     pub mod status;
+    pub mod tasks;
     pub mod tmux;
     pub mod worktrees;
 }

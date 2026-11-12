@@ -21,7 +21,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use protocol::{
     CreateWorktree, DEFAULT_WORKTREE_LOCATION, LocalBranch, LocationIssue, MAX_NAME_BYTES, Problem, Worktree, WorktreeBranch, WorktreePlan, folder_for_branch, parse_location, path_inside,
@@ -320,7 +320,7 @@ pub fn exclude_pattern(main: &Worktree, at: &Path, path: &Path) -> Option<String
     if text.is_empty() {
         return None;
     }
-    let status = Command::new("git").arg("-C").arg(at).args(["check-ignore", "-q", "--", &text]).env("GIT_OPTIONAL_LOCKS", "0").stdout(Stdio::null()).stderr(Stdio::null()).status().ok()?;
+    let status = super::changes::git_command(at).args(["check-ignore", "-q", "--", &text]).env("GIT_OPTIONAL_LOCKS", "0").stdout(Stdio::null()).stderr(Stdio::null()).status().ok()?;
     // 0: ignored, 1: not ignored, anything else: git could not tell.
     if status.code() != Some(1) {
         return None;

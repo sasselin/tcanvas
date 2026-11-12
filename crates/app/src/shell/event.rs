@@ -160,6 +160,8 @@ pub enum Event {
     Agent(AgentEvent),
     /// Opens or closes the "Changes" panel.
     ToggleChanges,
+    /// Opens or closes the "Tasks" panel.
+    ToggleTasks,
     /// Turns the "free grid" option on or off (inside a group: the group is the whole canvas).
     ToggleFreeGrid,
     /// Opens the "Changes" panel on this group.

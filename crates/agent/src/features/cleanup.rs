@@ -434,8 +434,8 @@ pub fn git_write(dir: &Path, args: &[&str]) -> Result<(), Problem> {
 }
 
 pub fn git_write_within(dir: &Path, args: &[&str], limit: Duration) -> Written {
-    let mut cmd = Command::new("git");
-    cmd.arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0").env("LC_ALL", "C");
+    let mut cmd = super::changes::git_command(dir);
+    cmd.args(args).env("GIT_TERMINAL_PROMPT", "0").env("LC_ALL", "C");
     run_within(cmd, limit)
 }
 

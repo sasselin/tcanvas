@@ -393,9 +393,25 @@ fn diff_event(key: String, file: String, result: Result<(String, bool), Problem>
     }
 }
 
+/// Variables that would make git look somewhere else than the folder it is run in: removed from
+/// every git call of the agent, so a stray one in its environment never makes a read, or a write,
+/// target another repository.
+pub const GIT_REDIRECTS: [&str; 5] = ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM"];
+
+/// `git -C <dir>`, with `GIT_REDIRECTS` removed from its environment. Every git call of the agent
+/// starts here.
+pub fn git_command(dir: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(dir);
+    for var in GIT_REDIRECTS {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
 fn git(dir: &Path, args: &[&str]) -> Option<Output> {
     // No optional lock on the index: never get in the way of the user's (or Claude's) git.
-    Command::new("git").arg("-C").arg(dir).args(args).env("GIT_OPTIONAL_LOCKS", "0").output().ok()
+    git_command(dir).args(args).env("GIT_OPTIONAL_LOCKS", "0").output().ok()
 }
 
 pub fn git_ok(dir: &Path, args: &[&str]) -> Option<String> {

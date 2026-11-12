@@ -17,10 +17,13 @@ pub enum Shortcut {
     CloseCard,
     /// The "Keyboard shortcuts" window.
     Help,
+    /// The "Tasks" panel.
+    Tasks,
 }
 
 /// Ctrl+Shift+<letter> shortcuts. Digits (projects, fit all) are handled apart: physical key.
-pub const GLOBAL: &[(Shortcut, Key)] = &[(Shortcut::Jump, Key::P), (Shortcut::NewCard, Key::N), (Shortcut::Search, Key::F), (Shortcut::CloseCard, Key::W), (Shortcut::Help, Key::K)];
+pub const GLOBAL: &[(Shortcut, Key)] =
+    &[(Shortcut::Jump, Key::P), (Shortcut::NewCard, Key::N), (Shortcut::Search, Key::F), (Shortcut::CloseCard, Key::W), (Shortcut::Help, Key::K), (Shortcut::Tasks, Key::T)];
 
 const DIGITS: [Key; 10] = [Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
 
@@ -132,7 +135,14 @@ pub fn action(tx: &Texts, s: Shortcut) -> &'static str {
         Shortcut::Project(_) => tx.key_project,
         Shortcut::CloseCard => tx.key_close_card,
         Shortcut::Help => tx.key_help,
+        Shortcut::Tasks => tx.key_tasks,
     }
+}
+
+/// The combo of the "Tasks" panel, shown in its button's hint.
+pub fn tasks_combo() -> Combo {
+    let key = GLOBAL.iter().find(|(s, _)| *s == Shortcut::Tasks).map_or(Key::T, |(_, k)| *k);
+    Combo::ctrl_shift(Input::Key(key))
 }
 
 /// The combo of the "Keyboard shortcuts" window, shown next to its entries.
@@ -203,6 +213,7 @@ mod tests {
         assert_eq!(shortcut_of(&key(Key::K, cs)), Some(Shortcut::Help));
         assert_eq!(shortcut_of(&key(Key::J, cs)), None);
         assert_eq!(shortcut_of(&key(Key::N, cs)), Some(Shortcut::NewCard));
+        assert_eq!(shortcut_of(&key(Key::T, cs)), Some(Shortcut::Tasks));
         assert_eq!(shortcut_of(&key(Key::P, Modifiers::CTRL)), None, "Ctrl+P stays with the shell");
         assert_eq!(shortcut_of(&key(Key::P, cs | Modifiers::ALT)), None);
         assert_eq!(shortcut_of(&egui::Event::Text("K".into())), None);
