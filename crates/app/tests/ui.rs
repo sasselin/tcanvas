@@ -469,7 +469,7 @@ fn missing_tmux_is_shown_in_the_status_bar() {
 
 #[test]
 fn missing_shell_hooks_can_be_installed_from_the_status_bar() {
-    let hello = |hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true });
+    let hello = |hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true, task_hooks: None });
     let installs = |h: &Harness<'_, App>| h.state().agent_sent().iter().filter(|c| **c == protocol::AgentCmd::InstallHooks).count();
     for (lang, label, button) in [(Lang::Fr, "⚠ hooks", "Installer"), (Lang::En, "⚠ hooks", "Install")] {
         let dir = temp_dir("hooks");
@@ -2779,7 +2779,7 @@ fn group_with_messages(h: &mut Harness<'_, App>, messages: &[(&str, &str, bool)]
     let id = add_card(h, "srv", pos2(40.0, 40.0));
     let session = format!("tc_{id}");
     h.state_mut().dispatch(vec![
-        Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true }),
+        Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None }),
         Event::Agent(AgentEvent::Session(SessionInfo {
             session,
             status: TermStatus::Idle,
@@ -3687,7 +3687,7 @@ fn shop_tasks() -> Vec<protocol::Task> {
 }
 
 fn agent_hello(h: &mut Harness<'_, App>) {
-    let hello = Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true });
+    let hello = Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None });
     h.state_mut().dispatch(vec![hello]);
 }
 
@@ -4078,8 +4078,55 @@ fn the_tasks_panel_in_english() {
     h.key_press(Key::Escape);
     steps(&mut h, 2);
     // An older agent: said so.
-    let hello = Event::Agent(AgentEvent::Hello { version: "0.1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: false });
+    let hello = Event::Agent(AgentEvent::Hello { version: "0.1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: false, task_hooks: None });
     h.state_mut().dispatch(vec![hello]);
     steps(&mut h, 3);
     assert!(h.query_by_label("The agent is too old to keep task lists: restart tcanvas to update it.").is_some());
+}
+
+#[test]
+fn coding_agents_get_the_tasks_only_once_enabled_from_the_panel() {
+    let sets = |h: &Harness<'_, App>| h.state().agent_sent().iter().filter_map(|c| if let protocol::AgentCmd::SetTaskHooks { enabled } = c { Some(*enabled) } else { None }).collect::<Vec<_>>();
+    let hello = |task_hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks });
+    for (lang, missing, on, enable, disable) in [
+        (Lang::Fr, "Les agents de code ne voient pas encore ces tâches.", "Les agents de code voient ces tâches.", "Activer", "Désactiver"),
+        (Lang::En, "Coding agents cannot see these tasks yet.", "Coding agents see these tasks.", "Enable", "Disable"),
+    ] {
+        let dir = temp_dir("task-hooks");
+        let mut h = harness_in(&dir, lang);
+        tasks_group(&mut h);
+        h.state_mut().dispatch(vec![Event::ToggleTasks, task_board_with("p-shop", shop_tasks(), vec![])]);
+        steps(&mut h, 3);
+        assert!(h.query_by_label(missing).is_none() && h.query_by_label(on).is_none(), "an older agent: nothing to offer");
+        for nothing in [Some(protocol::TaskHooks::Unsupported), None] {
+            h.state_mut().dispatch(vec![hello(nothing), task_board_with("p-shop", shop_tasks(), vec![])]);
+            steps(&mut h, 3);
+            assert!(h.query_by_label(missing).is_none() && h.query_by_label(enable).is_none());
+        }
+
+        h.state_mut().dispatch(vec![hello(Some(protocol::TaskHooks::Missing)), task_board_with("p-shop", shop_tasks(), vec![])]);
+        steps(&mut h, 3);
+        h.get_by_label(missing);
+        h.get_by_label(enable).click();
+        steps(&mut h, 2);
+        h.get_by_label(enable).click();
+        steps(&mut h, 2);
+        assert_eq!(sets(&h), vec![true], "once, disabled while the agent works");
+        // A partial failure is shown, with the state the agent reports.
+        let problem = Some(protocol::Problem::HooksFailed { detail: "Codex: bad JSON".into() });
+        h.state_mut().dispatch(vec![Event::Agent(AgentEvent::TaskHooksChanged { task_hooks: protocol::TaskHooks::Missing, problem })]);
+        steps(&mut h, 2);
+        assert!(h.query_by_label_contains("Codex: bad JSON").is_some());
+        h.get_by_label(enable).click();
+        steps(&mut h, 2);
+        h.state_mut().dispatch(vec![Event::Agent(AgentEvent::TaskHooksChanged { task_hooks: protocol::TaskHooks::Installed, problem: None })]);
+        steps(&mut h, 2);
+        h.get_by_label(on);
+        assert!(h.query_by_label_contains("Codex: bad JSON").is_none());
+        h.get_by_label(disable).click();
+        steps(&mut h, 2);
+        assert_eq!(sets(&h), vec![true, true, false]);
+        // The status bar's hooks indicator is not concerned.
+        assert!(h.query_by_label("⚠ hooks").is_none());
+    }
 }

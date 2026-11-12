@@ -754,6 +754,19 @@ pub fn keep_reason(wt: &Worktree, usage: &Usage) -> Option<KeepReason> {
     Some(reason)
 }
 
+/// The task integration for coding agents, separate from the status hooks and opt-in: a session
+/// start hook that prints the project's open tasks (`tcanvas-agent task prime`), and the
+/// `tcanvas-tasks` skill file for the agents that read skills.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TaskHooks {
+    /// Every coding agent found has it (in whatever form the user left it).
+    Installed,
+    /// At least one coding agent found lacks it: `AgentCmd::SetTaskHooks` adds it.
+    Missing,
+    /// No coding agent found: nothing to offer.
+    Unsupported,
+}
+
 /// Shell hooks (exit code and duration of each command) for the user's login shell.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Hooks {
@@ -1397,6 +1410,9 @@ pub enum AgentEvent {
         /// The agent keeps task lists (`AgentCmd::WatchTasks`, `EditTasks`).
         #[serde(default)]
         tasks: bool,
+        /// The task integration's state (`None` from older agents: they cannot install it).
+        #[serde(default)]
+        task_hooks: Option<TaskHooks>,
     },
     /// A subscribed task list, on subscribing and whenever it changes.
     Tasks(Box<TaskBoard>),
@@ -1421,6 +1437,13 @@ pub enum AgentEvent {
     /// Hooks state after `AgentCmd::InstallHooks`.
     HooksChanged {
         hooks: Hooks,
+    },
+    /// The task integration's state after `AgentCmd::SetTaskHooks`; `problem`
+    /// (`Problem::HooksFailed`): what failed, per agent, while the others were done.
+    TaskHooksChanged {
+        task_hooks: TaskHooks,
+        #[serde(default)]
+        problem: Option<Problem>,
     },
     Session(SessionInfo),
     Gone {
@@ -1533,6 +1556,11 @@ pub enum AgentCmd {
     /// Install the hooks for the user's shell; response: `AgentEvent::HooksChanged`, or
     /// `AgentEvent::Error` with `Problem::HooksFailed`.
     InstallHooks,
+    /// Installs (`enabled`) or removes the task integration (`TaskHooks`); response:
+    /// `AgentEvent::TaskHooksChanged`.
+    SetTaskHooks {
+        enabled: bool,
+    },
     /// Cleans up the repository of a watched folder; response: `AgentEvent::Cleaned`. The agent
     /// checks the safe-to-remove rule again on its own data before acting.
     Cleanup {
@@ -2201,13 +2229,23 @@ mod tests {
     #[test]
     fn roundtrip_hooks() {
         for hooks in [Hooks::Installed, Hooks::Missing, Hooks::Unsupported] {
-            let ev = AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true };
+            let ev = AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true, task_hooks: Some(TaskHooks::Missing) };
             assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
             let ev = AgentEvent::HooksChanged { hooks };
             assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
         }
         let ev = AgentEvent::Error { problem: Problem::HooksFailed { detail: "read-only".into() } };
         assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        for task_hooks in [TaskHooks::Installed, TaskHooks::Missing, TaskHooks::Unsupported] {
+            let ev = AgentEvent::TaskHooksChanged { task_hooks, problem: Some(Problem::HooksFailed { detail: "Codex: bad JSON".into() }) };
+            assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        }
+        for enabled in [true, false] {
+            assert_eq!(decode::<AgentCmd>(&encode(&AgentCmd::SetTaskHooks { enabled })).unwrap(), AgentCmd::SetTaskHooks { enabled });
+        }
+        // An older agent's hello: no task integration to offer.
+        let old = r#"{"type":"Hello","version":"0.1","hooks":"Installed","send_text":true,"tasks":true}"#;
+        assert!(matches!(decode::<AgentEvent>(old).unwrap(), AgentEvent::Hello { task_hooks: None, .. }));
     }
 
     #[test]

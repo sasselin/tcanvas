@@ -10,6 +10,13 @@
 //!   valid "no decision" for every agent) and always exits 0: it can never block an agent.
 //! - Adapters: `install` writes one hook entry per useful event into each detected agent's
 //!   config, merged with what is already there; `uninstall` removes only those entries.
+//! - Task integration, opt-in and separate from the status hooks (`Part::Tasks`): for the agents
+//!   whose session start hook output reaches the model, an entry running
+//!   `tcanvas-agent task prime --hook <form>` (the open tasks, see `task_cli`) in the output form
+//!   that agent reads, and for the agents that read skills from a folder the `tcanvas-tasks`
+//!   skill (`task_skill`). An entry the user changed (a matcher, a timeout) is kept and counts;
+//!   an edited skill is never overwritten nor removed.
+//! - Each agent is handled on its own: a settings file that does not read stops that agent only.
 
 use std::fs;
 use std::io::{self, Read, Write};
@@ -18,7 +25,11 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use protocol::TaskHooks;
 use serde_json::{Map, Value, json};
+
+use super::task_cli::HookForm;
+use super::task_skill::{self, SkillChange, SkillState};
 
 /// What an agent is doing, as published by its hooks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -129,7 +140,7 @@ pub fn payload_of(event: &str, value: Option<&Value>) -> Payload {
 
 /// Control characters and Unicode bidi controls (marks, embeddings, overrides, isolates):
 /// invisible, and able to reorder the text drawn around them.
-fn is_hidden_char(c: char) -> bool {
+pub fn is_hidden_char(c: char) -> bool {
     c.is_control() || matches!(c, '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
 }
 
@@ -291,6 +302,12 @@ pub struct Adapter {
     format: Format,
     /// (event, matcher)
     events: &'static [(&'static str, Option<&'static str>)],
+    /// The session start event whose output the model reads, and the form it reads it in: runs
+    /// `task prime`. `None`: no such hook known for sure.
+    session_start: Option<(&'static str, HookForm)>,
+    /// The agent's skills folder, relative to the home directory (the `tcanvas-tasks` skill goes
+    /// in a folder of that name in it). `None`: none known for sure.
+    skills: Option<&'static str>,
 }
 
 /// Claude Code notifications that mean "the user must act"; others (auth, quota...) do not.
@@ -303,6 +320,9 @@ pub const ADAPTERS: &[Adapter] = &[
         file: ".claude/settings.json",
         format: Format::Grouped { timeout: 10 },
         events: &[("UserPromptSubmit", None), ("PostToolUse", None), ("PermissionRequest", None), ("Notification", Some(CLAUDE_ATTENTION)), ("Stop", None), ("SessionEnd", None)],
+        // Plain stdout of a `SessionStart` hook is added to the context.
+        session_start: Some(("SessionStart", HookForm::Plain)),
+        skills: Some(".claude/skills"),
     },
     Adapter {
         name: "Codex",
@@ -310,6 +330,10 @@ pub const ADAPTERS: &[Adapter] = &[
         file: ".codex/hooks.json",
         format: Format::Grouped { timeout: 10 },
         events: &[("UserPromptSubmit", None), ("PostToolUse", None), ("PermissionRequest", None), ("Stop", None), ("SessionEnd", None)],
+        // Plain stdout of a `SessionStart` hook is added as developer context; user skills are
+        // read from `~/.agents/skills`.
+        session_start: Some(("SessionStart", HookForm::Plain)),
+        skills: Some(".agents/skills"),
     },
     Adapter {
         name: "Gemini CLI",
@@ -318,6 +342,9 @@ pub const ADAPTERS: &[Adapter] = &[
         // Milliseconds for Gemini.
         format: Format::Grouped { timeout: 10_000 },
         events: &[("BeforeAgent", None), ("AfterTool", None), ("Notification", None), ("AfterAgent", None), ("SessionEnd", None)],
+        // Hook stdout must be JSON: `hookSpecificOutput.additionalContext` reaches the model.
+        session_start: Some(("SessionStart", HookForm::Json)),
+        skills: None,
     },
     Adapter {
         name: "Qwen Code",
@@ -325,6 +352,9 @@ pub const ADAPTERS: &[Adapter] = &[
         file: ".qwen/settings.json",
         format: Format::Grouped { timeout: 10 },
         events: &[("UserPromptSubmit", None), ("PostToolUse", None), ("PermissionRequest", None), ("Notification", None), ("Stop", None), ("SessionEnd", None)],
+        // Plain stdout of a `SessionStart` hook is added to the context.
+        session_start: Some(("SessionStart", HookForm::Plain)),
+        skills: None,
     },
     Adapter {
         name: "Copilot CLI",
@@ -332,6 +362,9 @@ pub const ADAPTERS: &[Adapter] = &[
         file: ".copilot/hooks/tcanvas.json",
         format: Format::Flat,
         events: &[("userPromptSubmitted", None), ("postToolUse", None), ("permissionRequest", None), ("notification", None), ("agentStop", None), ("sessionEnd", None)],
+        // Only a top-level `additionalContext` of the JSON output is used.
+        session_start: Some(("sessionStart", HookForm::JsonFlat)),
+        skills: None,
     },
 ];
 
@@ -342,13 +375,34 @@ pub fn hook_command(exe: &str, event: &str) -> String {
     format!("[ -x {q} ] && {q} hook {event}; true")
 }
 
+/// Shell command a session start hook runs: the open tasks, in the form the agent reads.
+pub fn prime_command(exe: &str, form: HookForm) -> String {
+    let q = shell_quote(exe);
+    format!("[ -x {q} ] && {q} task prime --hook {}; true", form.arg())
+}
+
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Our entries are recognized by their command, whatever path the binary had then.
-fn is_ours(command: &str) -> bool {
-    command.contains("tcanvas-agent") && command.contains(" hook ")
+/// Which of our entries: the status hooks (`hook <event>`), or the task integration (the
+/// session start entry running `task prime`, and the skill), installed separately.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Part {
+    Status,
+    Tasks,
+}
+
+impl Part {
+    /// Our entries are recognized by their command, whatever path the binary had then and
+    /// whatever the user added around them.
+    fn owns(self, command: &str) -> bool {
+        command.contains("tcanvas-agent")
+            && match self {
+                Part::Status => command.contains(" hook "),
+                Part::Tasks => command.contains(" task prime"),
+            }
+    }
 }
 
 fn entry_command(entry: &Value) -> Option<&str> {
@@ -360,8 +414,7 @@ impl Adapter {
         home.join(self.dir).is_dir()
     }
 
-    fn our_entry(&self, exe: &str, event: &str, matcher: Option<&str>) -> Value {
-        let command = hook_command(exe, event);
+    fn our_entry(&self, command: String, matcher: Option<&str>) -> Value {
         match self.format {
             Format::Grouped { timeout } => {
                 let mut group = Map::new();
@@ -375,8 +428,18 @@ impl Adapter {
         }
     }
 
-    /// Removes our entries from `config`; returns whether anything changed.
-    fn strip(&self, config: &mut Value) -> bool {
+    /// The hook entries of `config` (inside their groups for the grouped format).
+    fn entries<'a>(&self, config: &'a Value) -> Vec<&'a Value> {
+        let lists = config.get("hooks").and_then(Value::as_object).into_iter().flat_map(|h| h.values()).filter_map(Value::as_array).flatten();
+        match self.format {
+            Format::Grouped { .. } => lists.filter_map(|g| g.get("hooks").and_then(Value::as_array)).flatten().collect(),
+            Format::Flat => lists.collect(),
+        }
+    }
+
+    /// Removes the entries of `part` (or of both) from `config`; returns whether anything changed.
+    fn strip(&self, config: &mut Value, part: Option<Part>) -> bool {
+        let ours = |h: &Value| entry_command(h).is_some_and(|c| part.map_or(Part::Status.owns(c) || Part::Tasks.owns(c), |p| p.owns(c)));
         let Some(hooks) = config.get_mut("hooks").and_then(Value::as_object_mut) else { return false };
         let mut changed = false;
         for list in hooks.values_mut().filter_map(Value::as_array_mut) {
@@ -386,13 +449,13 @@ impl Adapter {
                     for group in list.iter_mut() {
                         if let Some(inner) = group.get_mut("hooks").and_then(Value::as_array_mut) {
                             let n = inner.len();
-                            inner.retain(|h| !entry_command(h).is_some_and(is_ours));
+                            inner.retain(|h| !ours(h));
                             changed |= inner.len() != n;
                         }
                     }
                     list.retain(|g| !g.get("hooks").and_then(Value::as_array).is_some_and(Vec::is_empty));
                 }
-                Format::Flat => list.retain(|h| !entry_command(h).is_some_and(is_ours)),
+                Format::Flat => list.retain(|h| !ours(h)),
             }
             changed |= list.len() != before;
         }
@@ -403,9 +466,9 @@ impl Adapter {
         changed
     }
 
-    /// `config` with exactly our entries for `exe`.
+    /// `config` with exactly our status entries for `exe` (the task entries left as they are).
     fn merged(&self, mut config: Value, exe: &str) -> Value {
-        self.strip(&mut config);
+        self.strip(&mut config, Some(Part::Status));
         if self.format == Format::Flat {
             config.as_object_mut().expect("object").entry("version").or_insert(json!(1));
         }
@@ -413,12 +476,44 @@ impl Adapter {
         for (event, matcher) in self.events {
             let list = hooks.as_object_mut().expect("hooks is an object").entry(*event).or_insert_with(|| json!([]));
             if let Some(list) = list.as_array_mut() {
-                list.push(self.our_entry(exe, event, *matcher));
+                list.push(self.our_entry(hook_command(exe, event), *matcher));
             }
         }
         config
     }
 
+    /// `config` with a session start entry: kept as it is when there is one in any form (a
+    /// matcher or fields the user added stay), added otherwise.
+    fn with_tasks(&self, mut config: Value, exe: &str) -> Value {
+        let Some((event, form)) = self.session_start else { return config };
+        if self.has_task_entry(&config) {
+            return config;
+        }
+        if self.format == Format::Flat {
+            config.as_object_mut().expect("object").entry("version").or_insert(json!(1));
+        }
+        let hooks = config.as_object_mut().expect("object").entry("hooks").or_insert_with(|| json!({}));
+        if let Some(list) = hooks.as_object_mut().and_then(|h| h.entry(event).or_insert_with(|| json!([])).as_array_mut()) {
+            list.push(self.our_entry(prime_command(exe, form), None));
+        }
+        config
+    }
+
+    /// None of our entries: the user's own settings, worth a backup before our first write.
+    fn pristine(&self, config: &Value) -> bool {
+        !self.entries(config).into_iter().any(|e| entry_command(e).is_some_and(|c| Part::Status.owns(c) || Part::Tasks.owns(c)))
+    }
+
+    fn has_task_entry(&self, config: &Value) -> bool {
+        self.entries(config).into_iter().any(|e| entry_command(e).is_some_and(|c| Part::Tasks.owns(c)))
+    }
+
+    /// The `tcanvas-tasks` skill's folder, if this agent reads skills.
+    fn skill_dir(&self, home: &Path) -> Option<PathBuf> {
+        self.skills.map(|s| home.join(s).join(task_skill::SKILL_NAME))
+    }
+
+    /// Our status hooks are all there for `exe`.
     pub fn installed_in(&self, home: &Path, exe: &str) -> bool {
         match read_config(&home.join(self.file)) {
             Ok(Some(config)) => self.merged(config.clone(), exe) == config,
@@ -426,31 +521,94 @@ impl Adapter {
         }
     }
 
-    pub fn install_in(&self, home: &Path, exe: &str) -> io::Result<bool> {
+    /// The task integration is there: a session start entry in any form, and the skill
+    /// (edited or not) for the agents that read skills.
+    pub fn tasks_installed_in(&self, home: &Path) -> bool {
+        let entry = self.session_start.is_none() || matches!(read_config(&home.join(self.file)), Ok(Some(c)) if self.has_task_entry(&c));
+        entry && self.skill_dir(home).is_none_or(|d| task_skill::state_in(&d, "") != SkillState::Missing)
+    }
+
+    /// Writes our status entries.
+    pub fn install_in(&self, home: &Path, exe: &str) -> io::Result<Change> {
         let path = home.join(self.file);
         let config = read_config(&path)?.unwrap_or_else(|| json!({}));
         let merged = self.merged(config.clone(), exe);
-        if merged == config {
-            return Ok(false);
+        let settings = merged != config;
+        if settings {
+            write_config(&path, &merged, self.pristine(&config))?;
         }
-        write_config(&path, &merged)?;
-        Ok(true)
+        Ok(Change { agent: self.name, settings, skill: None })
     }
 
-    pub fn uninstall_in(&self, home: &Path) -> io::Result<bool> {
+    /// Writes the task integration: the session start entry (if none is there) and the skill.
+    pub fn install_tasks_in(&self, home: &Path, exe: &str) -> io::Result<Change> {
         let path = home.join(self.file);
-        let Some(mut config) = read_config(&path)? else { return Ok(false) };
-        if !self.strip(&mut config) {
-            return Ok(false);
+        let config = read_config(&path)?.unwrap_or_else(|| json!({}));
+        let merged = self.with_tasks(config.clone(), exe);
+        let settings = merged != config;
+        if settings {
+            write_config(&path, &merged, self.pristine(&config))?;
         }
-        if self.format == Format::Flat && config.get("hooks").is_none() {
-            fs::remove_file(&path)?;
-        } else {
-            write_config(&path, &config)?;
+        let skill = self.skill_dir(home).map(|d| task_skill::install_in(&d, exe)).transpose()?;
+        Ok(Change { agent: self.name, settings, skill })
+    }
+
+    /// Removes our entries of `part` (or all of ours), and with the task integration the skill
+    /// unless it was edited. The settings are read first: a file that does not read stops here,
+    /// with nothing removed. A settings file that only we wrote (no backup of an original) and
+    /// that is left empty is removed, and so are the skills folders left empty.
+    pub fn uninstall_in(&self, home: &Path, part: Option<Part>) -> io::Result<Change> {
+        let path = home.join(self.file);
+        let mut settings = false;
+        if let Some(mut config) = read_config(&path)?
+            && self.strip(&mut config, part)
+        {
+            let ours_alone = config == json!({}) && !backup_path(&fs::canonicalize(&path).unwrap_or_else(|_| path.clone())).exists();
+            let empty_flat = self.format == Format::Flat && config.get("hooks").is_none();
+            if ours_alone || empty_flat {
+                fs::remove_file(&path)?;
+            } else {
+                write_config(&path, &config, false)?;
+            }
+            settings = true;
         }
-        Ok(true)
+        let skill = match (part, self.skill_dir(home)) {
+            (Some(Part::Status), _) | (_, None) => None,
+            (_, Some(dir)) => {
+                let change = task_skill::uninstall_in(&dir)?;
+                // The skills folders we may have created, if nothing else is in them.
+                let mut p = dir.parent().map(Path::to_path_buf);
+                while let Some(d) = p.filter(|d| d.starts_with(home) && *d != home && *d != home.join(self.dir)) {
+                    if fs::remove_dir(&d).is_err() {
+                        break;
+                    }
+                    p = d.parent().map(Path::to_path_buf);
+                }
+                Some(change)
+            }
+        };
+        Ok(Change { agent: self.name, settings, skill })
     }
 }
+
+/// What an install or an uninstall did for one agent.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Change {
+    pub agent: &'static str,
+    /// Its hooks settings were written.
+    pub settings: bool,
+    /// What happened to its skill (`None`: not concerned, or no skills folder).
+    pub skill: Option<SkillChange>,
+}
+
+impl Change {
+    pub fn any(&self) -> bool {
+        self.settings || self.skill == Some(SkillChange::Changed)
+    }
+}
+
+/// One agent's outcome: each agent is handled on its own, a failure stops only that one.
+pub type Outcome = (&'static str, io::Result<Change>);
 
 /// `None` if the file does not exist; an error if it is not a JSON object (never overwritten).
 fn read_config(path: &Path) -> io::Result<Option<Value>> {
@@ -469,21 +627,32 @@ fn read_config(path: &Path) -> io::Result<Option<Value>> {
     }
 }
 
-/// Atomic write through the symlink (dotfile managers), with a one-time backup.
-fn write_config(path: &Path, config: &Value) -> io::Result<()> {
+/// Atomic write through the symlink (dotfile managers), keeping the file's permissions (it may
+/// hold secrets), with a one-time backup of the original when installing (`backup`).
+fn write_config(path: &Path, config: &Value, backup: bool) -> io::Result<()> {
     let target = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if let Some(dir) = target.parent() {
         fs::create_dir_all(dir)?;
     }
-    let backup = backup_path(&target);
-    if target.exists() && !backup.exists() {
-        fs::copy(&target, &backup)?;
+    let mode = fs::metadata(&target).ok().map(|m| m.permissions());
+    let saved = backup_path(&target);
+    if backup && target.exists() && !saved.exists() {
+        fs::copy(&target, &saved)?;
     }
     let tmp = target.with_extension("tcanvas-tmp");
     let mut text = serde_json::to_string_pretty(config).map_err(io::Error::other)?;
     text.push('\n');
-    fs::write(&tmp, text)?;
-    fs::rename(&tmp, &target)
+    let written = (|| {
+        fs::write(&tmp, text)?;
+        if let Some(mode) = mode {
+            fs::set_permissions(&tmp, mode)?;
+        }
+        fs::rename(&tmp, &target)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written
 }
 
 fn backup_path(path: &Path) -> PathBuf {
@@ -501,7 +670,7 @@ pub fn detected(home: &Path) -> impl Iterator<Item = &'static Adapter> + '_ {
     ADAPTERS.iter().filter(move |a| a.detected(home))
 }
 
-/// Every detected agent has our hooks for `exe`. `None` if no agent is detected.
+/// Every detected agent has our status hooks for `exe`. `None` if no agent is detected.
 pub fn all_installed(home: &Path, exe: &str) -> Option<bool> {
     let mut any = false;
     for a in detected(home) {
@@ -513,25 +682,39 @@ pub fn all_installed(home: &Path, exe: &str) -> Option<bool> {
     any.then_some(true)
 }
 
-/// Installs every detected agent's hooks; names of the agents whose config changed.
-pub fn install_all(home: &Path, exe: &str) -> io::Result<Vec<&'static str>> {
-    let mut changed = Vec::new();
-    for a in detected(home) {
-        if a.install_in(home, exe)? {
-            changed.push(a.name);
-        }
+/// The task integration's state: installed when every detected agent has it.
+pub fn tasks_state(home: &Path) -> TaskHooks {
+    let mut found = detected(home).peekable();
+    if found.peek().is_none() {
+        return TaskHooks::Unsupported;
     }
-    Ok(changed)
+    if found.all(|a| a.tasks_installed_in(home)) { TaskHooks::Installed } else { TaskHooks::Missing }
 }
 
-pub fn uninstall_all(home: &Path) -> io::Result<Vec<&'static str>> {
-    let mut changed = Vec::new();
-    for a in ADAPTERS {
-        if a.uninstall_in(home)? {
-            changed.push(a.name);
-        }
-    }
-    Ok(changed)
+/// Installs every detected agent's status hooks.
+pub fn install_all(home: &Path, exe: &str) -> Vec<Outcome> {
+    detected(home).map(|a| (a.name, a.install_in(home, exe))).collect()
+}
+
+/// Installs every detected agent's task integration.
+pub fn install_tasks_all(home: &Path, exe: &str) -> Vec<Outcome> {
+    detected(home).map(|a| (a.name, a.install_tasks_in(home, exe))).collect()
+}
+
+/// Removes ours (`part`, or everything) from every agent, detected or not.
+pub fn uninstall_all(home: &Path, part: Option<Part>) -> Vec<Outcome> {
+    ADAPTERS.iter().map(|a| (a.name, a.uninstall_in(home, part))).collect()
+}
+
+/// Names of the agents where something changed.
+pub fn changed(outcomes: &[Outcome]) -> Vec<&'static str> {
+    outcomes.iter().filter(|(_, r)| r.as_ref().is_ok_and(Change::any)).map(|(name, _)| *name).collect()
+}
+
+/// The failures, one per agent (`Claude Code: <error>; Codex: <error>`); `None` when none.
+pub fn failures(outcomes: &[Outcome]) -> Option<String> {
+    let failed: Vec<String> = outcomes.iter().filter_map(|(name, r)| r.as_ref().err().map(|e| format!("{name}: {e}"))).collect();
+    (!failed.is_empty()).then(|| failed.join("; "))
 }
 
 #[cfg(test)]
@@ -722,8 +905,18 @@ mod tests {
     fn hook_command_is_guarded_and_quoted() {
         assert_eq!(hook_command(EXE, "Stop"), "[ -x '/home/me/.local/bin/tcanvas-agent' ] && '/home/me/.local/bin/tcanvas-agent' hook Stop; true");
         assert_eq!(shell_quote("/a b/it's"), r"'/a b/it'\''s'");
-        assert!(is_ours(&hook_command(EXE, "Stop")));
-        assert!(!is_ours("notify-send done"));
+        assert!(Part::Status.owns(&hook_command(EXE, "Stop")) && !Part::Tasks.owns(&hook_command(EXE, "Stop")));
+        assert!(Part::Tasks.owns(&prime_command(EXE, HookForm::Plain)) && !Part::Status.owns(&prime_command(EXE, HookForm::Plain)));
+        assert!(!Part::Status.owns("notify-send done"));
+        assert!(!Part::Tasks.owns("my-script task prime"), "not ours without our binary");
+    }
+
+    fn ok(outcomes: Vec<Outcome>) -> Vec<Change> {
+        outcomes.into_iter().map(|(_, r)| r.unwrap()).collect()
+    }
+
+    fn read_json(path: &Path) -> Value {
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
     }
 
     #[test]
@@ -734,9 +927,9 @@ mod tests {
         fs::write(home.join(".claude/settings.json"), user).unwrap();
         assert_eq!(all_installed(&home, EXE), Some(false));
 
-        assert_eq!(install_all(&home, EXE).unwrap(), vec!["Claude Code"]);
+        assert_eq!(changed(&install_all(&home, EXE)), vec!["Claude Code"]);
         assert_eq!(all_installed(&home, EXE), Some(true));
-        let v: Value = serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap()).unwrap();
+        let v = read_json(&home.join(".claude/settings.json"));
         assert_eq!(v["model"], "opus");
         let keys: Vec<&String> = v.as_object().unwrap().keys().collect();
         assert_eq!(keys, ["model", "hooks", "theme"], "key order kept");
@@ -745,28 +938,48 @@ mod tests {
         assert_eq!(stop[0]["hooks"][0]["command"], "notify-send done");
         assert_eq!(stop[1]["hooks"][0]["command"], hook_command(EXE, "Stop"));
         assert_eq!(v["hooks"]["Notification"][0]["matcher"], CLAUDE_ATTENTION);
+        assert!(v["hooks"].get("SessionStart").is_none(), "the task integration is separate");
+        assert!(!home.join(".claude/skills").exists());
         assert_eq!(fs::read_to_string(home.join(".claude/settings.json.tcanvas.bak")).unwrap(), user, "backup of the original");
 
-        assert!(install_all(&home, EXE).unwrap().is_empty(), "second install: no change");
+        assert!(changed(&install_all(&home, EXE)).is_empty(), "second install: no change");
         // A new binary path replaces our entries instead of adding more.
         assert_eq!(all_installed(&home, "/opt/tcanvas/tcanvas-agent"), Some(false));
-        install_all(&home, "/opt/tcanvas/tcanvas-agent").unwrap();
-        let v: Value = serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap()).unwrap();
-        assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2);
+        ok(install_all(&home, "/opt/tcanvas/tcanvas-agent"));
+        assert_eq!(read_json(&home.join(".claude/settings.json"))["hooks"]["Stop"].as_array().unwrap().len(), 2);
 
-        assert_eq!(uninstall_all(&home).unwrap(), vec!["Claude Code"]);
-        let v: Value = serde_json::from_str(&fs::read_to_string(home.join(".claude/settings.json")).unwrap()).unwrap();
-        assert_eq!(v, serde_json::from_str::<Value>(user).unwrap(), "uninstall gives the user's settings back");
+        assert_eq!(changed(&uninstall_all(&home, None)), vec!["Claude Code"]);
+        assert_eq!(read_json(&home.join(".claude/settings.json")), serde_json::from_str::<Value>(user).unwrap(), "uninstall gives the user's settings back");
         let _ = fs::remove_dir_all(home);
     }
 
     #[test]
-    fn invalid_json_is_never_overwritten() {
+    fn one_bad_settings_file_stops_only_its_agent() {
         let home = temp_home("invalid");
-        fs::create_dir_all(home.join(".claude")).unwrap();
+        for dir in [".claude", ".codex", ".copilot"] {
+            fs::create_dir_all(home.join(dir)).unwrap();
+        }
         fs::write(home.join(".claude/settings.json"), "{ oops").unwrap();
-        assert!(install_all(&home, EXE).is_err());
-        assert_eq!(fs::read_to_string(home.join(".claude/settings.json")).unwrap(), "{ oops");
+        let done = install_all(&home, EXE);
+        assert!(done[0].1.is_err() && done[1].1.is_ok() && done[2].1.is_ok(), "{done:?}");
+        assert_eq!(changed(&done), vec!["Codex", "Copilot CLI"]);
+        assert!(failures(&done).unwrap().starts_with("Claude Code: "), "{:?}", failures(&done));
+        assert_eq!(fs::read_to_string(home.join(".claude/settings.json")).unwrap(), "{ oops", "never overwritten");
+        let done = install_tasks_all(&home, EXE);
+        assert!(done[0].1.is_err());
+        assert!(!home.join(".claude/skills").exists(), "nothing done for an agent whose settings do not read");
+        assert_eq!(changed(&done), vec!["Codex", "Copilot CLI"]);
+
+        let done = uninstall_all(&home, None);
+        assert_eq!(changed(&done), vec!["Codex", "Copilot CLI"]);
+        assert!(failures(&done).unwrap().starts_with("Claude Code: "));
+        assert!(!home.join(".codex/hooks.json").exists() && !home.join(".agents").exists(), "the others fully uninstalled");
+        // The skill is never removed while the settings do not read: no half uninstall.
+        fs::write(home.join(".claude/settings.json"), "{}").unwrap();
+        ok(install_tasks_all(&home, EXE));
+        fs::write(home.join(".claude/settings.json"), "{ oops").unwrap();
+        assert!(uninstall_all(&home, None)[0].1.is_err());
+        assert!(home.join(".claude/skills/tcanvas-tasks/SKILL.md").exists());
         let _ = fs::remove_dir_all(home);
     }
 
@@ -774,23 +987,165 @@ mod tests {
     fn only_detected_agents_get_hooks() {
         let home = temp_home("detect");
         assert_eq!(all_installed(&home, EXE), None, "no agent at all");
+        assert_eq!(tasks_state(&home), TaskHooks::Unsupported);
         fs::create_dir_all(home.join(".codex")).unwrap();
         fs::create_dir_all(home.join(".copilot")).unwrap();
-        assert_eq!(install_all(&home, EXE).unwrap(), vec!["Codex", "Copilot CLI"]);
+        assert_eq!(changed(&install_all(&home, EXE)), vec!["Codex", "Copilot CLI"]);
         assert!(!home.join(".claude/settings.json").exists());
         assert!(!home.join(".gemini").exists());
 
-        let codex: Value = serde_json::from_str(&fs::read_to_string(home.join(".codex/hooks.json")).unwrap()).unwrap();
+        let codex = read_json(&home.join(".codex/hooks.json"));
         assert_eq!(codex["hooks"]["PermissionRequest"][0]["hooks"][0]["command"], hook_command(EXE, "PermissionRequest"));
-        let copilot: Value = serde_json::from_str(&fs::read_to_string(home.join(".copilot/hooks/tcanvas.json")).unwrap()).unwrap();
+        let copilot = read_json(&home.join(".copilot/hooks/tcanvas.json"));
         assert_eq!(copilot["version"], 1);
         assert_eq!(copilot["hooks"]["agentStop"][0]["bash"], hook_command(EXE, "agentStop"));
         assert_eq!(all_installed(&home, EXE), Some(true));
 
-        uninstall_all(&home).unwrap();
+        ok(uninstall_all(&home, None));
         assert!(!home.join(".copilot/hooks/tcanvas.json").exists(), "our own file is removed");
-        let codex: Value = serde_json::from_str(&fs::read_to_string(home.join(".codex/hooks.json")).unwrap()).unwrap();
-        assert_eq!(codex, json!({}));
+        assert!(!home.join(".codex/hooks.json").exists(), "a file only we wrote is removed");
+        assert!(!home.join(".codex/hooks.json.tcanvas.bak").exists());
+        let _ = fs::remove_dir_all(home);
+    }
+
+    /// The session start entries (their commands) in an agent's config.
+    fn prime_commands(a: &Adapter, config: &Value) -> Vec<String> {
+        a.entries(config).into_iter().filter_map(entry_command).filter(|c| c.contains("task prime")).map(String::from).collect()
+    }
+
+    #[test]
+    fn the_session_start_entry_runs_prime_in_each_agents_form() {
+        assert_eq!(prime_command(EXE, HookForm::Plain), "[ -x '/home/me/.local/bin/tcanvas-agent' ] && '/home/me/.local/bin/tcanvas-agent' task prime --hook plain; true");
+        let forms: Vec<_> = ADAPTERS.iter().map(|a| (a.name, a.session_start, a.skills)).collect();
+        assert_eq!(
+            forms,
+            [
+                ("Claude Code", Some(("SessionStart", HookForm::Plain)), Some(".claude/skills")),
+                ("Codex", Some(("SessionStart", HookForm::Plain)), Some(".agents/skills")),
+                ("Gemini CLI", Some(("SessionStart", HookForm::Json)), None),
+                ("Qwen Code", Some(("SessionStart", HookForm::Plain)), None),
+                ("Copilot CLI", Some(("sessionStart", HookForm::JsonFlat)), None),
+            ]
+        );
+    }
+
+    /// Every agent: a settings file with the user's own hooks (a session start one included),
+    /// status hooks, then the task integration, then removing each: the user's settings come
+    /// back, the skill goes.
+    #[test]
+    fn install_and_uninstall_round_trip_every_agent() {
+        for a in ADAPTERS {
+            let home = temp_home(&format!("round-{}", a.dir.trim_start_matches('.')));
+            fs::create_dir_all(home.join(a.dir)).unwrap();
+            let path = home.join(a.file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let (event, form) = a.session_start.unwrap();
+            let user = match a.format {
+                Format::Grouped { .. } => {
+                    json!({"theme": "dark", "hooks": {event: [{"hooks": [{"type": "command", "command": "echo hello"}]}], "PreCompact": [{"hooks": [{"type": "command", "command": "true"}]}]}, "zeta": 1})
+                }
+                Format::Flat => json!({"version": 1, "hooks": {event: [{"type": "command", "bash": "echo hello"}]}}),
+            };
+            fs::write(&path, serde_json::to_string_pretty(&user).unwrap()).unwrap();
+            assert_eq!((all_installed(&home, EXE), tasks_state(&home)), (Some(false), TaskHooks::Missing), "{}", a.name);
+
+            assert_eq!(changed(&install_all(&home, EXE)), vec![a.name]);
+            assert!(prime_commands(a, &read_json(&path)).is_empty(), "{}: status hooks only", a.name);
+            assert_eq!((all_installed(&home, EXE), tasks_state(&home)), (Some(true), TaskHooks::Missing), "{}", a.name);
+
+            assert_eq!(changed(&install_tasks_all(&home, EXE)), vec![a.name]);
+            let v = read_json(&path);
+            assert_eq!(prime_commands(a, &v), vec![prime_command(EXE, form)], "{}", a.name);
+            assert_eq!(v["hooks"][event].as_array().unwrap().len(), 2, "{}: the user's entry stays", a.name);
+            assert_eq!((all_installed(&home, EXE), tasks_state(&home)), (Some(true), TaskHooks::Installed), "{}", a.name);
+            if let Some(dir) = a.skill_dir(&home) {
+                assert_eq!(fs::read_to_string(dir.join(task_skill::SKILL_FILE)).unwrap(), task_skill::render(EXE));
+            }
+            assert!(changed(&install_tasks_all(&home, EXE)).is_empty(), "{}: idempotent", a.name);
+            assert!(changed(&install_all(&home, EXE)).is_empty(), "{}: the status install keeps the task entry", a.name);
+            assert_eq!(prime_commands(a, &read_json(&path)).len(), 1);
+
+            // Removing the task integration only.
+            assert_eq!(changed(&uninstall_all(&home, Some(Part::Tasks))), vec![a.name]);
+            assert!(prime_commands(a, &read_json(&path)).is_empty());
+            assert_eq!((all_installed(&home, EXE), tasks_state(&home)), (Some(true), TaskHooks::Missing), "{}", a.name);
+            if let Some(dir) = a.skill_dir(&home) {
+                assert!(!dir.exists() && !dir.parent().unwrap().exists(), "{}: the skill and the skills folder we made go", a.name);
+            }
+
+            ok(install_tasks_all(&home, EXE));
+            assert_eq!(changed(&uninstall_all(&home, None)), vec![a.name]);
+            assert_eq!(read_json(&path), user, "{}: the user's settings back", a.name);
+            let _ = fs::remove_dir_all(home);
+        }
+    }
+
+    #[test]
+    fn an_older_install_still_reads_as_installed() {
+        let home = temp_home("older");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        let claude = &ADAPTERS[0];
+        let before = claude.merged(json!({"model": "opus"}), EXE);
+        fs::write(home.join(".claude/settings.json"), serde_json::to_string_pretty(&before).unwrap()).unwrap();
+        assert_eq!(all_installed(&home, EXE), Some(true), "status hooks unchanged: still installed");
+        assert_eq!(tasks_state(&home), TaskHooks::Missing, "the task integration is opt-in");
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_session_start_entry_the_user_changed_is_kept_and_counts() {
+        let home = temp_home("user-edited-entry");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        ok(install_all(&home, EXE));
+        ok(install_tasks_all(&home, EXE));
+        let path = home.join(".claude/settings.json");
+        let mut v = read_json(&path);
+        v["hooks"]["SessionStart"][0]["matcher"] = json!("startup");
+        v["hooks"]["SessionStart"][0]["hooks"][0]["timeout"] = json!(3);
+        fs::write(&path, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        assert_eq!(tasks_state(&home), TaskHooks::Installed, "any form counts");
+        assert_eq!(all_installed(&home, EXE), Some(true));
+        ok(install_tasks_all(&home, "/opt/tcanvas-agent"));
+        let after = read_json(&path);
+        assert_eq!(after["hooks"]["SessionStart"], v["hooks"]["SessionStart"], "the user's edit is kept");
+        ok(install_all(&home, EXE));
+        assert_eq!(read_json(&path)["hooks"]["SessionStart"], v["hooks"]["SessionStart"], "kept by the status install too");
+        // An edited skill counts too, and stays.
+        let skill = home.join(".claude/skills/tcanvas-tasks/SKILL.md");
+        let edited = task_skill::render(EXE).replace("Append, never rewrite", "Append, and say why");
+        fs::write(&skill, &edited).unwrap();
+        assert_eq!(tasks_state(&home), TaskHooks::Installed);
+        let done = ok(install_tasks_all(&home, EXE));
+        assert_eq!(done[0].skill, Some(SkillChange::KeptEdited));
+        let done = ok(uninstall_all(&home, Some(Part::Tasks)));
+        assert_eq!((done[0].settings, done[0].skill), (true, Some(SkillChange::KeptEdited)));
+        assert_eq!(fs::read_to_string(&skill).unwrap(), edited, "kept");
+        assert_eq!(tasks_state(&home), TaskHooks::Missing, "no entry any more");
+        // The skill alone missing: not installed.
+        fs::remove_file(&skill).unwrap();
+        ok(install_tasks_all(&home, EXE));
+        fs::remove_file(&skill).unwrap();
+        assert_eq!(tasks_state(&home), TaskHooks::Missing);
+        let _ = fs::remove_dir_all(home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn settings_keep_their_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = temp_home("modes");
+        fs::create_dir_all(home.join(".claude")).unwrap();
+        let path = home.join(".claude/settings.json");
+        for mode in [0o600, 0o640, 0o444] {
+            fs::write(&path, "{\"apiKeyHelper\": \"secret\"}").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            ok(install_all(&home, EXE));
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, mode, "install, {mode:o}");
+            ok(uninstall_all(&home, None));
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, mode, "uninstall, {mode:o}");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+            let _ = fs::remove_file(home.join(".claude/settings.json.tcanvas.bak"));
+        }
         let _ = fs::remove_dir_all(home);
     }
 
@@ -802,9 +1157,13 @@ mod tests {
         fs::create_dir_all(home.join("dotfiles")).unwrap();
         fs::write(home.join("dotfiles/claude.json"), "{}").unwrap();
         std::os::unix::fs::symlink(home.join("dotfiles/claude.json"), home.join(".claude/settings.json")).unwrap();
-        install_all(&home, EXE).unwrap();
+        ok(install_all(&home, EXE));
+        ok(install_tasks_all(&home, EXE));
         assert!(fs::symlink_metadata(home.join(".claude/settings.json")).unwrap().file_type().is_symlink());
-        assert!(fs::read_to_string(home.join("dotfiles/claude.json")).unwrap().contains("tcanvas-agent"));
+        assert!(fs::read_to_string(home.join("dotfiles/claude.json")).unwrap().contains("task prime"));
+        ok(uninstall_all(&home, None));
+        assert!(fs::symlink_metadata(home.join(".claude/settings.json")).unwrap().file_type().is_symlink(), "still a link");
+        assert_eq!(read_json(&home.join("dotfiles/claude.json")), json!({}));
         let _ = fs::remove_dir_all(home);
     }
 }

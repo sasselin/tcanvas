@@ -1471,7 +1471,7 @@ mod tests {
             ids.push(card.id.clone());
             world.add_card(card);
         }
-        cards.handle(&Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true }), &mut world, &mut vec![]);
+        cards.handle(&Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None }), &mut world, &mut vec![]);
         (cards, world, ids[0].clone(), ids[1].clone())
     }
 
@@ -1636,7 +1636,7 @@ mod tests {
         let (_, mut world, id, _) = ready();
         let mut cards = TerminalCards::new(egui::Context::default(), Launcher::Disabled);
         assert_eq!(outcome_of(&send(&mut cards, &mut world, &id, "x", true), &id).0, Some(SendOutcome::Refused(SendRefusal::NoAgent)));
-        cards.handle(&Event::Agent(AgentEvent::Hello { version: "0.1".into(), hooks: protocol::Hooks::Installed, send_text: false, tasks: false }), &mut world, &mut vec![]);
+        cards.handle(&Event::Agent(AgentEvent::Hello { version: "0.1".into(), hooks: protocol::Hooks::Installed, send_text: false, tasks: false, task_hooks: None }), &mut world, &mut vec![]);
         assert_eq!(outcome_of(&send(&mut cards, &mut world, &id, "x", true), &id).0, Some(SendOutcome::Refused(SendRefusal::AgentTooOld)));
         assert_eq!(cards.unsent_text(&id), Some(("x", &SendRefusal::AgentTooOld)));
     }
