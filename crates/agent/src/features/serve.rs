@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protocol::{AgentCmd, AgentEvent, DEFAULT_STALL_SECS, Problem, SessionInfo, TermStatus};
 
-use super::{changes, hooks, kill, status, tmux};
+use super::{changes, hooks, kill, status, timing, tmux};
 
 const POLL: Duration = Duration::from_secs(1);
 const TAIL_LINES: usize = 3;
@@ -24,6 +24,11 @@ struct Tracked {
     last_sent: Option<SessionInfo>,
     /// Start of the current run of screen output (no pause over `BUSY_GAP_SECS`).
     busy_since: Option<Instant>,
+    /// The last command, from the shell hooks' marks, of the pane whose shell is `pane_pid`.
+    last_command: timing::LastCommand,
+    pane_pid: u32,
+    /// That pane's shell, which decides how its marks read.
+    shell: Option<hooks::Shell>,
 }
 
 pub fn run() -> io::Result<()> {
@@ -37,6 +42,7 @@ pub fn run() -> io::Result<()> {
     send(&AgentEvent::Hello { version: env!("CARGO_PKG_VERSION").into(), hooks: hooks::state() })?;
 
     let mut tracked: HashMap<String, Tracked> = HashMap::new();
+    let mut clock = timing::ClockLog::default();
     loop {
         while let Ok(cmd) = cmds.try_recv() {
             match cmd {
@@ -60,12 +66,14 @@ pub fn run() -> io::Result<()> {
                 Vec::new()
             }
         };
-        let now = unix_now();
+        let wall = unix_now();
         let mono = Instant::now();
+        clock.record(mono, wall);
+        let now = wall as u64;
 
         for row in &rows {
             let t = tracked.entry(row.session.clone()).or_default();
-            let info = observe(row, t, now, mono);
+            let info = observe(row, t, now, mono, &clock);
             if t.last_sent.as_ref() != Some(&info) {
                 send(&AgentEvent::Session(info.clone()))?;
                 t.last_sent = Some(info);
@@ -83,8 +91,9 @@ pub fn run() -> io::Result<()> {
 }
 
 /// `now`: wall clock (s), the clock of tmux and of the shell hooks; `mono`: the same moment
-/// on the monotonic clock, for durations the agent measures itself.
-fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64, mono: Instant) -> SessionInfo {
+/// on the monotonic clock, for durations the agent measures itself; `clock`: the wall clock
+/// steps seen so far.
+fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64, mono: Instant, clock: &timing::ClockLog) -> SessionInfo {
     if !tmux::capture_is_current(t.captured, row.activity, now) {
         t.tail = tmux::capture_tail(&row.session, TAIL_LINES);
         t.captured = Some(tmux::Capture { activity: row.activity, at: now });
@@ -101,6 +110,15 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64, mono: Instant) -> Ses
     let (busy_since, busy_secs) = status::busy_run(t.busy_since, mono, now.saturating_sub(row.activity));
     t.busy_since = busy_since;
 
+    // Only the session's active pane is read: another pane's marks start a new history.
+    if t.pane_pid != row.pane_pid {
+        t.pane_pid = row.pane_pid;
+        t.shell = shell_of(row.pane_pid);
+        t.last_command = timing::LastCommand::default();
+    }
+    let marks = timing::Marks { started: row.started, ended: row.ended, exit: row.exit };
+    let last = t.last_command.observe(marks, t.shell, fg.is_some(), mono, clock);
+
     let obs = status::Observation {
         now,
         dead: row.dead,
@@ -109,9 +127,7 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64, mono: Instant) -> Ses
         activity: row.activity,
         cpu_delta,
         last_line: t.tail.last().map(String::as_str),
-        hook_started: row.started,
-        hook_ended: row.ended,
-        hook_exit: row.exit,
+        last_exit: last.and_then(|l| l.exit),
         stall_secs: if t.stall_secs == 0 { DEFAULT_STALL_SECS } else { t.stall_secs },
         // A mark left by an agent that has since quit names other processes: ignored.
         agent: row.agent.as_ref().filter(|m| fg.as_ref().is_some_and(|f| m.pids.contains(&f.pid))).map(|m| m.state),
@@ -120,15 +136,14 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64, mono: Instant) -> Ses
         was_waiting: t.last_sent.as_ref().is_some_and(|i| i.status == TermStatus::WaitingInput),
     };
     let status = status::classify(&obs);
-    let (last_exit, last_duration_secs) = status::last_command(&obs);
 
     SessionInfo {
         session: row.session.clone(),
         status,
         command: fg.map(|f| f.cmdline).filter(|_| status != TermStatus::Dead),
         cwd: Some(row.path.clone()).filter(|p| !p.is_empty()),
-        last_exit,
-        last_duration_secs,
+        last_exit: last.and_then(|l| l.exit),
+        last_duration_secs: last.and_then(|l| l.secs),
         tail: t.tail.clone(),
     }
 }
@@ -178,6 +193,12 @@ fn spawn_stdin_reader(watcher: Sender<changes::Cmd>) -> Receiver<AgentCmd> {
     rx
 }
 
-fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+/// The shell running as `pid` (a pane's first process), from its process name.
+fn shell_of(pid: u32) -> Option<hooks::Shell> {
+    std::fs::read_to_string(format!("/proc/{pid}/comm")).ok().and_then(|name| hooks::Shell::from_path(name.trim()))
+}
+
+/// Wall clock, in seconds since the epoch.
+fn unix_now() -> f64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
