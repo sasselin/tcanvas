@@ -546,13 +546,41 @@ fn folder() {
 #[ignore = "renders README screenshots; run ./scripts/screenshots.sh"]
 fn worktrees() {
     let mut h = harness("worktrees");
-    demo_canvas(&mut h);
+    worktrees_canvas(&mut h, false);
+    assert!(h.query_by_label("⎇ 3 worktrees").is_some() && h.query_by_label_contains("Branch: feat/rate-limit").is_some());
+    h.event(egui::Event::PointerGone);
+    save(&mut h, "worktrees");
+}
+
+#[test]
+#[ignore = "renders README screenshots; run ./scripts/screenshots.sh"]
+fn cleanup() {
+    let mut h = harness("cleanup");
+    worktrees_canvas(&mut h, true);
+    h.get_by_label("♻ 2 to clean up").click();
+    steps(&mut h, 3);
+    // The agent's answer to the size request sent when the window opened.
+    let sizes = [("/home/me/code/shop-api-argon2", 412), ("/home/me/code/shop-api-csv-export", 1_310)]
+        .map(|(path, mb)| protocol::WorktreeSize { path: path.into(), bytes: Some(mb * 1024 * 1024), ignored: Some(protocol::Ignored { shown: vec![".env".into(), "target/".into()], total: 2 }) })
+        .to_vec();
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeSizes { key: "p-shop-api".into(), sizes })]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("1.7 GB to reclaim").is_some());
+    h.event(egui::Event::PointerGone);
+    save(&mut h, "cleanup");
+}
+
+/// The `shop-api` group open with its worktrees. `cleanup`: the argon2 terminal moved back to
+/// the main checkout, another merged worktree, a missing one and merged branches, so there is
+/// something to clean up.
+fn worktrees_canvas(h: &mut Harness<'_, App>, cleanup: bool) {
+    demo_canvas(h);
     // Claude works in a worktree nested in the repository, the tests run in another one.
     let root = "/home/me/code/shop-api";
     let rate_limit = format!("{root}/.claude/worktrees/rate-limit");
     let argon2 = "/home/me/code/shop-api-argon2";
     h.state_mut().world.card_mut("t0").unwrap().cwd = Some(rate_limit.clone());
-    h.state_mut().world.card_mut("t1").unwrap().cwd = Some(argon2.into());
+    h.state_mut().world.card_mut("t1").unwrap().cwd = Some(if cleanup { root.into() } else { argon2.into() });
     let now = unix_now();
     let worktree = |path: &str, main: bool, branch: &str, age: u64| protocol::Worktree {
         path: path.into(),
@@ -569,8 +597,10 @@ fn worktrees() {
         behind: Some(0),
         merged: None,
         last_commit: Some(now - age),
+        branch_deletable: true,
+        reflog_commits: false,
     };
-    let list = protocol::WorktreeList {
+    let mut list = protocol::WorktreeList {
         key: "p-shop-api".into(),
         repo: Some(root.into()),
         default_branch: Some("origin/main".into()),
@@ -579,13 +609,23 @@ fn worktrees() {
             protocol::Worktree { dirty: Some(true), ahead: Some(3), behind: Some(1), merged: Some(false), ..worktree(&rate_limit, false, "feat/rate-limit-login-and-signup", 300) },
             protocol::Worktree { ahead: Some(0), behind: Some(4), merged: Some(true), ..worktree(argon2, false, "auth/argon2", 86_400) },
         ],
+        merged_branches: vec![],
     };
+    if cleanup {
+        list.worktrees.push(protocol::Worktree { ahead: Some(0), behind: Some(9), merged: Some(true), ..worktree("/home/me/code/shop-api-csv-export", false, "feat/csv-export", 5 * 86_400) });
+        list.worktrees.push(protocol::Worktree {
+            prunable: true,
+            dirty: None,
+            ahead: Some(0),
+            behind: Some(15),
+            merged: Some(true),
+            ..worktree("/home/me/code/shop-api-spike", false, "spike/grpc", 20 * 86_400)
+        });
+        list.merged_branches = ["chore/bump-axum", "fix/readme-typo"].map(|name| protocol::MergedBranch { name: name.into(), last_commit: Some(now - 9 * 86_400) }).to_vec();
+    }
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Worktrees(list))]);
-    ctrl_shift(&h, Key::Num1);
-    steps(&mut h, 45);
-    assert!(h.query_by_label("⎇ 3 worktrees").is_some() && h.query_by_label_contains("Branch: feat/rate-limit").is_some());
-    h.event(egui::Event::PointerGone);
-    save(&mut h, "worktrees");
+    ctrl_shift(h, Key::Num1);
+    steps(h, 45);
 }
 
 /// The README's animated demo: frames rendered here, assembled into `demo.gif` by

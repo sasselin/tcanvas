@@ -11,13 +11,18 @@
 //! status; the others run `git status --untracked-files=normal` (no descent into untracked
 //! folders) once per `DIRTY_EVERY` at most, `DIRTY_PER_PASS` per pass, oldest first, so the
 //! thread stays free for diffs and folder listings.
+//!
+//! Merged branches without a worktree: one `git for-each-ref refs/heads/` per repository (no
+//! history walk), then the same cached distance and reflog checks as the worktrees' branches, at
+//! most `BRANCH_LOOKUPS_PER_PASS` uncached ones per pass (a repository with hundreds of old
+//! branches fills its list over a few passes).
 
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use protocol::{Worktree, WorktreeList};
+use protocol::{MergedBranch, Worktree, WorktreeList};
 
 use super::changes::git_ok;
 
@@ -25,6 +30,8 @@ use super::changes::git_ok;
 pub const DIRTY_EVERY: Duration = Duration::from_secs(10);
 /// `git status` runs per pass, at most (the changes thread also answers diffs and listings).
 pub const DIRTY_PER_PASS: usize = 3;
+/// Uncached distance or reflog lookups for branches without a worktree, per pass.
+pub const BRANCH_LOOKUPS_PER_PASS: usize = 20;
 
 /// `git worktree list --porcelain`: one block per worktree, the main one first.
 ///
@@ -129,6 +136,8 @@ fn entry(path: &str, main: bool) -> Worktree {
         behind: None,
         merged: None,
         last_commit: None,
+        branch_deletable: false,
+        reflog_commits: false,
     }
 }
 
@@ -146,7 +155,7 @@ pub struct Base {
 
 impl Base {
     /// The local branch it stands for (`origin/main` -> `main`): that branch is not "merged".
-    fn local(&self) -> &str {
+    pub fn local(&self) -> &str {
         self.name.strip_prefix("origin/").unwrap_or(&self.name)
     }
 }
@@ -239,6 +248,31 @@ struct Generation {
     moved: HashMap<(String, String), Option<bool>>,
     /// Worktree path -> last dirty check.
     dirty: HashMap<String, Dirty>,
+    /// (reflog file, its size and time, base) -> every commit it names is in the base.
+    reflogs: HashMap<(PathBuf, Stamp, String), bool>,
+}
+
+/// Size and modification time of a reflog file: when they do not change, neither does it.
+type Stamp = (u64, i64, i64);
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    use std::os::unix::fs::MetadataExt;
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.len(), m.mtime(), m.mtime_nsec()))
+}
+
+/// A reflog longer than this is not read: its commits count as not in the base.
+pub const MAX_REFLOG: usize = 1000;
+
+/// `git reflog show --format=%H`: the distinct commits it names, or `None` beyond `max`.
+pub fn reflog_commits(out: &str, max: usize) -> Option<Vec<String>> {
+    let mut shas: Vec<String> = out.lines().map(str::trim).filter(|l| is_sha(l)).map(String::from).collect();
+    if shas.len() > max {
+        return None;
+    }
+    shas.sort();
+    shas.dedup();
+    Some(shas)
 }
 
 /// Results kept from one pass to the next. What a whole pass did not use is dropped at the start
@@ -286,13 +320,20 @@ impl Cache {
 
     /// (ahead, behind) of `head` relative to `base`.
     fn distance(&mut self, dir: &Path, head: &str, base: &str) -> Option<(u32, u32)> {
+        let mut unlimited = usize::MAX;
+        self.distance_within(dir, head, base, &mut unlimited)
+    }
+
+    /// Like `distance`, but a lookup that runs git spends one unit of `budget` (none left: `None`).
+    fn distance_within(&mut self, dir: &Path, head: &str, base: &str, budget: &mut usize) -> Option<(u32, u32)> {
         let key = (head.to_string(), base.to_string());
         if let Some(d) = lookup(&mut self.current.distance, &mut self.previous.distance, &key) {
             return Some(*d);
         }
-        if !is_sha(head) || !is_sha(base) {
+        if !is_sha(head) || !is_sha(base) || *budget == 0 {
             return None;
         }
+        *budget -= 1;
         let d = if head == base { (0, 0) } else { parse_left_right(&git_ok(dir, &["rev-list", "--left-right", "--count", &format!("{base}...{head}")])?)? };
         self.current.distance.insert(key, d);
         Some(d)
@@ -300,14 +341,53 @@ impl Cache {
 
     /// The branch moved since it was created (its reflog only changes when its head does).
     fn moved(&mut self, dir: &Path, branch: &str, head: &str) -> Option<bool> {
+        let mut unlimited = usize::MAX;
+        self.moved_within(dir, branch, head, &mut unlimited)
+    }
+
+    /// Like `moved`, within a lookup budget (`None` when it is spent).
+    fn moved_within(&mut self, dir: &Path, branch: &str, head: &str, budget: &mut usize) -> Option<bool> {
         let key = (branch.to_string(), head.to_string());
         if let Some(m) = lookup(&mut self.current.moved, &mut self.previous.moved, &key) {
             return *m;
         }
+        if *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
         let refname = format!("refs/heads/{branch}");
         let m = git_ok(dir, &["reflog", "show", "--format=%H", "-n", "2", &refname]).map(|out| moved_since_created(&out));
         self.current.moved.insert(key, m);
         m
+    }
+
+    /// Every commit the reflog of `refname` (read in `cwd`; `log`: its file, for the cache) names
+    /// is an ancestor of `base`: `git rev-list <commits> --not <base>` is empty. `None` when it
+    /// could not be told (git failed, the reflog is too long, or the lookup budget is spent).
+    fn reflog_in_base(&mut self, cwd: &Path, refname: &str, log: Option<&Path>, base: &str, budget: &mut usize) -> Option<bool> {
+        let key = log.and_then(|l| Some((l.to_path_buf(), stamp(l)?, base.to_string())));
+        if let Some(k) = &key
+            && let Some(v) = lookup(&mut self.current.reflogs, &mut self.previous.reflogs, k)
+        {
+            return Some(*v);
+        }
+        if *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        let limit = (MAX_REFLOG + 1).to_string();
+        let out = git_ok(cwd, &["reflog", "show", "--format=%H", "-n", &limit, refname])?;
+        let shas = reflog_commits(&out, MAX_REFLOG)?;
+        let clean = shas.is_empty() || {
+            let mut args = vec!["rev-list", "-n", "1"];
+            args.extend(shas.iter().map(String::as_str));
+            args.extend(["--not", base]);
+            git_ok(cwd, &args)?.trim().is_empty()
+        };
+        if let Some(k) = key {
+            self.current.reflogs.insert(k, clean);
+        }
+        Some(clean)
     }
 
     fn record_dirty(&mut self, path: &str, head: Option<String>, dirty: Option<bool>) {
@@ -343,12 +423,130 @@ pub struct Input {
 }
 
 /// One repository, scanned once per pass.
-struct Repo {
-    default_branch: Option<String>,
-    worktrees: Vec<Worktree>,
+pub struct Repo {
+    pub base: Option<Base>,
+    /// Without their dirty state (`scan_all` adds it).
+    pub worktrees: Vec<Worktree>,
+    pub merged_branches: Vec<MergedBranch>,
+    /// Merged branches left out of `merged_branches` because their reflog names commits the
+    /// base does not have (or that could not be checked).
+    pub reflog_held: Vec<String>,
 }
 
-fn scan_repo(top: &Path, cache: &mut Cache) -> Option<Repo> {
+/// Where the repository's shared files are: the main checkout's `.git` (folder, or the folder a
+/// `.git` file points to), or the bare repository itself.
+fn common_dir(main: &Worktree) -> Option<PathBuf> {
+    let root = Path::new(&main.path);
+    if main.bare {
+        return Some(root.to_path_buf());
+    }
+    gitdir_of(root)
+}
+
+/// The git folder of a checkout: its `.git` folder, or where its `.git` file points.
+fn gitdir_of(root: &Path) -> Option<PathBuf> {
+    let dot = root.join(".git");
+    if dot.is_dir() {
+        return Some(dot);
+    }
+    let text = std::fs::read_to_string(&dot).ok()?;
+    let target = text.lines().find_map(|l| l.strip_prefix("gitdir:"))?.trim();
+    Some(root.join(target))
+}
+
+/// Local and remote-tracking refs: `git for-each-ref
+/// --format=%(refname)%09%(objectname)%09%(upstream) refs/heads/ refs/remotes/`.
+#[derive(Default, Debug, PartialEq, Eq)]
+pub struct Refs {
+    /// Local branches in order: (name, head, upstream ref if one is configured).
+    pub branches: Vec<(String, String, Option<String>)>,
+    /// Every ref listed (full name) -> its commit.
+    pub shas: HashMap<String, String>,
+}
+
+pub fn parse_refs(out: &str) -> Refs {
+    let mut refs = Refs::default();
+    for line in out.lines() {
+        let mut f = line.split('\t');
+        let (Some(refname), Some(sha)) = (f.next(), f.next()) else { continue };
+        if !is_sha(sha) {
+            continue;
+        }
+        refs.shas.insert(refname.to_string(), sha.to_string());
+        if let Some(name) = refname.strip_prefix("refs/heads/").filter(|n| !n.is_empty()) {
+            let upstream = f.next().filter(|u| !u.is_empty()).map(String::from);
+            refs.branches.push((name.to_string(), sha.to_string(), upstream));
+        }
+    }
+    refs
+}
+
+pub fn read_refs(top: &Path) -> Refs {
+    parse_refs(&git_ok(top, &["for-each-ref", "--format=%(refname)%09%(objectname)%09%(upstream)", "refs/heads/", "refs/remotes/"]).unwrap_or_default())
+}
+
+/// What `git branch -d` checks a branch against: its upstream when that one exists, else the
+/// HEAD of where it runs (the main checkout).
+pub fn deletion_target<'a>(upstream: Option<&str>, refs: &'a Refs, main_head: Option<&'a str>) -> Option<&'a str> {
+    match upstream.and_then(|u| refs.shas.get(u)) {
+        Some(sha) => Some(sha),
+        None => main_head,
+    }
+}
+
+/// HEAD of the main checkout (for a bare repository, which `git worktree list` gives none, its
+/// own HEAD).
+pub fn main_head(top: &Path, worktrees: &[Worktree]) -> Option<String> {
+    match worktrees.first() {
+        Some(w) if w.head.is_some() => w.head.clone(),
+        _ => git_ok(top, &["rev-parse", "--verify", "-q", "HEAD"]).map(|s| s.trim().to_string()).filter(|s| is_sha(s)),
+    }
+}
+
+/// Local branches merged into `base` that no worktree has checked out (a prunable entry still
+/// holds its branch: `git branch -d` would refuse it) and that `git branch -d` accepts, sorted
+/// by name. Lookups not cached yet spend `budget`; a branch whose lookups do not fit is left out
+/// of this pass.
+fn merged_branches(top: &Path, base: &Base, worktrees: &[Worktree], refs: &Refs, main_head: Option<&str>, cache: &mut Cache, budget: &mut usize) -> (Vec<MergedBranch>, Vec<String>) {
+    let common = worktrees.first().and_then(common_dir);
+    let mut found: Vec<(String, String)> = Vec::new();
+    let mut held = Vec::new();
+    for (name, head, upstream) in &refs.branches {
+        if name == base.local() || worktrees.iter().any(|w| w.branch.as_deref() == Some(name.as_str())) {
+            continue;
+        }
+        let Some((ahead, _)) = cache.distance_within(top, head, &base.sha, budget) else { continue };
+        let moved = if ahead == 0 { cache.moved_within(top, name, head, budget) } else { None };
+        if merged(Some(name), base.local(), ahead, moved) != Some(true) {
+            continue;
+        }
+        let Some(target) = deletion_target(upstream.as_deref(), refs, main_head) else { continue };
+        if !cache.distance_within(top, head, target, budget).is_some_and(|(ahead, _)| ahead == 0) {
+            continue;
+        }
+        let refname = format!("refs/heads/{name}");
+        let log = common.as_ref().map(|c| c.join("logs").join(&refname));
+        if cache.reflog_in_base(top, &refname, log.as_deref(), &base.sha, budget) == Some(true) {
+            found.push((name.clone(), head.clone()));
+        } else {
+            held.push(name.clone());
+        }
+    }
+    let heads: Vec<&str> = found.iter().map(|(_, h)| h.as_str()).collect();
+    cache.fetch_times(top, &heads);
+    let mut list: Vec<MergedBranch> = found.iter().map(|(name, head)| MergedBranch { name: name.clone(), last_commit: cache.time(head) }).collect();
+    list.sort_by(|a, b| a.name.cmp(&b.name));
+    (list, held)
+}
+
+/// The repository holding `dir` as git sees it right now, with no cache and no lookup limit:
+/// what the cleanup commands check before acting.
+pub fn scan_fresh(dir: &Path) -> Option<Repo> {
+    let mut unlimited = usize::MAX;
+    scan_repo(dir, &mut Cache::default(), &mut unlimited)
+}
+
+fn scan_repo(top: &Path, cache: &mut Cache, budget: &mut usize) -> Option<Repo> {
     let mut worktrees = parse_porcelain(&git_ok(top, &["worktree", "list", "--porcelain"])?);
     worktrees.first()?;
     // git lists the linked ones in directory order: sort them so the list stays stable.
@@ -370,7 +568,33 @@ fn scan_repo(top: &Path, cache: &mut Cache) -> Option<Repo> {
             wt.merged = merged(branch.as_deref(), base.local(), ahead, moved);
         }
     }
-    Some(Repo { default_branch: base.map(|b| b.name), worktrees })
+    let refs = read_refs(top);
+    let main_head = main_head(top, &worktrees);
+    for wt in worktrees.iter_mut().filter(|w| w.merged == Some(true)) {
+        let (Some(branch), Some(head)) = (wt.branch.as_deref(), wt.head.as_deref()) else { continue };
+        let upstream = refs.branches.iter().find(|(name, ..)| name == branch).and_then(|(.., u)| u.as_deref());
+        let target = deletion_target(upstream, &refs, main_head.as_deref()).map(String::from);
+        wt.branch_deletable = target.and_then(|t| cache.distance(top, head, &t)).is_some_and(|(ahead, _)| ahead == 0);
+    }
+    // Commits only a reflog still holds: the branch's (made then reset away) and, for a linked
+    // worktree, its own HEAD's (made on a detached HEAD there). Removing the worktree, or deleting
+    // the branch, would drop them. Unknown counts as holding some.
+    if let Some(base) = &base {
+        let common = worktrees.first().and_then(common_dir);
+        let mut unlimited = usize::MAX;
+        for wt in worktrees.iter_mut().filter(|w| w.merged == Some(true) && !w.main) {
+            let Some(branch) = wt.branch.clone() else { continue };
+            let refname = format!("refs/heads/{branch}");
+            let branch_log = common.as_ref().map(|c| c.join("logs").join(&refname));
+            let branch_clean = cache.reflog_in_base(top, &refname, branch_log.as_deref(), &base.sha, &mut unlimited);
+            let root = Path::new(&wt.path);
+            let head_log = gitdir_of(root).map(|g| g.join("logs/HEAD"));
+            let head_clean = if root.is_dir() { cache.reflog_in_base(root, "HEAD", head_log.as_deref(), &base.sha, &mut unlimited) } else { None };
+            wt.reflog_commits = branch_clean != Some(true) || head_clean != Some(true);
+        }
+    }
+    let (merged_branches, reflog_held) = base.as_ref().map(|b| merged_branches(top, b, &worktrees, &refs, main_head.as_deref(), cache, budget)).unwrap_or_default();
+    Some(Repo { base, worktrees, merged_branches, reflog_held })
 }
 
 fn checkable(wt: &Worktree) -> bool {
@@ -383,6 +607,7 @@ pub fn scan_all(inputs: &[Input], cache: &mut Cache) -> Vec<WorktreeList> {
     // Folders of the same repository share one scan: a folder's top is one of its worktrees.
     let mut repos: Vec<Repo> = Vec::new();
     let mut of_input: Vec<Option<usize>> = Vec::new();
+    let mut budget = BRANCH_LOOKUPS_PER_PASS;
     for input in inputs {
         let Some(top) = input.top.as_deref() else {
             of_input.push(None);
@@ -390,7 +615,7 @@ pub fn scan_all(inputs: &[Input], cache: &mut Cache) -> Vec<WorktreeList> {
         };
         let known = repos.iter().position(|r| r.worktrees.iter().any(|w| w.path == top));
         let index = known.or_else(|| {
-            repos.push(scan_repo(Path::new(top), cache)?);
+            repos.push(scan_repo(Path::new(top), cache, &mut budget)?);
             Some(repos.len() - 1)
         });
         of_input.push(index);
@@ -424,11 +649,12 @@ pub fn scan_all(inputs: &[Input], cache: &mut Cache) -> Vec<WorktreeList> {
         .iter()
         .zip(of_input)
         .map(|(input, repo)| {
-            let mut list = WorktreeList { key: input.key.clone(), repo: None, default_branch: None, worktrees: Vec::new() };
+            let mut list = WorktreeList { key: input.key.clone(), repo: None, default_branch: None, worktrees: Vec::new(), merged_branches: Vec::new() };
             if let Some(r) = repo.map(|r| &repos[r]) {
                 list.repo = r.worktrees.first().map(|w| w.path.clone());
-                list.default_branch = r.default_branch.clone();
+                list.default_branch = r.base.as_ref().map(|b| b.name.clone());
                 list.worktrees = r.worktrees.clone();
+                list.merged_branches = r.merged_branches.clone();
             }
             list
         })
@@ -526,6 +752,30 @@ mod tests {
         assert!(!moved_since_created(&format!("{A}\n")));
         assert!(moved_since_created(&format!("{B}\n{A}\n")));
         assert!(!moved_since_created(""));
+    }
+
+    #[test]
+    fn reflog_commits_are_read_distinct_and_bounded() {
+        assert_eq!(reflog_commits(&format!("{A}\n{B}\n{A}\n\n"), 10), Some(vec![A.to_string(), B.to_string()]));
+        assert_eq!(reflog_commits("", 10), Some(vec![]));
+        assert_eq!(reflog_commits(&format!("{A}\n{B}\n{A}\n"), 2), None, "too long to read: unknown");
+    }
+
+    #[test]
+    fn refs_and_what_branch_d_checks() {
+        let out = format!(
+            "refs/heads/main\t{A}\trefs/remotes/origin/main\nrefs/heads/feat/a b\t{B}\t\nrefs/heads/gone\t{B}\trefs/remotes/origin/gone\nrefs/remotes/origin/main\t{B}\t\nrefs/heads/broken\tnot-a-sha\t\n"
+        );
+        let refs = parse_refs(&out);
+        let names: Vec<(&str, &str, Option<&str>)> = refs.branches.iter().map(|(n, h, u)| (n.as_str(), h.as_str(), u.as_deref())).collect();
+        assert_eq!(names, vec![("main", A, Some("refs/remotes/origin/main")), ("feat/a b", B, None), ("gone", B, Some("refs/remotes/origin/gone"))]);
+        assert_eq!(refs.shas.get("refs/remotes/origin/main").map(String::as_str), Some(B));
+        // Its upstream when it exists, else the main checkout's HEAD.
+        assert_eq!(deletion_target(Some("refs/remotes/origin/main"), &refs, Some(A)), Some(B));
+        assert_eq!(deletion_target(None, &refs, Some(A)), Some(A));
+        assert_eq!(deletion_target(Some("refs/remotes/origin/gone"), &refs, Some(A)), Some(A), "upstream gone");
+        assert_eq!(deletion_target(None, &refs, None), None);
+        assert!(parse_refs("").branches.is_empty());
     }
 
     #[test]

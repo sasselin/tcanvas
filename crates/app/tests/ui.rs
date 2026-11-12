@@ -2136,6 +2136,8 @@ fn worktree(path: &str, main: bool, branch: &str) -> protocol::Worktree {
         behind: Some(0),
         merged: None,
         last_commit: Some(tcanvas::shell::world::unix_now() - 3600),
+        branch_deletable: false,
+        reflog_commits: false,
     }
 }
 
@@ -2143,9 +2145,14 @@ fn worktree(path: &str, main: bool, branch: &str) -> protocol::Worktree {
 /// merged one next to it.
 fn shop_worktrees(key: &str) -> Event {
     let invoices = protocol::Worktree { dirty: Some(true), ahead: Some(6), behind: Some(12), merged: Some(false), ..worktree("/home/me/shop/.claude/worktrees/invoices", false, "feat/invoices") };
-    let taxes = protocol::Worktree { ahead: Some(0), behind: Some(3), merged: Some(true), ..worktree("/home/me/shop-taxes", false, "taxes") };
-    let list =
-        protocol::WorktreeList { key: key.into(), repo: Some("/home/me/shop".into()), default_branch: Some("main".into()), worktrees: vec![worktree("/home/me/shop", true, "main"), invoices, taxes] };
+    let taxes = protocol::Worktree { ahead: Some(0), behind: Some(3), merged: Some(true), branch_deletable: true, ..worktree("/home/me/shop-taxes", false, "taxes") };
+    let list = protocol::WorktreeList {
+        key: key.into(),
+        repo: Some("/home/me/shop".into()),
+        default_branch: Some("main".into()),
+        worktrees: vec![worktree("/home/me/shop", true, "main"), invoices, taxes],
+        merged_branches: vec![],
+    };
     Event::Agent(AgentEvent::Worktrees(list))
 }
 
@@ -2193,7 +2200,13 @@ fn the_worktrees_strip_lists_the_repository_and_its_terminals() {
     assert_eq!(h.state().world.focused.as_deref(), Some(nested.as_str()));
 
     // With only the main checkout left, the strip goes away; the badge stays.
-    let only_main = protocol::WorktreeList { key: "p-shop".into(), repo: Some("/home/me/shop".into()), default_branch: Some("main".into()), worktrees: vec![worktree("/home/me/shop", true, "main")] };
+    let only_main = protocol::WorktreeList {
+        key: "p-shop".into(),
+        repo: Some("/home/me/shop".into()),
+        default_branch: Some("main".into()),
+        worktrees: vec![worktree("/home/me/shop", true, "main")],
+        merged_branches: vec![],
+    };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Worktrees(only_main))]);
     steps(&mut h, 3);
     assert!(h.query_by_label_contains("worktrees").is_none());
@@ -2215,7 +2228,13 @@ fn cards_stay_put_when_the_worktrees_strip_shows_or_hides() {
     assert!(h.state().viewport().min.y > viewport.min.y, "the strip takes room above the canvas");
     assert!((on_screen(&h).min - before.min).length() < 0.5, "moved: {before:?} -> {:?}", on_screen(&h));
     // And back when the linked worktrees are gone.
-    let only_main = protocol::WorktreeList { key: "p-shop".into(), repo: Some("/home/me/shop".into()), default_branch: Some("main".into()), worktrees: vec![worktree("/home/me/shop", true, "main")] };
+    let only_main = protocol::WorktreeList {
+        key: "p-shop".into(),
+        repo: Some("/home/me/shop".into()),
+        default_branch: Some("main".into()),
+        worktrees: vec![worktree("/home/me/shop", true, "main")],
+        merged_branches: vec![],
+    };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Worktrees(only_main))]);
     steps(&mut h, 3);
     assert_eq!(h.state().viewport(), viewport);
@@ -2283,4 +2302,292 @@ fn the_folder_picker_tells_a_worktree_from_a_repository() {
     steps(&mut h, 2);
     assert!(h.query_by_label("⎇ dépôt git").is_some());
     assert!(h.query_by_label("⎇ worktree git").is_none());
+}
+
+// --- Worktree cleanup ------------------------------------------------------------------------
+
+fn sent_cleanups(h: &Harness<'_, App>) -> Vec<protocol::Cleanup> {
+    h.state()
+        .agent_sent()
+        .iter()
+        .filter_map(|c| match c {
+            protocol::AgentCmd::Cleanup { key, action } if key == "p-shop" => Some(action.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn cleaned(action: protocol::Cleanup, deleted_branch: Option<&str>, problem: Option<protocol::Problem>) -> Event {
+    Event::Agent(AgentEvent::Cleaned { key: "p-shop".into(), action, deleted_branch: deleted_branch.map(String::from), problem })
+}
+
+/// Group `shop` open with its worktrees, and the cleanup window open.
+fn cleanup_window(h: &mut Harness<'_, App>, list: Event, button: &str) {
+    shop_group(h);
+    h.state_mut().dispatch(vec![list]);
+    steps(h, 3);
+    h.get_by_label(button).click();
+    steps(h, 3);
+    assert!(h.state().worktrees.cleanup_open());
+    h.event(egui::Event::PointerGone);
+    steps(h, 1);
+}
+
+/// Text of the label containing `start` (a multi-line label carries it as its value).
+fn text_of(h: &Harness<'_, App>, start: &str) -> String {
+    use egui_kittest::kittest::NodeT;
+    let node = h.get_by_label_contains(start);
+    node.value().or_else(|| node.accesskit_node().label()).unwrap_or_default()
+}
+
+fn seen(ignored: &[&str]) -> protocol::Ignored {
+    protocol::Ignored::from_paths(ignored.iter().map(|s| s.to_string()).collect())
+}
+
+fn measured(path: &str, mb: u64, ignored: &[&str]) -> Event {
+    let size = protocol::WorktreeSize { path: path.into(), bytes: Some(mb * 1024 * 1024), ignored: Some(seen(ignored)) };
+    Event::Agent(AgentEvent::WorktreeSizes { key: "p-shop".into(), sizes: vec![size] })
+}
+
+/// The agent's answers for these folders: no ignored file in any.
+fn measured_all(h: &mut Harness<'_, App>, paths: &[&str]) {
+    let events = paths.iter().map(|p| measured(p, 1, &[])).collect();
+    h.state_mut().dispatch(events);
+    steps(h, 2);
+}
+
+#[test]
+fn a_merged_worktree_is_removed_only_after_confirmation() {
+    let dir = temp_dir("cleanup");
+    let mut h = harness(&dir);
+    cleanup_window(&mut h, shop_worktrees("p-shop"), "♻ 1 à nettoyer");
+    assert!(h.query_by_label("Nettoyer les worktrees").is_some());
+    assert!(h.query_by_label("Supprimables sans risque").is_some() && h.query_by_label("Conservés").is_some());
+    // The kept ones, with their reason.
+    assert!(h.query_by_label("pas fusionnée dans main").is_some(), "invoices: unmerged");
+    assert_eq!(h.query_all_by_label("copie principale").count(), 3, "in the strip, then its name and its reason in the window");
+
+    // Sizes: asked when the window opens, for the removable ones only.
+    let sizes: Vec<_> = h.state().agent_sent().iter().filter(|c| matches!(c, protocol::AgentCmd::WorktreeSizes { .. })).cloned().collect();
+    assert_eq!(sizes, vec![protocol::AgentCmd::WorktreeSizes { key: "p-shop".into(), paths: vec!["/home/me/shop-taxes".into()] }]);
+    assert!(h.query_by_label("… à récupérer").is_some());
+    h.state_mut().dispatch(vec![measured("/home/me/shop-taxes", 340, &[".env"])]);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("340 Mo").is_some() && h.query_by_label("340 Mo à récupérer").is_some());
+
+    // One click asks; nothing is sent before the confirmation, and Enter does not confirm.
+    h.get_by_label("Supprimer…").click();
+    steps(&mut h, 2);
+    assert!(sent_cleanups(&h).is_empty());
+    assert!(h.query_by_label("Supprimer définitivement ?").is_some());
+    // Its ignored files are listed again: until the answer, the button does nothing.
+    let asked = h.state().agent_sent().iter().filter(|c| matches!(c, protocol::AgentCmd::WorktreeSizes { .. })).count();
+    assert_eq!(asked, 2, "asked again when the confirmation opens");
+    assert!(text_of(&h, "Ceci supprime :").contains("fichiers ignorés : pas encore listés"));
+    h.get_by_label("Supprimer").click();
+    steps(&mut h, 2);
+    assert!(sent_cleanups(&h).is_empty(), "not clickable before the ignored files are listed");
+    h.state_mut().dispatch(vec![measured("/home/me/shop-taxes", 340, &[".env", "target/"])]);
+    steps(&mut h, 2);
+    let text = text_of(&h, "Ceci supprime :");
+    assert!(text.contains("le dossier /home/me/shop-taxes") && text.contains("la branche taxes"), "{text}");
+    assert!(text.contains("ignorés, supprimés aussi : .env, target/") && text.contains("bases de données locales"), "{text}");
+    h.key_press(Key::Enter);
+    steps(&mut h, 2);
+    assert!(sent_cleanups(&h).is_empty(), "Enter does not delete");
+    assert!(h.query_by_label("Supprimer définitivement ?").is_some(), "still asking");
+    h.get_by_label("Supprimer").click();
+    steps(&mut h, 2);
+    let removal = protocol::Cleanup::RemoveWorktree { path: "/home/me/shop-taxes".into(), delete_branch: Some("taxes".into()), ignored: seen(&[".env", "target/"]) };
+    assert_eq!(sent_cleanups(&h), vec![removal.clone()], "with the ignored files the user saw");
+    assert!(h.query_by_label("Supprimer définitivement ?").is_none());
+    assert!(h.query_by_label("en cours…").is_some(), "waiting for the agent");
+    assert!(h.query_by_label("Tout supprimer (0)…").is_some(), "remove all does not send it again");
+
+    // The agent refuses (a terminal opened there meanwhile): shown in place, translated.
+    let refusal = protocol::Problem::WorktreeKept { path: "/home/me/shop-taxes".into(), reason: protocol::KeepReason::HasTerminal };
+    h.state_mut().dispatch(vec![cleaned(removal.clone(), None, Some(refusal))]);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("⚠ /home/me/shop-taxes conservé : un terminal y est ouvert").is_some());
+    assert!(h.query_by_label("en cours…").is_none() && h.query_by_label("Supprimer…").is_some(), "offered again");
+    // Then it goes through: the item is gone at once, before the agent's next scan.
+    h.state_mut().dispatch(vec![cleaned(removal, Some("taxes"), None)]);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("✔ Supprimés : /home/me/shop-taxes et la branche taxes").is_some());
+    assert!(h.query_by_label("Supprimer…").is_none(), "not offered while the list catches up");
+    h.state_mut().dispatch(vec![shop_worktrees("p-shop")]);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Supprimer…").is_none(), "a stale list does not bring it back");
+}
+
+#[test]
+fn bulk_removal_lists_everything_and_the_branch_option_is_honored() {
+    let dir = temp_dir("cleanup-bulk");
+    let mut h = harness(&dir);
+    let Event::Agent(AgentEvent::Worktrees(mut list)) = shop_worktrees("p-shop") else { unreachable!() };
+    let extra = protocol::Worktree { merged: Some(true), branch_deletable: true, ..worktree("/home/me/shop-ship", false, "ship") };
+    let gone = protocol::Worktree { prunable: true, dirty: None, ..worktree("/home/me/shop-old", false, "old") };
+    // Merged into origin/main only: its branch would be refused by `git branch -d`.
+    let behind = protocol::Worktree { merged: Some(true), branch_deletable: false, ..worktree("/home/me/shop-behind", false, "behind") };
+    list.worktrees.extend([extra, gone, behind]);
+    list.merged_branches = vec![protocol::MergedBranch { name: "fix/typo".into(), last_commit: None }];
+    cleanup_window(&mut h, Event::Agent(AgentEvent::Worktrees(list)), "♻ 3 à nettoyer");
+    assert!(h.query_by_label("dossier disparu : à élaguer").is_some());
+    assert!(h.query_by_label("⎇ fix/typo").is_some());
+
+    // With the branches: only those git will accept.
+    let three = ["/home/me/shop-taxes", "/home/me/shop-ship", "/home/me/shop-behind"];
+    h.get_by_label("Tout supprimer (3)…").click();
+    steps(&mut h, 2);
+    measured_all(&mut h, &three);
+    let text = text_of(&h, "Ceci supprime :");
+    assert!(text.contains("la branche taxes") && text.contains("la branche ship") && !text.contains("la branche behind"), "{text}");
+    // Cancelling sends nothing.
+    h.get_by_label("Annuler").click();
+    steps(&mut h, 2);
+    assert!(sent_cleanups(&h).is_empty());
+
+    // Without the branches.
+    h.get_by_label("Supprimer aussi la branche fusionnée").click();
+    steps(&mut h, 2);
+    h.get_by_label("Tout supprimer (3)…").click();
+    steps(&mut h, 2);
+    measured_all(&mut h, &three);
+    let text = text_of(&h, "Ceci supprime :");
+    assert!(text.contains("le dossier /home/me/shop-taxes") && text.contains("le dossier /home/me/shop-ship") && text.contains("le dossier /home/me/shop-behind"), "{text}");
+    assert!(!text.contains("la branche"), "{text}");
+    h.get_by_label("Supprimer").click();
+    steps(&mut h, 2);
+    let without = |p: &str| protocol::Cleanup::RemoveWorktree { path: p.into(), delete_branch: None, ignored: seen(&[]) };
+    assert_eq!(sent_cleanups(&h), vec![without("/home/me/shop-taxes"), without("/home/me/shop-ship"), without("/home/me/shop-behind")]);
+
+    // Prune, then the merged branch: each confirmed with what goes.
+    h.get_by_label("Élaguer 1 entrée introuvable…").click();
+    steps(&mut h, 2);
+    let text = text_of(&h, "Ceci supprime :");
+    assert!(text.contains("le suivi git de /home/me/shop-old : son dossier est introuvable en ce moment") && text.contains("disque démonté ou amovible"), "{text}");
+    h.get_by_label("Supprimer").click();
+    steps(&mut h, 2);
+    h.get_by_label("Supprimer…").click();
+    steps(&mut h, 2);
+    assert_eq!(text_of(&h, "Ceci supprime :"), "Ceci supprime :\n  • la branche fix/typo");
+    h.get_by_label("Supprimer").click();
+    steps(&mut h, 2);
+    let prune = protocol::Cleanup::Prune { paths: vec!["/home/me/shop-old".into()] };
+    assert_eq!(sent_cleanups(&h)[3..], [prune, protocol::Cleanup::DeleteBranch { branch: "fix/typo".into() }]);
+}
+
+#[test]
+fn a_terminal_moving_in_takes_a_worktree_off_the_list() {
+    let dir = temp_dir("cleanup-card");
+    let mut h = harness(&dir);
+    let Event::Agent(AgentEvent::Worktrees(mut list)) = shop_worktrees("p-shop") else { unreachable!() };
+    list.worktrees.push(protocol::Worktree { merged: Some(true), ..worktree("/home/me/shop-ship", false, "ship") });
+    cleanup_window(&mut h, Event::Agent(AgentEvent::Worktrees(list)), "♻ 2 à nettoyer");
+    let id = h.state().world.cards[0].id.clone();
+    h.state_mut().world.card_mut(&id).unwrap().cwd = Some("/home/me/shop-ship/src".into());
+    steps(&mut h, 3);
+    assert!(h.query_by_label("♻ 1 à nettoyer").is_some());
+    assert!(h.query_by_label("un terminal y est ouvert").is_some());
+}
+
+#[test]
+fn a_long_confirmation_scrolls_and_keeps_its_buttons_on_screen() {
+    let dir = temp_dir("cleanup-long");
+    let mut h = harness(&dir);
+    let Event::Agent(AgentEvent::Worktrees(mut list)) = shop_worktrees("p-shop") else { unreachable!() };
+    for i in 0..24 {
+        list.worktrees.push(protocol::Worktree { merged: Some(true), ..worktree(&format!("/home/me/shop-feature-{i:02}"), false, &format!("feature/{i:02}")) });
+    }
+    cleanup_window(&mut h, Event::Agent(AgentEvent::Worktrees(list)), "♻ 25 à nettoyer");
+    h.get_by_label("Tout supprimer (25)…").click();
+    steps(&mut h, 2);
+    let paths: Vec<String> = std::iter::once("/home/me/shop-taxes".to_string()).chain((0..24).map(|i| format!("/home/me/shop-feature-{i:02}"))).collect();
+    measured_all(&mut h, &paths.iter().map(String::as_str).collect::<Vec<_>>());
+    // The modal settles its height over a few frames.
+    steps(&mut h, 30);
+    let screen = Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 900.0));
+    for button in ["Supprimer", "Annuler"] {
+        let r = h.get_by_label(button).rect();
+        assert!(screen.contains_rect(r), "{button} off screen: {r:?}");
+    }
+    h.get_by_label("Supprimer").click();
+    steps(&mut h, 2);
+    assert_eq!(sent_cleanups(&h).len(), 25);
+}
+
+#[test]
+fn a_lone_main_checkout_with_merged_branches() {
+    let dir = temp_dir("cleanup-lone");
+    let mut h = harness(&dir);
+    shop_group(&mut h);
+    let list = protocol::WorktreeList {
+        key: "p-shop".into(),
+        repo: Some("/home/me/shop".into()),
+        default_branch: Some("main".into()),
+        worktrees: vec![worktree("/home/me/shop", true, "main")],
+        merged_branches: vec![protocol::MergedBranch { name: "fix/typo".into(), last_commit: None }],
+    };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Worktrees(list))]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("⎇ 1 worktree").is_some(), "singular");
+    h.get_by_label("♻ Nettoyer").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label("⎇ fix/typo").is_some());
+}
+
+#[test]
+fn terminal_buttons_take_clicks_in_an_overflowing_strip() {
+    let dir = temp_dir("cleanup-overflow");
+    let mut h = harness(&dir);
+    let (_, nested) = shop_group(&mut h);
+    let Event::Agent(AgentEvent::Worktrees(mut list)) = shop_worktrees("p-shop") else { unreachable!() };
+    for i in 0..6 {
+        list.worktrees.push(worktree(&format!("/home/me/shop-a-rather-long-feature-name-{i}"), false, &format!("feature/a-rather-long-branch-{i}")));
+    }
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Worktrees(list))]);
+    steps(&mut h, 3);
+    // The strip overflows (its scroll bar shows), and the terminal button still takes the click.
+    h.get_by_label("pdf").click();
+    steps(&mut h, 60);
+    assert_eq!(h.state().world.focused.as_deref(), Some(nested.as_str()));
+}
+
+#[test]
+fn the_cleanup_window_in_english() {
+    let dir = temp_dir("cleanup-en");
+    let mut h = harness_in(&dir, Lang::En);
+    cleanup_window(&mut h, shop_worktrees("p-shop"), "♻ 1 to clean up");
+    for label in ["Clean up worktrees", "Safe to remove", "Kept", "not merged into main", "Also delete the merged branch", "Remove all 1…"] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    let size = |h: &mut Harness<'_, App>| {
+        let ignored = protocol::Ignored { shown: vec![".env".into(), "web/.env.local".into()], total: 5 };
+        h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeSizes {
+            key: "p-shop".into(),
+            sizes: vec![protocol::WorktreeSize { path: "/home/me/shop-taxes".into(), bytes: None, ignored: Some(ignored) }],
+        })]);
+        steps(h, 2);
+    };
+    size(&mut h);
+    assert!(h.query_by_label("unknown").is_some());
+    h.get_by_label("Remove…").click();
+    steps(&mut h, 2);
+    assert!(text_of(&h, "This deletes:").contains("ignored files: not listed yet"));
+    size(&mut h);
+    let text = text_of(&h, "This deletes:");
+    assert!(text.contains("folder /home/me/shop-taxes") && text.contains("branch taxes") && text.contains("ignored, deleted too: .env, web/.env.local, and 3 more"), "{text}");
+    assert!(text.contains("configuration files (.env), local databases"), "{text}");
+    h.get_by_label("Delete").click();
+    steps(&mut h, 2);
+    let removal = protocol::Cleanup::RemoveWorktree {
+        path: "/home/me/shop-taxes".into(),
+        delete_branch: Some("taxes".into()),
+        ignored: protocol::Ignored { shown: vec![".env".into(), "web/.env.local".into()], total: 5 },
+    };
+    assert_eq!(sent_cleanups(&h), vec![removal.clone()]);
+    let refusal = protocol::Problem::WorktreeKept { path: "/home/me/shop-taxes".into(), reason: protocol::KeepReason::Dirty };
+    h.state_mut().dispatch(vec![cleaned(removal, None, Some(refusal))]);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("⚠ /home/me/shop-taxes kept: uncommitted or untracked changes").is_some());
 }
