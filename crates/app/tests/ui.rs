@@ -2737,12 +2737,28 @@ fn the_template_editor_never_loses_typed_text_by_accident() {
     steps(&mut h, 2);
     assert!(h.query_by_label("Abandonner les modifications de ces modèles ?").is_none());
     assert_eq!(h.get_by_role(Role::MultilineTextInput).value().as_deref(), Some("claude \"un long prompt\""));
-    h.key_press(Key::Escape);
+    // The Cancel button asks too, exactly as Escape does.
+    h.get_by_label("Annuler").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Abandonner les modifications de ces modèles ?").is_some());
+    h.get_by_label("Continuer").click();
+    steps(&mut h, 2);
+    assert!(h.state().projects_editing(), "Continuer keeps the editor open");
+    assert_eq!(h.get_by_role(Role::MultilineTextInput).value().as_deref(), Some("claude \"un long prompt\""));
+    h.get_by_label("Annuler").click();
     steps(&mut h, 2);
     h.get_by_label("Abandonner").click();
     steps(&mut h, 2);
     assert!(!h.state().projects_editing());
     assert!(h.state().world.project("p-api").unwrap().templates.is_empty());
+    // Nothing typed: Cancel closes at once.
+    h.get_by_label("Modèles de terminal du groupe api").click();
+    steps(&mut h, 2);
+    h.get_by_label("Modifier les modèles…").click();
+    steps(&mut h, 2);
+    h.get_by_label("Annuler").click();
+    steps(&mut h, 2);
+    assert!(!h.state().projects_editing(), "Cancel with nothing typed closes directly");
 }
 
 #[test]
