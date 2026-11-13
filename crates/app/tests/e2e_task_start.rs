@@ -247,6 +247,7 @@ fn a_task_started_from_the_panel() {
         messages: Vec::new(),
         worktree_location: None,
         task_settings: Default::default(),
+        merge_strategy: None,
     });
     h.state_mut().dispatch(vec![Event::EnterSpace(Some("shop".into())), Event::ToggleTasks]);
     wait(&mut h, "the agent, the repository and the task list", 90, |h| {

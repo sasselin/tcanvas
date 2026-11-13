@@ -131,6 +131,10 @@ pub struct Project {
     /// How the group starts its tasks (missing from older layouts: the defaults).
     #[serde(default, skip_serializing_if = "TaskSettings::is_default")]
     pub task_settings: TaskSettings,
+    /// How the group's branches were last merged from the review, offered first next time
+    /// (`None`: never; missing from older layouts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_strategy: Option<protocol::MergeStrategy>,
 }
 
 /// How a group starts its tasks (see `features::tasks::start`).
@@ -712,6 +716,7 @@ mod tests {
                 messages: Vec::new(),
                 worktree_location: None,
                 task_settings: Default::default(),
+                merge_strategy: None,
             });
         }
         let wire = |a: &str, b: &str| Wire { from: a.into(), to: b.into() };
@@ -759,7 +764,18 @@ mod tests {
     }
 
     fn project(id: &str, rect: Rect) -> Project {
-        Project { id: id.into(), name: id.into(), color: [0; 3], rect, cwd: None, templates: Vec::new(), messages: Vec::new(), worktree_location: None, task_settings: Default::default() }
+        Project {
+            id: id.into(),
+            name: id.into(),
+            color: [0; 3],
+            rect,
+            cwd: None,
+            templates: Vec::new(),
+            messages: Vec::new(),
+            worktree_location: None,
+            task_settings: Default::default(),
+            merge_strategy: None,
+        }
     }
 
     fn member(x: f32, y: f32, project: &str) -> Card {

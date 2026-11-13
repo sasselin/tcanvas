@@ -873,6 +873,7 @@ impl Projects {
                     messages: Vec::new(),
                     worktree_location: None,
                     task_settings: Default::default(),
+                    merge_strategy: None,
                 };
                 self.start_rename(&p);
                 let id = p.id.clone();
@@ -937,6 +938,14 @@ impl Projects {
                     && p.worktree_location != *location
                 {
                     p.worktree_location = location.clone();
+                    world.touch();
+                }
+            }
+            Event::SetProjectMergeStrategy(id, strategy) => {
+                if let Some(p) = world.projects.iter_mut().find(|p| &p.id == id)
+                    && p.merge_strategy != Some(*strategy)
+                {
+                    p.merge_strategy = Some(*strategy);
                     world.touch();
                 }
             }
@@ -1012,6 +1021,7 @@ mod tests {
             messages: Vec::new(),
             worktree_location: None,
             task_settings: Default::default(),
+            merge_strategy: None,
         });
         let mut member = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::splat(50.0)), None);
         member.project = Some("p".into());
@@ -1038,6 +1048,7 @@ mod tests {
             messages: Vec::new(),
             worktree_location: None,
             task_settings: Default::default(),
+            merge_strategy: None,
         });
         let mut a = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::splat(50.0)), None);
         a.name = Some("server".into());
@@ -1081,6 +1092,7 @@ mod tests {
                 messages: Vec::new(),
                 worktree_location: None,
                 task_settings: Default::default(),
+                merge_strategy: None,
             });
         }
         let mut c = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::new(300.0, 200.0)), None);
@@ -1235,6 +1247,7 @@ mod tests {
             messages: Vec::new(),
             worktree_location: None,
             task_settings: Default::default(),
+            merge_strategy: None,
         });
         w.space = Some("api".into());
         let mut out = vec![];
@@ -1257,6 +1270,7 @@ mod tests {
             messages: Vec::new(),
             worktree_location: None,
             task_settings: Default::default(),
+            merge_strategy: None,
         });
         // "All" view, camera centered on the existing group, or creation at a precise point inside it.
         for at in [None, Some(pos2(20.0, 10.0))] {

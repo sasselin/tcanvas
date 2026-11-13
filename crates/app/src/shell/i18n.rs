@@ -5,7 +5,10 @@
 
 use std::cell::Cell;
 
-use protocol::{BranchKeepReason, KeepReason, LocationIssue, PatternIssue, Priority, Problem, SkipReason, TaskField, TaskStatus, TermStatus};
+use protocol::{
+    BaseKind, BranchKeepReason, GitOperation, KeepReason, LocationIssue, MergeRefusal, MergeStep, MergeStrategy, NotApplied, PatternIssue, Priority, Problem, SkipReason, TaskField, TaskStatus,
+    TermStatus,
+};
 
 use super::event::SendRefusal;
 use protocol::task_command::Spot;
@@ -176,7 +179,94 @@ impl Texts {
             Problem::ReviewNoCommits => self.review_no_commits.into(),
             Problem::NotARegularFile { path } => (self.not_a_regular_file)(path),
             Problem::ReviewTimedOut { secs } => (self.review_timed_out)(*secs),
+            Problem::MergeStepFailed { step, detail } => (self.merge_step_failed)(self.merge_step(*step), detail),
+            Problem::MergeRebaseDiffers => self.merge_rebase_differs.into(),
+            Problem::MergeTimedOut { secs } => (self.merge_timed_out)(*secs),
+            Problem::MergeHookChanged => self.merge_hook_changed.into(),
         }
+    }
+
+    pub fn merge_step(&self, step: MergeStep) -> &'static str {
+        match step {
+            MergeStep::Prepare => self.merge_step_prepare,
+            MergeStep::Merge => self.merge_step_merge,
+            MergeStep::Commit => self.merge_step_commit,
+            MergeStep::Rebase => self.merge_step_rebase,
+        }
+    }
+
+    pub fn git_operation(&self, op: GitOperation) -> &'static str {
+        match op {
+            GitOperation::Merge => self.merge_op_merge,
+            GitOperation::Rebase => self.merge_op_rebase,
+            GitOperation::CherryPick => self.merge_op_cherry_pick,
+            GitOperation::Revert => self.merge_op_revert,
+            GitOperation::Bisect => self.merge_op_bisect,
+            GitOperation::Sequence => self.merge_op_sequence,
+        }
+    }
+
+    /// A strategy's name, and its one-line explanation (`base`: the branch merged into).
+    pub fn merge_strategy(&self, s: MergeStrategy, base: &str) -> (&'static str, String) {
+        match s {
+            MergeStrategy::Merge => (self.merge_strategy_merge, self.merge_strategy_merge_hint.into()),
+            MergeStrategy::FastForward => (self.merge_strategy_ff, (self.merge_strategy_ff_hint)(base)),
+            MergeStrategy::Squash => (self.merge_strategy_squash, (self.merge_strategy_squash_hint)(base)),
+            MergeStrategy::Rebase => (self.merge_strategy_rebase, (self.merge_strategy_rebase_hint)(base)),
+        }
+    }
+
+    /// A list of files, the ones not listed counted.
+    pub fn merge_files(&self, files: &[String], more: u32) -> String {
+        let mut list = files.join(", ");
+        if more > 0 {
+            list = format!("{list}, {}", (self.merge_more_files)(more));
+        }
+        list
+    }
+
+    /// Why the agent refused a merge.
+    pub fn merge_refusal(&self, r: &MergeRefusal) -> String {
+        match r {
+            MergeRefusal::Detached => self.merge_block_detached.into(),
+            MergeRefusal::BranchChanged { expected, found } => (self.merge_branch_changed)(expected, found.as_deref().unwrap_or(self.detached_head)),
+            MergeRefusal::BaseNotLocal { base, named: BaseKind::Remote } => (self.merge_block_remote)(base),
+            MergeRefusal::BaseNotLocal { .. } => self.merge_block_other.into(),
+            MergeRefusal::BaseNotFound { base } => (self.merge_base_not_found)(base),
+            MergeRefusal::BaseIsBranch => self.merge_base_is_branch.into(),
+            MergeRefusal::BaseNotCheckedOut { base } => (self.merge_block_not_checked_out)(base),
+            MergeRefusal::Stale { branch_moved, base_moved } => (self.merge_stale)(*branch_moved, *base_moved),
+            MergeRefusal::NotAhead => self.merge_block_nothing.into(),
+            MergeRefusal::Unrelated => self.merge_block_unrelated.into(),
+            MergeRefusal::HiddenChanges { path } => (self.merge_hidden)(path),
+            MergeRefusal::InProgress { path, operation } => (self.merge_in_progress)(self.git_operation(*operation), path),
+            MergeRefusal::NotChecked { path } => (self.merge_not_checked)(path),
+            MergeRefusal::AgentWorking { path, .. } => (self.merge_block_agent)(path),
+            MergeRefusal::NoIdentity => self.merge_no_identity.into(),
+            MergeRefusal::MessageEmpty => self.merge_message_empty.into(),
+            MergeRefusal::MessageTooLong { max } => (self.merge_message_too_long)(&(self.size)(*max as u64)),
+            MergeRefusal::MessageInvalid => self.merge_message_invalid.into(),
+            MergeRefusal::Busy => self.merge_busy.into(),
+            MergeRefusal::RebaseMerges => self.merge_rebase_merges.into(),
+            MergeRefusal::Sparse { path } => (self.merge_sparse)(path),
+            MergeRefusal::SessionsUnknown => self.merge_sessions_unknown.into(),
+            MergeRefusal::PreviousAgent { pid } => (self.merge_previous_agent)(*pid),
+        }
+    }
+
+    /// Why a prepared result was not applied to the base `base`.
+    pub fn merge_not_applied_why(&self, base: &str, why: &NotApplied) -> String {
+        let reason = match why {
+            NotApplied::BaseMoved { found, head } => {
+                let at = head.as_deref().map(|h| &h[..h.len().min(7)]).unwrap_or("?");
+                (self.merge_na_moved)(base, &format!("{} {at}", found.as_deref().unwrap_or(self.detached_head)))
+            }
+            NotApplied::Collisions { files, more } => (self.merge_na_collisions)(&self.merge_files(files, *more)),
+            NotApplied::Refused { detail } => (self.merge_na_refused)(detail),
+            NotApplied::DryRun { detail } => (self.merge_na_dry_run)(detail),
+            NotApplied::Locked { path } => (self.merge_na_locked)(path),
+        };
+        (self.merge_not_applied)(base, &reason)
     }
 
     pub fn task_status(&self, s: TaskStatus) -> &'static str {
@@ -403,6 +493,108 @@ pub struct Texts {
     pub review_base_other: &'static str,
     pub review_several_bases: fn(&str) -> String,
     pub review_merge_mark: &'static str,
+    pub merge_button: &'static str,
+    pub merge_button_hint: &'static str,
+    pub merge_running: &'static str,
+    pub merge_still_running: fn(u64) -> String,
+    pub merge_block_unsupported: &'static str,
+    pub merge_block_loading: &'static str,
+    pub merge_block_detached: &'static str,
+    pub merge_block_remote: fn(&str) -> String,
+    pub merge_use_local: fn(&str) -> String,
+    pub merge_block_other: &'static str,
+    pub merge_block_not_checked_out: fn(&str) -> String,
+    pub merge_block_nothing: &'static str,
+    pub merge_block_unrelated: &'static str,
+    pub merge_block_agent: fn(&str) -> String,
+    pub merge_title: fn(&str, &str) -> String,
+    pub merge_where: fn(&str, &str) -> String,
+    pub merge_counts: fn(u32, u64, u64, u64) -> String,
+    pub merge_how: &'static str,
+    pub merge_strategy_merge: &'static str,
+    pub merge_strategy_merge_hint: &'static str,
+    pub merge_strategy_ff: &'static str,
+    pub merge_strategy_ff_hint: fn(&str) -> String,
+    pub merge_strategy_squash: &'static str,
+    pub merge_strategy_squash_hint: fn(&str) -> String,
+    pub merge_strategy_rebase: &'static str,
+    pub merge_strategy_rebase_hint: fn(&str) -> String,
+    pub merge_message_label: &'static str,
+    pub merge_branch_kept: &'static str,
+    pub merge_rebase_merges: &'static str,
+    pub merge_base_moved: fn(&str, u32) -> String,
+    pub merge_crossed: fn(&str) -> String,
+    pub merge_branch_dirty_note: &'static str,
+    pub merge_hooks_note: fn(&str) -> String,
+    pub merge_conflict_note: &'static str,
+    pub merge_no_push: &'static str,
+    pub merge_ok: &'static str,
+    pub merge_done: fn(&str, &str, &str) -> String,
+    pub merge_done_ff: fn(&str, &str, &str) -> String,
+    pub merge_remove_worktree: &'static str,
+    pub merge_remove_with_branch: fn(&str) -> String,
+    pub merge_remove_hint: &'static str,
+    pub merge_branch_cleanup: fn(&str, &str) -> String,
+    pub merge_branch_cleanup_moved: fn(&str, &str) -> String,
+    pub merge_task_done: fn(&str) -> String,
+    pub merge_task_is_done: fn(&str) -> String,
+    pub merge_dismiss: &'static str,
+    pub merge_conflict: &'static str,
+    pub merge_more_files: fn(u32) -> String,
+    pub merge_open_card: &'static str,
+    pub merge_conflict_hint: fn(&str) -> String,
+    pub merge_refused: fn(&str) -> String,
+    pub merge_failed: fn(&str) -> String,
+    pub merge_untouched: &'static str,
+    pub merge_not_applied: fn(&str, &str) -> String,
+    pub merge_na_moved: fn(&str, &str) -> String,
+    pub merge_na_collisions: fn(&str) -> String,
+    pub merge_na_refused: fn(&str) -> String,
+    pub merge_unverified: fn(&str, &str, &str) -> String,
+    pub merge_lost: &'static str,
+    pub merge_step_failed: fn(&str, &str) -> String,
+    pub merge_step_prepare: &'static str,
+    pub merge_step_merge: &'static str,
+    pub merge_step_commit: &'static str,
+    pub merge_step_rebase: &'static str,
+    pub merge_op_merge: &'static str,
+    pub merge_op_rebase: &'static str,
+    pub merge_op_cherry_pick: &'static str,
+    pub merge_op_revert: &'static str,
+    pub merge_op_bisect: &'static str,
+    pub merge_op_sequence: &'static str,
+    pub merge_branch_changed: fn(&str, &str) -> String,
+    pub merge_base_not_found: fn(&str) -> String,
+    pub merge_base_is_branch: &'static str,
+    pub merge_stale: fn(bool, bool) -> String,
+    pub merge_hidden: fn(&str) -> String,
+    pub merge_in_progress: fn(&str, &str) -> String,
+    pub merge_not_checked: fn(&str) -> String,
+    pub merge_no_identity: &'static str,
+    pub merge_message_empty: &'static str,
+    pub merge_message_too_long: fn(&str) -> String,
+    pub merge_message_invalid: &'static str,
+    pub merge_busy: &'static str,
+    pub merge_sparse: fn(&str) -> String,
+    pub merge_sessions_unknown: &'static str,
+    pub merge_previous_agent: fn(u32) -> String,
+    pub merge_rebase_differs: &'static str,
+    pub merge_timed_out: fn(u64) -> String,
+    pub merge_interrupted_title: &'static str,
+    pub merge_interrupted_alive: fn(&str, &str, u32) -> String,
+    pub merge_interrupted_applied: fn(&str, &str, &str) -> String,
+    pub merge_interrupted_not_applied: fn(&str, &str) -> String,
+    pub merge_record_corrupt: fn(&str, &str) -> String,
+    pub merge_na_dry_run: fn(&str) -> String,
+    pub merge_na_locked: fn(&str) -> String,
+    pub merge_partly: fn(&str, &str, &str, &str) -> String,
+    pub merge_partly_finish: fn(&str, &str, &str) -> String,
+    pub merge_partly_back: fn(&str, &str) -> String,
+    pub merge_unverified_moved: fn(&str, &str) -> String,
+    pub merge_hook_changed: &'static str,
+    pub merge_interrupted_applying: fn(&str, &str, &str, &str) -> String,
+    pub merge_with_changes: &'static str,
+    pub merge_without_changes: &'static str,
 
     // Tasks panel.
     pub tasks_button: fn(usize) -> String,
@@ -1124,6 +1316,142 @@ pub const EN: Texts = Texts {
     review_base_other: "(not a branch: a tag or a commit)",
     review_several_bases: |b| format!("⚠ This branch and {b} merged each other: the files may include changes {b} already has."),
     review_merge_mark: "[merge]",
+    merge_button: "Merge…",
+    merge_button_hint: "Merge this branch into its base, after a confirmation that says what will happen",
+    merge_running: "Merging…",
+    merge_still_running: |s| format!("git is still working after {s} s, aside: the result shows here when it ends."),
+    merge_block_unsupported: "The agent is too old to merge: restart the app to update it.",
+    merge_block_loading: "Waiting for the review…",
+    merge_block_detached: "Detached HEAD: there is no branch to merge.",
+    merge_block_remote: |b| format!("{b} is a remote branch: a merge goes into a local branch."),
+    merge_use_local: |b| format!("Review against {b}"),
+    merge_block_other: "The base is a tag or a commit: a merge goes into a local branch.",
+    merge_block_not_checked_out: |b| format!("{b} is not checked out in any worktree: check it out somewhere (usually the main checkout) to merge into it."),
+    merge_block_nothing: "Nothing to merge: the base already has every commit of the branch.",
+    merge_block_unrelated: "No common history with the base: nothing can be merged.",
+    merge_block_agent: |path| format!("A coding agent is working in {path}: wait until it is done."),
+    merge_title: |branch, base| format!("Merge {branch} into {base}"),
+    merge_where: |path, base| format!("The result is prepared aside, in a private copy of the agent; only at the end is {base} moved to it, in {path}, by a fast-forward that does all or nothing."),
+    merge_counts: |n, files, added, removed| {
+        let commits = if n == 1 { "1 commit".to_string() } else { format!("{n} commits") };
+        let files = if files == 1 { "1 file".to_string() } else { format!("{files} files") };
+        format!("{commits}, {files} changed (+{added} −{removed}).")
+    },
+    merge_how: "How:",
+    merge_strategy_merge: "Merge commit",
+    merge_strategy_merge_hint: "Always a merge commit: the branch stays visible in the history and can be reverted as a whole.",
+    merge_strategy_ff: "Fast-forward when possible",
+    merge_strategy_ff_hint: |base| format!("{base} just moves to the branch's last commit when it has not moved since; otherwise a merge commit."),
+    merge_strategy_squash: "Squash into one commit",
+    merge_strategy_squash_hint: |base| format!("One new commit on {base} with the message below; the branch keeps its own commits."),
+    merge_strategy_rebase: "Rebase, then fast-forward",
+    merge_strategy_rebase_hint: |base| {
+        format!("The branch's commits replayed on top of {base}, checked to give the same files as a merge: a straight history. The branch itself keeps its own commits.")
+    },
+    merge_message_label: "Commit message, kept as written (lines starting with # included), made with your own git identity:",
+    merge_branch_kept: "The branch keeps its own commits, which git will not count as merged: the cleanup keeps it and its worktree.",
+    merge_rebase_merges: "⚠ Rebase is not possible here: the branch has merge commits, which a rebase drops along with the changes made in them. Choose Merge commit or Squash.",
+    merge_base_moved: |b, n| {
+        if n == 1 {
+            format!("⚠ {b} moved ahead by 1 commit since the branch started: the result brings that newer work together with the branch.")
+        } else {
+            format!("⚠ {b} moved ahead by {n} commits since the branch started: the result brings that newer work together with the branch.")
+        }
+    },
+    merge_crossed: |b| format!("⚠ The branch and {b} already merged each other: their histories cross. Check the result."),
+    merge_branch_dirty_note: "The branch's worktree has uncommitted changes: they are not part of the merge (only its commits are).",
+    merge_hooks_note: |b| {
+        format!("Git hooks run as usual: in the private copy while the result is prepared (post-checkout, pre-merge-commit, commit-msg...), then post-merge in {b}'s worktree at the end.")
+    },
+    merge_conflict_note: "On a conflict nothing is applied, and the conflicting files are listed.",
+    merge_no_push: "Nothing is pushed.",
+    merge_ok: "Merge",
+    merge_done: |branch, base, sha| format!("✔ {branch} merged into {base} (now at {sha})."),
+    merge_done_ff: |branch, base, sha| format!("✔ {base} fast-forwarded to {branch} (now at {sha})."),
+    merge_remove_worktree: "Remove the worktree…",
+    merge_remove_with_branch: |b| format!("Remove the worktree and the branch {b}…"),
+    merge_remove_hint: "Opens the cleanup window, with its own checks and its confirmation",
+    merge_branch_cleanup: |branch, path| {
+        format!(
+            "{branch} still holds its own commits, which git does not count as merged: the cleanup keeps this worktree and the branch. Every one of them went into the result: once sure, remove them by hand with git worktree remove {path}, then git branch -D {branch} (which deletes the branch whatever it holds)."
+        )
+    },
+    merge_branch_cleanup_moved: |branch, path| {
+        format!(
+            "⚠ {branch} has commits made after this merge: they are in no other branch. Merge them first; git branch -D {branch} would discard them. The cleanup keeps this worktree ({path}) and the branch meanwhile."
+        )
+    },
+    merge_task_done: |r| format!("Move task {r} to done"),
+    merge_task_is_done: |r| format!("✔ Task {r} is done."),
+    merge_dismiss: "Close",
+    merge_conflict: "⚠ Conflict while preparing the result aside: nothing was applied, your worktrees were not touched. Conflicting files:",
+    merge_more_files: |n| format!("… and {n} more"),
+    merge_open_card: "Open a terminal in the branch's worktree",
+    merge_conflict_hint: |b| format!("There, merge {b} into the branch (git merge {b}), resolve the conflicts and commit, or let a coding agent do it; then review and merge again."),
+    merge_refused: |why| format!("Not merged: {why}"),
+    merge_failed: |why| format!("Not merged: {why}"),
+    merge_untouched: "Nothing was applied: your worktrees were not touched.",
+    merge_not_applied: |base, why| format!("Prepared, not applied: {why} {base}'s worktree is unchanged."),
+    merge_na_moved: |base, found| format!("{base}'s worktree is no longer on {base} at the commit reviewed (now: {found})."),
+    merge_na_collisions: |files| format!("untracked or ignored files are where the result writes ({files}): git would overwrite or delete them. Move them aside (or commit them), then merge again."),
+    merge_na_refused: |detail| format!("git refused the fast-forward: {detail}"),
+    merge_unverified: |base, now, tip| format!("⚠ The fast-forward ran, but {base}'s worktree is now on {now}, and {base} is at {tip}: look at it in a terminal."),
+    merge_lost: "The agent stopped during the merge: its next start says whether the base was moved.",
+    merge_step_failed: |step, detail| format!("{step} failed: {detail}"),
+    merge_step_prepare: "Preparing the private copy",
+    merge_step_merge: "git merge",
+    merge_step_commit: "The commit",
+    merge_step_rebase: "git rebase",
+    merge_op_merge: "A merge is in progress",
+    merge_op_rebase: "A rebase is in progress",
+    merge_op_cherry_pick: "A cherry-pick is in progress",
+    merge_op_revert: "A revert is in progress",
+    merge_op_bisect: "A bisect is in progress",
+    merge_op_sequence: "A cherry-pick or revert of several commits is in progress",
+    merge_branch_changed: |expected, found| format!("the worktree is no longer on {expected} (now {found}): review it again."),
+    merge_base_not_found: |b| format!("no local branch is named {b}."),
+    merge_base_is_branch: "the base is the branch itself.",
+    merge_stale: |branch, base| match (branch, base) {
+        (true, true) => "the branch and its base both moved since this review: look at it again.".into(),
+        (true, false) => "the branch moved since this review: look at it again.".into(),
+        _ => "the base moved since this review: look at it again.".into(),
+    },
+    merge_hidden: |path| format!("{path} has files flagged assume-unchanged or skip-worktree, whose edits git does not show."),
+    merge_in_progress: |op, path| format!("{op} in {path}: finish it or abort it first."),
+    merge_not_checked: |path| format!("git could not tell what is in {path}: refused rather than guessed."),
+    merge_no_identity: "git has no identity configured (user.name and user.email): the app never makes one up. Set yours with git config, then merge again.",
+    merge_message_empty: "the commit message is empty.",
+    merge_message_too_long: |max| format!("the commit message is longer than {max}."),
+    merge_message_invalid: "the commit message holds a NUL character.",
+    merge_busy: "another merge is still running.",
+    merge_sparse: |path| format!("{path} is a sparse checkout: merge in a terminal there."),
+    merge_sessions_unknown: "the agent has just started and does not know yet what the terminals are doing: try again in a moment.",
+    merge_previous_agent: |pid| format!("the previous agent (process {pid}) is still merging in this repository: wait until it ends."),
+    merge_rebase_differs: "the rebased branch does not give the same files as a merge of it (a rebase replays commits one by one and may land a change elsewhere): nothing was applied. Choose Merge commit or Squash.",
+    merge_timed_out: |s| format!("preparing the result took more than {s} s (a hook, or a prompt for a signing key, waiting): it was stopped."),
+    merge_interrupted_title: "A merge was interrupted",
+    merge_interrupted_alive: |branch, base, pid| format!("The previous agent (process {pid}) is still merging {branch} into {base}: merges in this repository wait until it ends."),
+    merge_interrupted_applied: |branch, base, tip| format!("The agent stopped while it merged {branch} into {base}, after moving {base} to the result ({tip}): the merge is done."),
+    merge_interrupted_not_applied: |branch, base| format!("The agent stopped while it merged {branch} into {base}, before moving {base}: nothing was applied, and its private copy was removed."),
+    merge_record_corrupt: |path, detail| format!("A merge record could not be read ({detail}): it was moved aside to {path}."),
+    merge_na_dry_run: |detail| format!("a dry run of the fast-forward failed, so it was not started: {detail}"),
+    merge_na_locked: |path| format!("a lock of git's is there ({path}): another git is at work, or one crashed. The fast-forward was not started."),
+    merge_partly: |base, head, result, detail| {
+        format!(
+            "⚠ The fast-forward failed half-way ({detail}): in {base}'s worktree, the index and the files are at the result {result}, but the branch {base} is still at {head}. Nothing else was done. Choose one of these two commands, in that worktree:"
+        )
+    },
+    merge_partly_finish: |base, result, head| format!("To finish: git update-ref refs/heads/{base} {result} {head}"),
+    merge_partly_back: |result, head| format!("To go back: git read-tree -m -u {result} {head}"),
+    merge_unverified_moved: |moved, head| format!("The fast-forward moved {moved} instead (from the base's commit to the result). To put it back: git update-ref refs/heads/{moved} {head}"),
+    merge_hook_changed: "a hook changed the content while the result was committed aside (a formatter in pre-commit...): the result is no longer what was reviewed, nothing was applied.",
+    merge_interrupted_applying: |branch, base, tip, checkout| {
+        format!(
+            "The agent stopped while it moved {base} to the result of {branch}: the fast-forward may have been under way. Now {base} is at {tip}, and the base's worktree is on {checkout}. Look at it before anything else."
+        )
+    },
+    merge_with_changes: "it has uncommitted changes",
+    merge_without_changes: "it has no uncommitted change",
 
     tasks_button: |n| format!("✔ Tasks ({n})"),
     tasks_button_hint: "What to do next in this group's project, kept outside the repository",
@@ -1834,6 +2162,154 @@ pub const FR: Texts = Texts {
     review_base_other: "(pas une branche : une étiquette ou un commit)",
     review_several_bases: |b| format!("⚠ Cette branche et {b} se sont fusionnées l'une l'autre : les fichiers peuvent inclure des changements que {b} a déjà."),
     review_merge_mark: "[fusion]",
+    merge_button: "Fusionner…",
+    merge_button_hint: "Fusionner cette branche dans sa base, après une confirmation qui dit ce qui va se passer",
+    merge_running: "Fusion en cours…",
+    merge_still_running: |s| format!("git travaille encore après {s} s, à part : le résultat s'affiche ici quand il a fini."),
+    merge_block_unsupported: "L'agent est trop ancien pour fusionner : redémarrez l'application pour le mettre à jour.",
+    merge_block_loading: "En attente de la revue…",
+    merge_block_detached: "HEAD détachée : aucune branche à fusionner.",
+    merge_block_remote: |b| format!("{b} est une branche distante : une fusion se fait dans une branche locale."),
+    merge_use_local: |b| format!("Relire par rapport à {b}"),
+    merge_block_other: "La base est un tag ou un commit : une fusion se fait dans une branche locale.",
+    merge_block_not_checked_out: |b| format!("{b} n'est extraite dans aucun worktree : extrayez-la quelque part (d'habitude le dépôt principal) pour fusionner dedans."),
+    merge_block_nothing: "Rien à fusionner : la base a déjà tous les commits de la branche.",
+    merge_block_unrelated: "Aucun historique commun avec la base : rien ne peut être fusionné.",
+    merge_block_agent: |path| format!("Un agent de code travaille dans {path} : attendez qu'il ait fini."),
+    merge_title: |branch, base| format!("Fusionner {branch} dans {base}"),
+    merge_where: |path, base| {
+        format!("Le résultat est préparé à part, dans une copie privée de l'agent ; c'est seulement à la fin que {base} y est avancée, dans {path}, par une avance rapide qui fait tout ou rien.")
+    },
+    merge_counts: |n, files, added, removed| {
+        let commits = if n == 1 { "1 commit".to_string() } else { format!("{n} commits") };
+        let files = if files == 1 { "1 fichier modifié".to_string() } else { format!("{files} fichiers modifiés") };
+        format!("{commits}, {files} (+{added} −{removed}).")
+    },
+    merge_how: "Comment :",
+    merge_strategy_merge: "Commit de fusion",
+    merge_strategy_merge_hint: "Toujours un commit de fusion : la branche reste visible dans l'historique et peut être annulée d'un coup.",
+    merge_strategy_ff: "Avance rapide si possible",
+    merge_strategy_ff_hint: |base| format!("{base} avance simplement jusqu'au dernier commit de la branche si elle n'a pas bougé depuis ; sinon un commit de fusion."),
+    merge_strategy_squash: "Squash en un seul commit",
+    merge_strategy_squash_hint: |base| format!("Un nouveau commit sur {base} avec le message ci-dessous ; la branche garde ses propres commits."),
+    merge_strategy_rebase: "Rebase, puis avance rapide",
+    merge_strategy_rebase_hint: |base| {
+        format!("Les commits de la branche rejoués par-dessus {base}, vérifiés pour donner les mêmes fichiers qu'une fusion : un historique linéaire. La branche elle-même garde ses commits.")
+    },
+    merge_message_label: "Message du commit, gardé tel quel (lignes commençant par # comprises), fait avec votre propre identité git :",
+    merge_branch_kept: "La branche garde ses propres commits, que git ne considérera pas comme fusionnés : le nettoyage la garde, avec son worktree.",
+    merge_rebase_merges: "⚠ Rebase impossible ici : la branche a des commits de fusion, qu'un rebase supprime avec les changements faits dedans. Choisissez Commit de fusion ou Squash.",
+    merge_base_moved: |b, n| {
+        if n == 1 {
+            format!("⚠ {b} a avancé d'un commit depuis le début de la branche : le résultat réunit ce travail plus récent et la branche.")
+        } else {
+            format!("⚠ {b} a avancé de {n} commits depuis le début de la branche : le résultat réunit ce travail plus récent et la branche.")
+        }
+    },
+    merge_crossed: |b| format!("⚠ La branche et {b} se sont déjà fusionnées l'une l'autre : leurs historiques se croisent. Vérifiez le résultat."),
+    merge_branch_dirty_note: "Le worktree de la branche a des changements non commités : ils ne font pas partie de la fusion (seuls ses commits en font partie).",
+    merge_hooks_note: |b| {
+        format!(
+            "Les hooks git s'exécutent comme d'habitude : dans la copie privée pendant la préparation (post-checkout, pre-merge-commit, commit-msg…), puis post-merge dans le worktree de {b} à la fin."
+        )
+    },
+    merge_conflict_note: "En cas de conflit, rien n'est appliqué et les fichiers en conflit sont listés.",
+    merge_no_push: "Rien n'est poussé.",
+    merge_ok: "Fusionner",
+    merge_done: |branch, base, sha| format!("✔ {branch} fusionnée dans {base} (maintenant à {sha})."),
+    merge_done_ff: |branch, base, sha| format!("✔ {base} avancée jusqu'à {branch} (maintenant à {sha})."),
+    merge_remove_worktree: "Supprimer le worktree…",
+    merge_remove_with_branch: |b| format!("Supprimer le worktree et la branche {b}…"),
+    merge_remove_hint: "Ouvre la fenêtre de nettoyage, avec ses propres vérifications et sa confirmation",
+    merge_branch_cleanup: |branch, path| {
+        format!(
+            "{branch} garde ses propres commits, que git ne considère pas comme fusionnés : le nettoyage garde ce worktree et la branche. Tous sont dans le résultat : une fois sûr, supprimez-les à la main avec git worktree remove {path}, puis git branch -D {branch} (qui supprime la branche quoi qu'elle contienne)."
+        )
+    },
+    merge_branch_cleanup_moved: |branch, path| {
+        format!(
+            "⚠ {branch} a des commits faits après cette fusion : ils ne sont dans aucune autre branche. Fusionnez-les d'abord ; git branch -D {branch} les supprimerait. Le nettoyage garde ce worktree ({path}) et la branche en attendant."
+        )
+    },
+    merge_task_done: |r| format!("Passer la tâche {r} à terminée"),
+    merge_task_is_done: |r| format!("✔ La tâche {r} est terminée."),
+    merge_dismiss: "Fermer",
+    merge_conflict: "⚠ Conflit pendant la préparation du résultat à part : rien n'a été appliqué, vos worktrees n'ont pas été touchés. Fichiers en conflit :",
+    merge_more_files: |n| format!("… et {n} de plus"),
+    merge_open_card: "Ouvrir un terminal dans le worktree de la branche",
+    merge_conflict_hint: |b| {
+        format!("Là, fusionnez {b} dans la branche (git merge {b}), résolvez les conflits et commitez, ou laissez un agent de code le faire ; puis relisez et fusionnez à nouveau.")
+    },
+    merge_refused: |why| format!("Pas fusionné : {why}"),
+    merge_failed: |why| format!("Pas fusionné : {why}"),
+    merge_untouched: "Rien n'a été appliqué : vos worktrees n'ont pas été touchés.",
+    merge_not_applied: |base, why| format!("Préparé, pas appliqué : {why} Le worktree de {base} est inchangé."),
+    merge_na_moved: |base, found| format!("le worktree de {base} n'est plus sur {base} au commit relu (maintenant : {found})."),
+    merge_na_collisions: |files| {
+        format!("des fichiers non suivis ou ignorés sont là où le résultat écrit ({files}) : git les écraserait ou les supprimerait. Mettez-les de côté (ou commitez-les), puis fusionnez à nouveau.")
+    },
+    merge_na_refused: |detail| format!("git a refusé l'avance rapide : {detail}"),
+    merge_unverified: |base, now, tip| format!("⚠ L'avance rapide a eu lieu, mais le worktree de {base} est maintenant sur {now}, et {base} est à {tip} : regardez-le dans un terminal."),
+    merge_lost: "L'agent s'est arrêté pendant la fusion : à son prochain démarrage, il dit si la base a été avancée.",
+    merge_step_failed: |step, detail| format!("{step} a échoué : {detail}"),
+    merge_step_prepare: "La préparation de la copie privée",
+    merge_step_merge: "git merge",
+    merge_step_commit: "Le commit",
+    merge_step_rebase: "git rebase",
+    merge_op_merge: "Une fusion est en cours",
+    merge_op_rebase: "Un rebase est en cours",
+    merge_op_cherry_pick: "Un cherry-pick est en cours",
+    merge_op_revert: "Un revert est en cours",
+    merge_op_bisect: "Une bisection est en cours",
+    merge_op_sequence: "Un cherry-pick ou un revert de plusieurs commits est en cours",
+    merge_branch_changed: |expected, found| format!("le worktree n'est plus sur {expected} (maintenant {found}) : relisez-le."),
+    merge_base_not_found: |b| format!("aucune branche locale ne s'appelle {b}."),
+    merge_base_is_branch: "la base est la branche elle-même.",
+    merge_stale: |branch, base| match (branch, base) {
+        (true, true) => "la branche et sa base ont bougé depuis cette revue : regardez-la à nouveau.".into(),
+        (true, false) => "la branche a bougé depuis cette revue : regardez-la à nouveau.".into(),
+        _ => "la base a bougé depuis cette revue : regardez-la à nouveau.".into(),
+    },
+    merge_hidden: |path| format!("{path} a des fichiers marqués assume-unchanged ou skip-worktree, dont git ne montre pas les modifications."),
+    merge_in_progress: |op, path| format!("{op} dans {path} : terminez-le ou annulez-le d'abord."),
+    merge_not_checked: |path| format!("git n'a pas pu dire ce qu'il y a dans {path} : refusé plutôt que deviné."),
+    merge_no_identity: "git n'a pas d'identité configurée (user.name et user.email) : l'application n'en invente jamais. Configurez la vôtre avec git config, puis fusionnez à nouveau.",
+    merge_message_empty: "le message du commit est vide.",
+    merge_message_too_long: |max| format!("le message du commit dépasse {max}."),
+    merge_message_invalid: "le message du commit contient un caractère NUL.",
+    merge_busy: "une autre fusion est encore en cours.",
+    merge_sparse: |path| format!("{path} est un checkout partiel (sparse) : fusionnez dans un terminal, là-bas."),
+    merge_sessions_unknown: "l'agent vient de démarrer et ne sait pas encore ce que font les terminaux : réessayez dans un instant.",
+    merge_previous_agent: |pid| format!("l'agent précédent (processus {pid}) fusionne encore dans ce dépôt : attendez qu'il ait fini."),
+    merge_rebase_differs: "la branche rebasée ne donne pas les mêmes fichiers qu'une fusion (un rebase rejoue les commits un par un et peut placer un changement ailleurs) : rien n'a été appliqué. Choisissez Commit de fusion ou Squash.",
+    merge_timed_out: |s| format!("la préparation du résultat a pris plus de {s} s (un hook, ou une demande de clé de signature, en attente) : elle a été arrêtée."),
+    merge_interrupted_title: "Une fusion a été interrompue",
+    merge_interrupted_alive: |branch, base, pid| format!("L'agent précédent (processus {pid}) fusionne encore {branch} dans {base} : les fusions dans ce dépôt attendent qu'il ait fini."),
+    merge_interrupted_applied: |branch, base, tip| {
+        format!("L'agent s'est arrêté pendant qu'il fusionnait {branch} dans {base}, après avoir avancé {base} jusqu'au résultat ({tip}) : la fusion est faite.")
+    },
+    merge_interrupted_not_applied: |branch, base| {
+        format!("L'agent s'est arrêté pendant qu'il fusionnait {branch} dans {base}, avant d'avancer {base} : rien n'a été appliqué, et sa copie privée a été supprimée.")
+    },
+    merge_record_corrupt: |path, detail| format!("Un enregistrement de fusion n'a pas pu être lu ({detail}) : il a été mis de côté dans {path}."),
+    merge_na_dry_run: |detail| format!("un essai à blanc de l'avance rapide a échoué, elle n'a pas été lancée : {detail}"),
+    merge_na_locked: |path| format!("un verrou de git est présent ({path}) : un autre git travaille là, ou un git a planté. L'avance rapide n'a pas été lancée."),
+    merge_partly: |base, head, result, detail| {
+        format!(
+            "⚠ L'avance rapide a échoué à mi-chemin ({detail}) : dans le worktree de {base}, l'index et les fichiers sont au résultat {result}, mais la branche {base} est encore à {head}. Rien d'autre n'a été fait. Choisissez l'une des deux commandes, dans ce worktree :"
+        )
+    },
+    merge_partly_finish: |base, result, head| format!("Pour terminer : git update-ref refs/heads/{base} {result} {head}"),
+    merge_partly_back: |result, head| format!("Pour revenir en arrière : git read-tree -m -u {result} {head}"),
+    merge_unverified_moved: |moved, head| format!("L'avance rapide a déplacé {moved} à la place (du commit de la base jusqu'au résultat). Pour le remettre : git update-ref refs/heads/{moved} {head}"),
+    merge_hook_changed: "un hook a modifié le contenu pendant le commit fait à part (un formateur dans pre-commit…) : le résultat n'est plus ce qui a été relu, rien n'a été appliqué.",
+    merge_interrupted_applying: |branch, base, tip, checkout| {
+        format!(
+            "L'agent s'est arrêté pendant qu'il avançait {base} jusqu'au résultat de {branch} : l'avance rapide était peut-être en cours. Maintenant, {base} est à {tip} et le worktree de la base est sur {checkout}. Regardez-le avant toute autre chose."
+        )
+    },
+    merge_with_changes: "il a des changements non commités",
+    merge_without_changes: "il n'a pas de changement non commité",
 
     tasks_button: |n| format!("✔ Tâches ({n})"),
     tasks_button_hint: "La suite à faire dans le projet de ce groupe, gardée hors du dépôt",

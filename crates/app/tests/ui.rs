@@ -481,8 +481,9 @@ fn missing_tmux_is_shown_in_the_status_bar() {
 
 #[test]
 fn missing_shell_hooks_can_be_installed_from_the_status_bar() {
-    let hello =
-        |hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true, task_hooks: None, task_links: true, worktree_refresh: true, review: true, shell: None });
+    let hello = |hooks| {
+        Event::Agent(AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true, task_hooks: None, task_links: true, worktree_refresh: true, review: true, merge: true, shell: None })
+    };
     let installs = |h: &Harness<'_, App>| h.state().agent_sent().iter().filter(|c| **c == protocol::AgentCmd::InstallHooks).count();
     for (lang, label, button) in [(Lang::Fr, "⚠ hooks", "Installer"), (Lang::En, "⚠ hooks", "Install")] {
         let dir = temp_dir("hooks");
@@ -610,6 +611,7 @@ fn add_project(h: &mut Harness<'_, App>, name: &str, rect: Rect) -> String {
         messages: Vec::new(),
         worktree_location: None,
         task_settings: Default::default(),
+        merge_strategy: None,
     });
     id
 }
@@ -2822,6 +2824,7 @@ fn group_with_messages(h: &mut Harness<'_, App>, messages: &[(&str, &str, bool)]
             task_links: true,
             worktree_refresh: true,
             review: true,
+            merge: true,
             shell: None,
         }),
         Event::Agent(AgentEvent::Session(SessionInfo {
@@ -3744,6 +3747,7 @@ fn agent_hello(h: &mut Harness<'_, App>) {
         task_links: true,
         worktree_refresh: true,
         review: true,
+        merge: true,
         shell: None,
     });
     h.state_mut().dispatch(vec![hello]);
@@ -4145,6 +4149,7 @@ fn the_tasks_panel_in_english() {
         task_links: true,
         worktree_refresh: true,
         review: true,
+        merge: true,
         shell: None,
     });
     h.state_mut().dispatch(vec![hello]);
@@ -4165,6 +4170,7 @@ fn coding_agents_get_the_tasks_only_once_enabled_from_the_panel() {
             task_links: true,
             worktree_refresh: true,
             review: true,
+            merge: true,
             shell: None,
         })
     };
@@ -4570,6 +4576,7 @@ fn starting_tasks_needs_bash_or_zsh_and_a_safe_command() {
         task_links: true,
         worktree_refresh: true,
         review: true,
+        merge: true,
         shell: Some(protocol::ShellKind::Fish),
     });
     h.state_mut().dispatch(vec![fish, task_board("p-shop", shop_tasks())]);
@@ -5332,6 +5339,7 @@ fn an_older_agent_disables_review_and_merges_tags_and_crossed_histories_are_said
             task_links: true,
             worktree_refresh: true,
             review,
+            merge: review,
             shell: None,
         })
     };
@@ -5358,4 +5366,381 @@ fn an_older_agent_disables_review_and_merges_tags_and_crossed_histories_are_said
     ] {
         assert!(h.query_by_label(label).is_some(), "{label} missing");
     }
+}
+
+// --- Merge from the review --------------------------------------------------------------------
+
+/// The shop's review of `feat/invoices` (two commits ahead of `main`, which moved on by one),
+/// answered with `summary`.
+fn merge_review(h: &mut Harness<'_, App>, summary: protocol::ReviewSummary) {
+    shop_group(h);
+    h.state_mut().dispatch(vec![shop_worktrees("p-shop"), folder_changes("p-shop", "/home/me/shop", "main")]);
+    steps(h, 3);
+    h.state_mut().dispatch(vec![Event::ReviewWorktree { project: "p-shop".into(), path: INVOICES.into() }]);
+    steps(h, 3);
+    answer_review(h, "p-shop", Some(summary), None);
+}
+
+fn merges_sent(h: &Harness<'_, App>) -> Vec<protocol::AgentCmd> {
+    h.state().agent_sent().iter().filter(|c| matches!(c, protocol::AgentCmd::Merge { .. })).cloned().collect()
+}
+
+fn answer_merge(h: &mut Harness<'_, App>, outcome: protocol::MergeOutcome) {
+    let id = match merges_sent(h).last() {
+        Some(protocol::AgentCmd::Merge { id, .. }) => *id,
+        _ => panic!("a merge sent"),
+    };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Merged { id, key: "p-shop".into(), outcome })]);
+    steps(h, 3);
+}
+
+/// The Merge button, clicked: whether its confirmation opened.
+fn click_merge(h: &mut Harness<'_, App>, label: &str) -> bool {
+    h.get_by_label(label).click();
+    steps(h, 3);
+    h.state().changes.has_dialog()
+}
+
+/// Confirms with the danger button, a moment after the last click (two quick clicks are a
+/// double click).
+fn confirm_merge(h: &mut Harness<'_, App>, label: &str) {
+    steps(h, 30);
+    h.get_by_label(label).click();
+    steps(h, 3);
+}
+
+#[test]
+fn a_branch_is_merged_from_its_review_then_cleaned_up_and_its_task_done() {
+    use egui::accesskit::Role;
+    let dir = temp_dir("merge-ok");
+    let mut h = harness(&dir);
+    merge_review(&mut h, review_summary(protocol::ReviewState::Ahead));
+    let mut task = agent_task("rl", "q7m", "Rate limit", protocol::TaskStatus::Review);
+    task.worktree = Some(INVOICES.into());
+    h.state_mut().dispatch(vec![task_board("p-shop", vec![task.clone()])]);
+    steps(&mut h, 3);
+    assert!(click_merge(&mut h, "Fusionner…"), "the confirmation opens");
+    for label in [
+        "Fusionner feat/invoices dans main",
+        "Le résultat est préparé à part, dans une copie privée de l'agent ; c'est seulement à la fin que main y est avancée, dans /home/me/shop, par une avance rapide qui fait tout ou rien.",
+        "2 commits, 3 fichiers modifiés (+14 −3).",
+        "Comment :",
+        "Commit de fusion",
+        "Toujours un commit de fusion : la branche reste visible dans l'historique et peut être annulée d'un coup.",
+        "Avance rapide si possible",
+        "Squash en un seul commit",
+        "Rebase, puis avance rapide",
+        "⚠ main a avancé d'un commit depuis le début de la branche : le résultat réunit ce travail plus récent et la branche.",
+        "Les hooks git s'exécutent comme d'habitude : dans la copie privée pendant la préparation (post-checkout, pre-merge-commit, commit-msg…), puis post-merge dans le worktree de main à la fin.",
+        "En cas de conflit, rien n'est appliqué et les fichiers en conflit sont listés.",
+        "Rien n'est poussé.",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    assert!(h.query_all_by_role(Role::MultilineTextInput).next().is_none(), "no message for a merge commit");
+    // A squash: its message, prefilled from the task, editable; the branch keeps its commits.
+    steps(&mut h, 30);
+    h.get_by_label("Squash en un seul commit").click();
+    steps(&mut h, 4);
+    assert!(h.query_by_label("Message du commit, gardé tel quel (lignes commençant par # comprises), fait avec votre propre identité git :").is_some());
+    assert!(h.query_by_label("La branche garde ses propres commits, que git ne considérera pas comme fusionnés : le nettoyage la garde, avec son worktree.").is_some());
+    let message = h.get_all_by_role(Role::MultilineTextInput).next().expect("the message field");
+    assert_eq!(message.value().as_deref(), Some("Rate limit\n\n* feat: totals with taxes\n* fix: rounding"));
+    steps(&mut h, 30);
+    h.get_by_label("Commit de fusion").click();
+    confirm_merge(&mut h, "Fusionner");
+    assert!(!h.state().changes.has_dialog());
+    let sent = merges_sent(&h);
+    assert!(
+        matches!(&sent[..], [protocol::AgentCmd::Merge { key, worktree, branch, base, strategy: protocol::MergeStrategy::Merge, message: None, branch_head, base_head, .. }]
+            if key == "p-shop" && worktree == INVOICES && branch == "feat/invoices" && base == "main" && *branch_head == "2".repeat(40) && *base_head == "b".repeat(40)),
+        "{sent:?}"
+    );
+    assert_eq!(h.state().world.projects[0].merge_strategy, Some(protocol::MergeStrategy::Merge), "remembered for the group");
+    assert!(h.query_by_label("Fusion en cours…").is_some());
+    assert!(!click_merge(&mut h, "Fusionner…"), "disabled while it runs");
+    answer_merge(&mut h, protocol::MergeOutcome::StillRunning { secs: 60 });
+    assert!(h.query_by_label("git travaille encore après 60 s, à part : le résultat s'affiche ici quand il a fini.").is_some());
+    answer_merge(&mut h, protocol::MergeOutcome::Merged { base_head: "c".repeat(40), branch_head: "2".repeat(40), fast_forward: false });
+    assert!(h.query_by_label("✔ feat/invoices fusionnée dans main (maintenant à ccccccc).").is_some());
+    assert!(h.query_by_label("Supprimer le worktree…").is_some());
+    h.get_by_label("Passer la tâche q7m à terminée").click();
+    steps(&mut h, 3);
+    let (_, op, _) = last_edit(&h);
+    assert_eq!(op, protocol::TaskOp::SetStatus { task: "rl".into(), status: protocol::TaskStatus::Done, from: Some(protocol::TaskStatus::Review) });
+    task.status = protocol::TaskStatus::Done;
+    h.state_mut().dispatch(vec![task_board("p-shop", vec![task])]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("✔ La tâche q7m est terminée.").is_some());
+    // The cleanup window, with its own rule: this worktree has a terminal and changes, it is kept.
+    h.get_by_label("Supprimer le worktree et la branche feat/invoices…").click();
+    steps(&mut h, 3);
+    assert!(h.state().worktrees.cleanup_open() && !h.state().worktrees.has_dialog(), "opened, nothing asked: it says why it is kept");
+    h.get_by_label("Fermer").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Supprimer le worktree…").is_none());
+}
+
+#[test]
+fn a_conflict_is_reported_with_a_terminal_to_resolve_it_and_failures_are_said() {
+    use egui::accesskit::Role;
+    use protocol::{MergeOutcome, MergeRefusal, MergeStep, MergeStrategy, NotApplied, Problem};
+    let dir = temp_dir("merge-conflict");
+    let mut h = harness(&dir);
+    merge_review(&mut h, review_summary(protocol::ReviewState::Ahead));
+    assert!(click_merge(&mut h, "Fusionner…"));
+    steps(&mut h, 30);
+    h.get_by_label("Squash en un seul commit").click();
+    steps(&mut h, 4);
+    let message = h.get_all_by_role(Role::MultilineTextInput).next().unwrap();
+    message.focus();
+    message.type_text(" (v2)");
+    steps(&mut h, 2);
+    // Tab then Space from the message: the confirm button never takes the keyboard.
+    h.key_press(Key::Tab);
+    steps(&mut h, 2);
+    h.key_press(Key::Space);
+    steps(&mut h, 3);
+    assert!(merges_sent(&h).is_empty(), "only a click confirms");
+    if !h.state().changes.has_dialog() {
+        // Space pressed Cancel: open it again.
+        assert!(click_merge(&mut h, "Fusionner…"));
+        steps(&mut h, 30);
+        h.get_by_label("Squash en un seul commit").click();
+        steps(&mut h, 4);
+        let message = h.get_all_by_role(Role::MultilineTextInput).next().unwrap();
+        message.focus();
+        message.type_text(" (v2)");
+    }
+    confirm_merge(&mut h, "Fusionner");
+    match merges_sent(&h).last() {
+        Some(protocol::AgentCmd::Merge { strategy: MergeStrategy::Squash, message: Some(m), .. }) => {
+            assert!(m.starts_with("feat/invoices\n\n* feat: totals with taxes\n* fix: rounding") && m.contains("(v2)"), "{m}")
+        }
+        other => panic!("{other:?}"),
+    }
+    answer_merge(&mut h, MergeOutcome::Conflicted { files: vec!["src/pdf.rs".into(), "docs/new name.md".into()], more: 3 });
+    for label in [
+        "⚠ Conflit pendant la préparation du résultat à part : rien n'a été appliqué, vos worktrees n'ont pas été touchés. Fichiers en conflit :",
+        "  • src/pdf.rs",
+        "  • docs/new name.md",
+        "… et 3 de plus",
+        "Là, fusionnez main dans la branche (git merge main), résolvez les conflits et commitez, ou laissez un agent de code le faire ; puis relisez et fusionnez à nouveau.",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    let cards = h.state().world.cards.len();
+    h.get_by_label("Ouvrir un terminal dans le worktree de la branche").click();
+    steps(&mut h, 3);
+    let app = h.state();
+    assert_eq!(app.world.cards.len(), cards + 1);
+    assert_eq!(app.world.cards.last().and_then(|c| c.cwd.as_deref()), Some(INVOICES), "in the branch's worktree");
+    assert_eq!(merges_sent(&h).len(), 1, "nothing merged automatically");
+
+    // The strategy chosen comes first next time; a refusal, a failure, a result not applied.
+    let answers = [
+        (
+            MergeOutcome::Refused { reason: MergeRefusal::NoIdentity },
+            vec!["Pas fusionné : git n'a pas d'identité configurée (user.name et user.email) : l'application n'en invente jamais. Configurez la vôtre avec git config, puis fusionnez à nouveau."],
+        ),
+        (
+            MergeOutcome::Failed { problem: Problem::MergeStepFailed { step: MergeStep::Commit, detail: "commit-msg: needs a ticket".into() } },
+            vec!["Pas fusionné : Le commit a échoué : commit-msg: needs a ticket", "Rien n'a été appliqué : vos worktrees n'ont pas été touchés."],
+        ),
+        (
+            MergeOutcome::NotApplied { why: NotApplied::Collisions { files: vec![".env".into()], more: 0 } },
+            vec![
+                "Préparé, pas appliqué : des fichiers non suivis ou ignorés sont là où le résultat écrit (.env) : git les écraserait ou les supprimerait. Mettez-les de côté (ou commitez-les), puis fusionnez à nouveau. Le worktree de main est inchangé.",
+            ],
+        ),
+        (
+            MergeOutcome::PartlyWritten { base: "main".into(), base_head: "b".repeat(40), result: "c".repeat(40), detail: "cannot lock ref".into() },
+            vec![
+                "⚠ L'avance rapide a échoué à mi-chemin (cannot lock ref) : dans le worktree de main, l'index et les fichiers sont au résultat ccccccc, mais la branche main est encore à bbbbbbb. Rien d'autre n'a été fait. Choisissez l'une des deux commandes, dans ce worktree :",
+                "Pour terminer : git update-ref refs/heads/main cccccccccccccccccccccccccccccccccccccccc bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "Pour revenir en arrière : git read-tree -m -u cccccccccccccccccccccccccccccccccccccccc bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            ],
+        ),
+    ];
+    for (outcome, labels) in answers {
+        h.get_by_label("Fermer").click();
+        steps(&mut h, 2);
+        assert!(click_merge(&mut h, "Fusionner…"));
+        confirm_merge(&mut h, "Fusionner");
+        assert!(matches!(merges_sent(&h).last(), Some(protocol::AgentCmd::Merge { strategy: MergeStrategy::Squash, .. })));
+        answer_merge(&mut h, outcome);
+        for label in labels {
+            assert!(h.query_by_label(label).is_some(), "{label} missing");
+        }
+    }
+    // The agent stops during a merge: its outcome is said at its next start.
+    h.get_by_label("Fermer").click();
+    steps(&mut h, 2);
+    assert!(click_merge(&mut h, "Fusionner…"));
+    confirm_merge(&mut h, "Fusionner");
+    h.state_mut().dispatch(vec![Event::AgentLost]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("L'agent s'est arrêté pendant la fusion : à son prochain démarrage, il dit si la base a été avancée.").is_some());
+}
+
+#[test]
+fn the_merge_button_says_why_it_cannot_merge() {
+    let dir = temp_dir("merge-blocked");
+    let mut h = harness(&dir);
+    let (main_card, _) = shop_group(&mut h);
+    h.state_mut().dispatch(vec![shop_worktrees("p-shop"), folder_changes("p-shop", "/home/me/shop", "main")]);
+    steps(&mut h, 3);
+    h.state_mut().dispatch(vec![Event::ReviewWorktree { project: "p-shop".into(), path: INVOICES.into() }]);
+    steps(&mut h, 3);
+    let check = |h: &mut Harness<'_, App>, summary: protocol::ReviewSummary, reason: &str| {
+        answer_review(h, "p-shop", Some(summary), None);
+        assert!(h.query_by_label(reason).is_some(), "{reason} missing");
+        assert!(!click_merge(h, "Fusionner…"), "{reason}: disabled");
+    };
+    let ahead = review_summary(protocol::ReviewState::Ahead);
+    let remote = protocol::ReviewSummary { base: "origin/main".into(), base_kind: protocol::BaseKind::Remote, ..ahead.clone() };
+    check(&mut h, remote, "origin/main est une branche distante : une fusion se fait dans une branche locale.");
+    h.get_by_label("Relire par rapport à main").click();
+    steps(&mut h, 3);
+    assert_eq!(last_review(&h).2.as_deref(), Some("main"));
+    check(
+        &mut h,
+        protocol::ReviewSummary { base: "develop".into(), ..ahead.clone() },
+        "develop n'est extraite dans aucun worktree : extrayez-la quelque part (d'habitude le dépôt principal) pour fusionner dedans.",
+    );
+    check(
+        &mut h,
+        protocol::ReviewSummary { base: "v1".into(), base_kind: protocol::BaseKind::Other, ..ahead.clone() },
+        "La base est un tag ou un commit : une fusion se fait dans une branche locale.",
+    );
+    // A coding agent at work in the main checkout, where the result lands.
+    let info = SessionInfo {
+        session: h.state().world.card(&main_card).unwrap().session(),
+        status: TermStatus::Running,
+        command: Some("claude".into()),
+        cwd: Some("/home/me/shop/src".into()),
+        last_exit: None,
+        last_duration_secs: None,
+        tail: vec![],
+        agent_session_id: Some("4f1c".into()),
+        agent_transcript: None,
+        last_prompt: None,
+        agent_prompt_mark: None,
+        agent_turn_mark: None,
+        agent_prompt_head: None,
+        agent_turn_head: None,
+    };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info.clone()))]);
+    steps(&mut h, 3);
+    check(&mut h, ahead.clone(), "Un agent de code travaille dans /home/me/shop : attendez qu'il ait fini.");
+    // It waits for the user; and uncommitted changes in the branch's worktree are only said.
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(SessionInfo { status: TermStatus::WaitingInput, ..info }))]);
+    steps(&mut h, 3);
+    let mut dirty = ahead.clone();
+    dirty.uncommitted.more = 2;
+    answer_review(&mut h, "p-shop", Some(dirty), None);
+    assert!(click_merge(&mut h, "Fusionner…"));
+    assert!(h.query_by_label("Le worktree de la branche a des changements non commités : ils ne font pas partie de la fusion (seuls ses commits en font partie).").is_some());
+    h.get_by_label("Annuler").click();
+    steps(&mut h, 2);
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Hello {
+        version: "1".into(),
+        hooks: protocol::Hooks::Installed,
+        send_text: true,
+        tasks: true,
+        task_hooks: None,
+        task_links: true,
+        worktree_refresh: true,
+        review: true,
+        merge: false,
+        shell: None,
+    })]);
+    steps(&mut h, 3);
+    answer_review(&mut h, "p-shop", Some(ahead), None);
+    assert!(h.query_by_label("L'agent est trop ancien pour fusionner : redémarrez l'application pour le mettre à jour.").is_some());
+    assert!(!click_merge(&mut h, "Fusionner…"));
+}
+
+#[test]
+fn merging_in_english() {
+    let dir = temp_dir("merge-en");
+    let mut h = harness_in(&dir, Lang::En);
+    merge_review(&mut h, review_summary(protocol::ReviewState::Ahead));
+    assert!(click_merge(&mut h, "Merge…"));
+    h.get_by_label("Rebase, then fast-forward").click();
+    steps(&mut h, 4);
+    for label in [
+        "Merge feat/invoices into main",
+        "The result is prepared aside, in a private copy of the agent; only at the end is main moved to it, in /home/me/shop, by a fast-forward that does all or nothing.",
+        "2 commits, 3 files changed (+14 −3).",
+        "Merge commit",
+        "Fast-forward when possible",
+        "Squash into one commit",
+        "The branch's commits replayed on top of main, checked to give the same files as a merge: a straight history. The branch itself keeps its own commits.",
+        "The branch keeps its own commits, which git will not count as merged: the cleanup keeps it and its worktree.",
+        "Nothing is pushed.",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    confirm_merge(&mut h, "Merge");
+    assert!(matches!(merges_sent(&h).last(), Some(protocol::AgentCmd::Merge { strategy: protocol::MergeStrategy::Rebase, .. })));
+    answer_merge(&mut h, protocol::MergeOutcome::Conflicted { files: vec!["src/pdf.rs".into()], more: 0 });
+    for label in ["⚠ Conflict while preparing the result aside: nothing was applied, your worktrees were not touched. Conflicting files:", "Open a terminal in the branch's worktree"] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    h.get_by_label("Close").click();
+    steps(&mut h, 2);
+    assert!(click_merge(&mut h, "Merge…"));
+    confirm_merge(&mut h, "Merge");
+    answer_merge(&mut h, protocol::MergeOutcome::Merged { base_head: "c".repeat(40), branch_head: "2".repeat(40), fast_forward: false });
+    // A rebase leaves the branch's own commits: no cleanup button, the honest wording instead.
+    assert!(h.query_by_label("Remove the worktree…").is_none());
+    let said = format!(
+        "⚠ feat/invoices has commits made after this merge: they are in no other branch. Merge them first; git branch -D feat/invoices would discard them. The cleanup keeps this worktree ({INVOICES}) and the branch meanwhile."
+    );
+    assert!(h.query_by_label(&said).is_some(), "the worktree list shows another head than the one merged");
+}
+
+#[test]
+fn an_interrupted_merge_is_said_at_the_agent_start() {
+    let dir = temp_dir("merge-interrupted");
+    let mut h = harness(&dir);
+    shop_group(&mut h);
+    h.state_mut().world.changes_open = true;
+    let record = protocol::MergeRecord {
+        id: 7,
+        key: "p-shop".into(),
+        strategy: protocol::MergeStrategy::Merge,
+        branch: "feat/invoices".into(),
+        base: "main".into(),
+        base_path: "/home/me/shop".into(),
+        branch_path: INVOICES.into(),
+        base_head: "b".repeat(40),
+        branch_head: "2".repeat(40),
+        temp: None,
+        phase: protocol::MergePhase::Applying,
+        result: Some("r".repeat(40)),
+        pid: 42,
+        pid_start: 1,
+        git_pid: None,
+        git_start: 0,
+        started: 0,
+    };
+    h.state_mut().dispatch(vec![
+        Event::Agent(AgentEvent::MergeInterrupted { record, previous_alive: false, applied: false, base_tip: Some("b".repeat(40)), base_checkout: Some("main".into()), base_dirty: Some(true) }),
+        folder_changes("p-shop", "/home/me/shop", "main"),
+    ]);
+    steps(&mut h, 3);
+    // Cut while the base was being moved: never "nothing was applied".
+    let said = "L'agent s'est arrêté pendant qu'il avançait main jusqu'au résultat de feat/invoices : l'avance rapide était peut-être en cours. Maintenant, main est à bbbbbbb et le worktree de la base est sur main (il a des changements non commités). Regardez-le avant toute autre chose.";
+    assert!(h.query_all_by_label("Une fusion a été interrompue").next().is_some());
+    assert_eq!(h.state().changes.interrupted("p-shop"), Some(&vec![said.to_string()]), "in the panel, until closed");
+    assert!(h.query_all_by_label(said).count() >= 1);
+    for _ in 0..2 {
+        if h.state().changes.interrupted("p-shop").is_some() {
+            h.get_all_by_label("Fermer").last().unwrap().click();
+            steps(&mut h, 3);
+        }
+    }
+    assert_eq!(h.state().changes.interrupted("p-shop"), None, "closed");
 }

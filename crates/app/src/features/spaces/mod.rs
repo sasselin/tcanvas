@@ -333,6 +333,7 @@ mod tests {
                 messages: Vec::new(),
                 worktree_location: None,
                 task_settings: Default::default(),
+                merge_strategy: None,
             });
             let mut c = Card::with_id(format!("{id}-1"), Rect::from_min_size(pos2(x + 100.0, 100.0), Vec2::new(500.0, 300.0)), None);
             c.name = Some(id.into());
@@ -431,6 +432,7 @@ mod tests {
             messages: Vec::new(),
             worktree_location: None,
             task_settings: Default::default(),
+            merge_strategy: None,
         });
         let mut s = Spaces::default();
         let rev = w.revision;
@@ -457,6 +459,7 @@ mod tests {
                 messages: Vec::new(),
                 worktree_location: None,
                 task_settings: Default::default(),
+                merge_strategy: None,
             });
         }
         let mut s = Spaces::default();

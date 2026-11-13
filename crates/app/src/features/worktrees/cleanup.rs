@@ -278,6 +278,17 @@ impl CleanupWindow {
         self.confirm = Some(actions);
     }
 
+    /// Asks to remove one worktree (and its branch, with `delete_branch`, when `git branch -d` will
+    /// accept it), as its own button in the window would: only when the cleanup's rule allows it.
+    /// Otherwise nothing is asked, and the window lists it with the reason it is kept.
+    pub fn ask_removal(&mut self, list: &WorktreeList, world: &World, path: &str, delete_branch: bool) {
+        self.delete_branch = delete_branch;
+        if let Some(wt) = self.offered(list, world).into_iter().find(|w| w.path == path) {
+            let action = self.remove_action(wt);
+            self.ask(vec![action]);
+        }
+    }
+
     /// Draws the window (and its confirmation). `false`: closed.
     pub fn ui(&mut self, ctx: &egui::Context, list: &WorktreeList, world: &World, events: &mut Vec<Event>) -> bool {
         self.expire(Instant::now());
@@ -476,6 +487,7 @@ mod tests {
             messages: Vec::new(),
             worktree_location: None,
             task_settings: Default::default(),
+            merge_strategy: None,
         });
         assert_eq!(verdict(&l.worktrees[1], &l, &w), Some(KeepReason::GroupFolder));
         assert!(paths(&l, &w).is_empty());
@@ -507,6 +519,21 @@ mod tests {
         c.asked.insert("/home/me/shop-taxes".into());
         c.ask(vec![Cleanup::RemoveWorktree { path: "/home/me/shop-taxes".into(), delete_branch: None, ignored: Ignored::default() }]);
         assert!(c.measured.is_empty() && c.asked.is_empty(), "asked again; the confirmation waits for the answer");
+    }
+
+    #[test]
+    fn a_removal_asked_from_a_merge_goes_through_the_same_rule() {
+        let (l, w) = (list(), World::default());
+        let mut c = CleanupWindow::new("p".into());
+        c.ask_removal(&l, &w, "/home/me/shop-taxes", true);
+        assert_eq!(c.confirm, Some(vec![Cleanup::RemoveWorktree { path: "/home/me/shop-taxes".into(), delete_branch: Some("taxes".into()), ignored: Ignored::default() }]));
+        let mut c = CleanupWindow::new("p".into());
+        c.ask_removal(&l, &w, "/home/me/shop-taxes", false);
+        assert!(matches!(c.confirm.as_deref(), Some([Cleanup::RemoveWorktree { delete_branch: None, .. }])), "the worktree only");
+        // Kept by the rule (uncommitted changes): nothing asked, the window says why.
+        let mut c = CleanupWindow::new("p".into());
+        c.ask_removal(&l, &w, "/home/me/shop-pdf", true);
+        assert_eq!(c.confirm, None);
     }
 
     #[test]

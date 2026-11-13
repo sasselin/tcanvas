@@ -196,6 +196,7 @@ fn a_worktree_created_with_its_recipe() {
         messages: Vec::new(),
         worktree_location: None,
         task_settings: Default::default(),
+        merge_strategy: None,
     });
     h.state_mut().dispatch(vec![Event::EnterSpace(Some("shop".into()))]);
     wait(&mut h, "the agent and the repository's worktrees", 30, |h| matches!(h.state().agent_state(), LinkState::Connected { .. }) && h.state().worktrees.list("shop").is_some());

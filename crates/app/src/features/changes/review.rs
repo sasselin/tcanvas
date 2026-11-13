@@ -15,13 +15,13 @@
 //! the last one counts.
 
 use egui::{Button, CollapsingHeader, RichText, ScrollArea, Ui};
-use protocol::{AgentCmd, AgentEvent, BaseKind, ChangeKind, ChangeSet, CommitInfo, FileChange, Problem, ReviewFiles, ReviewScope, ReviewState, ReviewSummary, WorktreeList};
+use protocol::{AgentCmd, AgentEvent, BaseKind, ChangeKind, ChangeSet, CommitInfo, FileChange, MergeOutcome, Problem, ReviewFiles, ReviewScope, ReviewState, ReviewSummary, WorktreeList};
 
-use super::{ADD, Changes, DEL, LineKind, classify, diff_body};
+use super::{ADD, Changes, DEL, LineKind, classify, diff_body, merge};
 use crate::shell::event::Event;
 use crate::shell::i18n::t;
 use crate::shell::theme;
-use crate::shell::world::{ProjectId, unix_now};
+use crate::shell::world::{ProjectId, World, unix_now};
 
 /// What the file list and the diffs are narrowed to.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -156,6 +156,8 @@ pub struct Review {
     pub uncommitted_asked: u64,
     /// The worktree was seen in a worktree list: its absence from a later one means it is gone.
     pub seen: bool,
+    /// Its merge, from the confirmation to the outcome.
+    pub merge: merge::State,
 }
 
 impl Review {
@@ -176,6 +178,7 @@ impl Review {
             mark: None,
             uncommitted_asked: 0,
             seen: false,
+            merge: merge::State::Idle,
         }
     }
 
@@ -185,6 +188,10 @@ impl Review {
         self.asked = 0;
         self.loading = false;
         self.uncommitted_asked = 0;
+        // A merge sent and not answered: its outcome will never come.
+        if self.merge.running() {
+            self.merge = merge::State::Lost;
+        }
         if let Some(d) = self.diff.as_mut().filter(|d| !d.answered) {
             d.id = 0;
         }
@@ -285,6 +292,12 @@ pub(super) enum Act {
     Uncommitted(bool),
     File(String),
     Base(Option<String>),
+    /// The Merge button: opens its confirmation.
+    MergeAsk,
+    /// Closes a merge's outcome.
+    MergeDismiss,
+    /// A follow-up for another slice (the cleanup window, a task, a card).
+    Event(Box<Event>),
 }
 
 impl Changes {
@@ -388,6 +401,12 @@ impl Changes {
         match act {
             Act::Working => {
                 self.reviewing.remove(project);
+                return;
+            }
+            // Handled by `review_ui`, which has the world.
+            Act::MergeAsk | Act::MergeDismiss => return,
+            Act::Event(ev) => {
+                out.push(*ev);
                 return;
             }
             Act::Base(base) => {
@@ -551,25 +570,107 @@ impl Changes {
     }
 
     /// The review of the panel's group. The drawing reads; what was clicked is done after.
-    pub(super) fn review_ui(&mut self, ui: &mut Ui, project: &str, events: &mut Vec<Event>) {
+    pub(super) fn review_ui(&mut self, ui: &mut Ui, world: &World, project: &str, events: &mut Vec<Event>) {
         let Some(r) = self.reviews.get(project) else { return };
         let own = self.sets.get(project).and_then(|s| s.root.as_deref()).is_some_and(|root| same_path(root, &r.worktree));
+        let list = self.lists.get(project);
+        let agent_in = |path: &str| merge::agent_busy(world, path);
+        let facts = merge::Facts { summary: r.summary.as_ref(), bases: &r.bases, list, unsupported: self.merge_unsupported, running: r.merge.running(), agent_in: &agent_in };
+        let block = merge::block(&facts);
+        let task = self.merge_task(world, project, r);
         let mut acts = Vec::new();
-        review_body(self, ui, r, own, &mut acts);
+        review_body(self, ui, r, own, &Merging { project, block: block.as_ref(), list, task: task.as_ref() }, &mut acts);
         for act in acts {
-            self.act(project, act, events);
+            match act {
+                Act::MergeAsk => self.ask_merge(world, project),
+                Act::MergeDismiss => {
+                    if let Some(r) = self.reviews.get_mut(project) {
+                        r.merge = merge::State::Idle;
+                    }
+                }
+                Act::Event(ev) => events.push(*ev),
+                act => self.act(project, act, events),
+            }
         }
     }
+
+    /// The task linked to the review's worktree (or branch), as the group's list shows it now.
+    fn merge_task(&self, world: &World, project: &str, r: &Review) -> Option<merge::LinkedTask> {
+        let tasks = &world.task_lists.get(project)?.tasks;
+        let branch = r.summary.as_ref().and_then(|s| s.branch.as_deref());
+        merge::linked_task(tasks, r.summary.as_ref().map_or(r.worktree.as_str(), |s| s.worktree.as_str()), branch)
+    }
+
+    /// Opens the merge's confirmation with what the review shows now, the group's last strategy
+    /// chosen first.
+    fn ask_merge(&mut self, world: &World, project: &str) {
+        let Some(r) = self.reviews.get(project) else { return };
+        let (Some(summary), Some(list)) = (r.summary.as_ref(), self.lists.get(project)) else { return };
+        let strategy = world.project(project).and_then(|p| p.merge_strategy);
+        let task = self.merge_task(world, project, r);
+        if let Some(draft) = merge::draft(summary, list, strategy, task)
+            && let Some(r) = self.reviews.get_mut(project)
+        {
+            r.merge = merge::State::Confirm(Box::new(draft));
+        }
+    }
+
+    /// A merge's confirmation is open (it takes the keyboard).
+    pub fn has_dialog(&self) -> bool {
+        self.reviews.values().any(|r| matches!(r.merge, merge::State::Confirm(_)))
+    }
+
+    /// The merge confirmation, whichever group it is for (one at a time). Confirmed: the merge is
+    /// sent, and the strategy remembered for the group.
+    pub fn dialogs(&mut self, ctx: &egui::Context, world: &World, events: &mut Vec<Event>) {
+        let Some(project) = self.reviews.iter().find(|(_, r)| matches!(r.merge, merge::State::Confirm(_))).map(|(p, _)| p.clone()) else { return };
+        let id = self.next_id();
+        let r = self.reviews.get_mut(&project).expect("found above");
+        let merge::State::Confirm(draft) = &mut r.merge else { return };
+        match merge::dialog(ctx, draft) {
+            Some(true) if draft.ready() => {
+                events.push(Event::ToAgent(draft.request(id, &project)));
+                events.extend(merge::remember(&project, world, draft.strategy));
+                let draft = draft.clone();
+                r.merge = merge::State::Running { id, draft, still: None };
+            }
+            Some(_) => r.merge = merge::State::Idle,
+            None => {}
+        }
+    }
+
+    /// The agent's answer to a merge; a later one with the same id follows a `StillRunning`.
+    pub(super) fn on_merged(&mut self, id: u64, key: &str, outcome: &MergeOutcome) {
+        let Some(r) = self.reviews.get_mut(key) else { return };
+        let merge::State::Running { id: sent, draft, still } = &mut r.merge else { return };
+        if *sent != id {
+            return;
+        }
+        match outcome {
+            MergeOutcome::StillRunning { secs } => *still = Some(*secs),
+            outcome => r.merge = merge::State::Done { draft: draft.clone(), outcome: outcome.clone() },
+        }
+    }
+}
+
+/// What the review's merge part needs.
+struct Merging<'a> {
+    project: &'a str,
+    block: Option<&'a merge::Block>,
+    list: Option<&'a WorktreeList>,
+    task: Option<&'a merge::LinkedTask>,
 }
 
 fn folder_name(path: &str) -> &str {
     path.trim_end_matches('/').rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or(path)
 }
 
-fn review_body(changes: &Changes, ui: &mut Ui, r: &Review, own: bool, acts: &mut Vec<Act>) {
+fn review_body(changes: &Changes, ui: &mut Ui, r: &Review, own: bool, m: &Merging, acts: &mut Vec<Act>) {
     let (wt_line, wt_hover) = if own { (format!("📁 {}", r.worktree), r.worktree.clone()) } else { ((t().review_in_worktree)(folder_name(&r.worktree)), r.worktree.clone()) };
     ui.label(RichText::new(wt_line).color(theme::TEXT_DIM)).on_hover_text(wt_hover);
-    header(ui, r, acts);
+    header(ui, r, m.block, acts);
+    merge::block_ui(ui, m.block, acts);
+    merge::state_ui(ui, &r.merge, m.project, m.list, m.task, acts);
     if let Some(p) = &r.problem {
         ui.label(RichText::new(format!("⚠ {}", t().problem(p))).color(DEL));
     }
@@ -606,7 +707,7 @@ fn review_body(changes: &Changes, ui: &mut Ui, r: &Review, own: bool, acts: &mut
     diff_ui(ui, r);
 }
 
-fn header(ui: &mut Ui, r: &Review, acts: &mut Vec<Act>) {
+fn header(ui: &mut Ui, r: &Review, block: Option<&merge::Block>, acts: &mut Vec<Act>) {
     let s = r.summary.as_ref();
     ui.horizontal_wrapped(|ui| {
         let branch = s.map(|s| s.branch.as_deref().unwrap_or(t().detached_head));
@@ -644,6 +745,7 @@ fn header(ui: &mut Ui, r: &Review, acts: &mut Vec<Act>) {
         if r.loading {
             ui.spinner();
         }
+        merge::button_ui(ui, block, acts);
     });
     if let Some(s) = s.filter(|s| s.base_moved() && s.state != ReviewState::Unrelated) {
         ui.label(RichText::new((t().review_base_moved)(&s.base, s.behind)).color(super::MODIFIED));

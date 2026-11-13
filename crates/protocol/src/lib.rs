@@ -330,6 +330,22 @@ pub enum Problem {
     ReviewTimedOut {
         secs: u64,
     },
+    /// Merge: a step of preparing the result aside failed (git's message and its hooks' output,
+    /// not translated).
+    MergeStepFailed {
+        step: MergeStep,
+        detail: String,
+    },
+    /// Merge: the rebased branch's tree is not the tree a merge of it gives (a rebase replays
+    /// commits one by one and may land a change elsewhere): nothing applied.
+    MergeRebaseDiffers,
+    /// Merge: preparing the result took longer than `secs` seconds: stopped (it ran aside).
+    MergeTimedOut {
+        secs: u64,
+    },
+    /// Merge: a hook changed the content while the result was committed aside (a formatter in
+    /// `pre-commit`...): the result is not what was reviewed, nothing applied.
+    MergeHookChanged,
 }
 
 /// Which text of a task a limit is about.
@@ -1052,6 +1068,247 @@ pub struct ReviewSummary {
     pub merges: Vec<String>,
 }
 
+/// Longest commit message a squash merge takes, in bytes.
+pub const MAX_MERGE_MESSAGE: usize = 64 * 1024;
+/// Conflicting (or colliding) files listed in a merge's answer, at most.
+pub const MAX_MERGE_CONFLICTS: usize = 200;
+
+/// How a branch is merged into its base (`AgentCmd::Merge`). The result is always prepared aside,
+/// in a private worktree of the agent; the base's worktree only moves at the end, by a
+/// fast-forward to that result. Nothing is ever forced, nothing is pushed, hooks run.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeStrategy {
+    /// A merge commit, even when the base has not moved (the branch stays visible in the history,
+    /// and the whole of it can be reverted at once).
+    #[default]
+    Merge,
+    /// The branch's head itself when the base has not moved since the branch started; otherwise
+    /// a merge commit.
+    FastForward,
+    /// One new commit on the base with the message given; the branch's own commits are not part
+    /// of it (and stay as they are).
+    Squash,
+    /// The branch's commits replayed on top of the base, checked to give the same tree as a
+    /// merge; the branch itself keeps its own commits.
+    Rebase,
+}
+
+impl MergeStrategy {
+    pub const ALL: [MergeStrategy; 4] = [MergeStrategy::Merge, MergeStrategy::FastForward, MergeStrategy::Squash, MergeStrategy::Rebase];
+}
+
+/// A git operation left in progress in a worktree.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum GitOperation {
+    Merge,
+    Rebase,
+    CherryPick,
+    Revert,
+    Bisect,
+    /// A cherry-pick or revert of several commits, between two of them (`.git/sequencer`).
+    Sequence,
+}
+
+/// Why a merge was refused before anything was done.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "kind")]
+pub enum MergeRefusal {
+    /// The worktree is on a detached HEAD: no branch to merge.
+    Detached,
+    /// The worktree is no longer on the branch reviewed.
+    BranchChanged {
+        expected: String,
+        found: Option<String>,
+    },
+    /// Only a local branch can be merged into: the base is a remote-tracking branch, a tag or a
+    /// commit.
+    BaseNotLocal {
+        base: String,
+        named: BaseKind,
+    },
+    /// No local branch has this name.
+    BaseNotFound {
+        base: String,
+    },
+    /// The base is the branch itself.
+    BaseIsBranch,
+    /// No worktree has the base checked out: the merge needs one (the app never checks it out
+    /// nor moves it behind the user's back).
+    BaseNotCheckedOut {
+        base: String,
+    },
+    /// The branch or the base moved since the review the user saw: look again.
+    Stale {
+        branch_moved: bool,
+        base_moved: bool,
+    },
+    /// The branch has no commit the base does not have.
+    NotAhead,
+    /// The branch and the base have no common history.
+    Unrelated,
+    /// The base's worktree has tracked files flagged `assume-unchanged` or `skip-worktree`, whose
+    /// edits git does not show.
+    HiddenChanges {
+        path: String,
+    },
+    /// A merge, rebase, cherry-pick, revert or bisect is in progress in the base's worktree.
+    InProgress {
+        path: String,
+        operation: GitOperation,
+    },
+    /// What is in the base's worktree could not be told (git failed): refused rather than guessed.
+    NotChecked {
+        path: String,
+    },
+    /// A coding agent is working in the base's worktree right now (`session`: its tmux session):
+    /// files would change under it.
+    AgentWorking {
+        path: String,
+        session: String,
+    },
+    /// git has no identity configured (`user.name`, `user.email`) for the commit: never invented.
+    NoIdentity,
+    /// A squash merge needs a commit message.
+    MessageEmpty,
+    MessageTooLong {
+        max: usize,
+    },
+    /// The commit message holds a NUL byte.
+    MessageInvalid,
+    /// Another merge of this agent is still running.
+    Busy,
+    /// The branch holds merge commits: a rebase would drop them.
+    RebaseMerges,
+    /// The base's worktree is a sparse checkout: not merged from the app.
+    Sparse {
+        path: String,
+    },
+    /// What the terminals are doing is not known yet (the agent just started).
+    SessionsUnknown,
+    /// The previous agent (still alive, process `pid`) is merging in this repository.
+    PreviousAgent {
+        pid: u32,
+    },
+}
+
+/// Why the prepared result was not applied to the base: its worktree is unchanged.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "kind")]
+pub enum NotApplied {
+    /// The base's worktree is no longer on the base at the reviewed commit (`found`: the branch
+    /// it is on, `head`: its commit).
+    BaseMoved { found: Option<String>, head: Option<String> },
+    /// Files the result writes are in the base's worktree as untracked or ignored files (a
+    /// `.env`...): git would overwrite or delete them.
+    Collisions { files: Vec<String>, more: u32 },
+    /// git refused the fast-forward (local changes in the way, an operation started meanwhile...;
+    /// its message, not translated): nothing written.
+    Refused { detail: String },
+    /// A dry run of the fast-forward (`git read-tree -n -m -u`) failed (its message): it was
+    /// never started.
+    DryRun { detail: String },
+    /// A lock of git's is held (`path`: `index.lock`, or the base's ref lock): another git is at
+    /// work there, or one crashed. Never started.
+    Locked { path: String },
+}
+
+/// The step of preparing a merge that failed.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum MergeStep {
+    /// Creating the private worktree (`git worktree add`, its `post-checkout` hook).
+    Prepare,
+    /// `git merge` (merge commit or squash).
+    Merge,
+    /// `git commit` of a squash.
+    Commit,
+    /// `git rebase` of the branch's commits.
+    Rebase,
+}
+
+/// Where a merge was when its agent stopped.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum MergePhase {
+    /// Preparing the result aside: nothing of the user's was touched.
+    Preparing,
+    /// Fast-forwarding the base to the result.
+    Applying,
+}
+
+/// What became of a merge (`AgentEvent::Merged`).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "kind")]
+pub enum MergeOutcome {
+    /// The base was fast-forwarded to the result (`base_head`); the branch is as it was.
+    Merged { base_head: String, branch_head: String, fast_forward: bool },
+    /// Refused before anything was done.
+    Refused { reason: MergeRefusal },
+    /// Preparing the result aside conflicted: nothing applied, the private worktree removed. The
+    /// conflicting files (at most `MAX_MERGE_CONFLICTS`, `more` beyond).
+    Conflicted { files: Vec<String>, more: u32 },
+    /// Preparing the result aside failed (a hook, signing, the rebase check, a timeout): nothing
+    /// applied, the private worktree removed.
+    Failed { problem: Problem },
+    /// The result was prepared but not applied: the base's worktree was checked to be unchanged
+    /// (its index, its HEAD, its branch, its `ORIG_HEAD`).
+    NotApplied { why: NotApplied },
+    /// git was still running after `secs` seconds; the final outcome follows with the same id.
+    StillRunning { secs: u64 },
+    /// The fast-forward failed half-way (`detail`: git's message): the base's worktree has its
+    /// index and files at `result`, while its branch `base` is still at `base_head`. Nothing more
+    /// was done; the user finishes (moves the branch to `result`) or goes back (the files to
+    /// `base_head`).
+    PartlyWritten { base: String, base_head: String, result: String, detail: String },
+    /// The fast-forward ran, but the base's worktree is not where it should be now (switched
+    /// meanwhile: `base_branch`, the branch it is on; `base_tip`, where the base's branch is).
+    /// `moved`: the branch the fast-forward moved instead, from the base's commit to the result.
+    Unverified {
+        base_branch: Option<String>,
+        base_tip: Option<String>,
+        #[serde(default)]
+        moved: Option<String>,
+    },
+}
+
+/// A merge the agent was running, as it recorded it before its first write (the private
+/// worktree's creation).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct MergeRecord {
+    pub id: u64,
+    pub key: String,
+    pub strategy: MergeStrategy,
+    pub branch: String,
+    pub base: String,
+    /// The base's worktree and the branch's (resolved).
+    pub base_path: String,
+    pub branch_path: String,
+    /// The commits reviewed.
+    pub base_head: String,
+    pub branch_head: String,
+    /// The private worktree (none when the result is the branch's head itself).
+    #[serde(default)]
+    pub temp: Option<String>,
+    pub phase: MergePhase,
+    /// The result being applied (in `Applying`).
+    #[serde(default)]
+    pub result: Option<String>,
+    /// The agent running it, and that process's start time (`/proc/<pid>/stat`).
+    pub pid: u32,
+    #[serde(default)]
+    pub pid_start: u64,
+    /// The git process fast-forwarding the base (it outlives its agent: it runs in its own
+    /// session), and its start time.
+    #[serde(default)]
+    pub git_pid: Option<u32>,
+    #[serde(default)]
+    pub git_start: u64,
+    /// Unix seconds.
+    pub started: u64,
+}
+
 impl ReviewSummary {
     /// The base moved on since the branch started from it: the branch is behind.
     pub fn base_moved(&self) -> bool {
@@ -1666,6 +1923,9 @@ pub enum AgentEvent {
         /// older agents).
         #[serde(default)]
         review: bool,
+        /// The agent takes `AgentCmd::Merge` (missing from older agents).
+        #[serde(default)]
+        merge: bool,
     },
     /// A subscribed task list, on subscribing and whenever it changes.
     Tasks(Box<TaskBoard>),
@@ -1808,6 +2068,35 @@ pub enum AgentEvent {
         truncated: bool,
         #[serde(default)]
         problem: Option<Problem>,
+    },
+    /// Answer to `AgentCmd::Merge` with its `id`. After `MergeOutcome::StillRunning`, a second one
+    /// with the same `id` gives the final outcome. An app that predates it skips the line.
+    Merged {
+        id: u64,
+        key: String,
+        outcome: MergeOutcome,
+    },
+    /// Sent at start, for a merge the previous agent recorded and did not finish. With
+    /// `previous_alive`, that agent is still running it (merges in that repository are refused
+    /// until it ends). Otherwise its private worktree was removed now, and `applied` says,
+    /// from the refs, whether the base was moved to its result; `base_tip`: where the base's
+    /// branch is now.
+    MergeInterrupted {
+        record: MergeRecord,
+        previous_alive: bool,
+        applied: bool,
+        #[serde(default)]
+        base_tip: Option<String>,
+        /// The branch the base's worktree is on now, and whether it has uncommitted changes.
+        #[serde(default)]
+        base_checkout: Option<String>,
+        #[serde(default)]
+        base_dirty: Option<bool>,
+    },
+    /// Sent at start: a merge record could not be read; it was moved aside to `path`.
+    MergeRecordCorrupt {
+        path: String,
+        detail: String,
     },
 }
 
@@ -1974,6 +2263,24 @@ pub enum AgentCmd {
         path: Option<String>,
         #[serde(default)]
         old_path: Option<String>,
+    },
+    /// Merges the branch of `worktree` (one of the worktrees of the watched folder `key`'s
+    /// repository) into the local branch `base`, in the worktree where `base` is checked out,
+    /// with `strategy` (`message`: the commit message of a squash). `branch`, `branch_head` and
+    /// `base_head`: what the user reviewed; refused if either moved. Everything is checked again
+    /// by the agent first; on a conflict or a failure it is undone. Never pushes. Response:
+    /// `AgentEvent::Merged` with the same `id`, then a rescan of the repository.
+    Merge {
+        id: u64,
+        key: String,
+        worktree: String,
+        branch: String,
+        base: String,
+        strategy: MergeStrategy,
+        #[serde(default)]
+        message: Option<String>,
+        branch_head: String,
+        base_head: String,
     },
 }
 
@@ -2579,6 +2886,7 @@ mod tests {
                 task_links: true,
                 worktree_refresh: true,
                 review: true,
+                merge: true,
                 shell: None,
             };
             assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
@@ -2878,5 +3186,101 @@ mod tests {
         // Optional fields may be left out.
         let short = r#"{"type":"ReviewDiff","id":1,"key":"p","worktree":"/w","scope":{"kind":"Uncommitted"}}"#;
         assert!(matches!(decode::<AgentCmd>(short).unwrap(), AgentCmd::ReviewDiff { path: None, old_path: None, .. }));
+    }
+
+    #[test]
+    fn roundtrip_merge() {
+        for strategy in MergeStrategy::ALL {
+            let cmd = AgentCmd::Merge {
+                id: 3,
+                key: "p".into(),
+                worktree: "/home/me/shop-invoices".into(),
+                branch: "feat/invoices".into(),
+                base: "main".into(),
+                strategy,
+                message: (strategy == MergeStrategy::Squash).then(|| "Invoices as PDF\n\n* totals \u{e9}".into()),
+                branch_head: "b".repeat(40),
+                base_head: "c".repeat(40),
+            };
+            assert_eq!(decode::<AgentCmd>(&encode(&cmd)).unwrap(), cmd);
+        }
+        assert!(encode(&MergeStrategy::FastForward).contains("\"fast_forward\""));
+        let refusals = [
+            MergeRefusal::Detached,
+            MergeRefusal::BranchChanged { expected: "a".into(), found: None },
+            MergeRefusal::BaseNotLocal { base: "origin/main".into(), named: BaseKind::Remote },
+            MergeRefusal::BaseNotFound { base: "main".into() },
+            MergeRefusal::BaseIsBranch,
+            MergeRefusal::BaseNotCheckedOut { base: "main".into() },
+            MergeRefusal::Stale { branch_moved: true, base_moved: false },
+            MergeRefusal::NotAhead,
+            MergeRefusal::Unrelated,
+            MergeRefusal::HiddenChanges { path: "/r".into() },
+            MergeRefusal::InProgress { path: "/r".into(), operation: GitOperation::Sequence },
+            MergeRefusal::NotChecked { path: "/r".into() },
+            MergeRefusal::AgentWorking { path: "/r".into(), session: "tc_1".into() },
+            MergeRefusal::NoIdentity,
+            MergeRefusal::MessageEmpty,
+            MergeRefusal::MessageTooLong { max: MAX_MERGE_MESSAGE },
+            MergeRefusal::MessageInvalid,
+            MergeRefusal::Busy,
+            MergeRefusal::RebaseMerges,
+            MergeRefusal::Sparse { path: "/r".into() },
+            MergeRefusal::SessionsUnknown,
+            MergeRefusal::PreviousAgent { pid: 42 },
+        ];
+        let mut outcomes: Vec<MergeOutcome> = refusals.into_iter().map(|reason| MergeOutcome::Refused { reason }).collect();
+        outcomes.extend([
+            MergeOutcome::Merged { base_head: "d".repeat(40), branch_head: "b".repeat(40), fast_forward: false },
+            MergeOutcome::Conflicted { files: vec!["src/a.rs".into(), "\"caf\\351\"".into()], more: 3 },
+            MergeOutcome::Failed { problem: Problem::MergeStepFailed { step: MergeStep::Commit, detail: "pre-commit: no".into() } },
+            MergeOutcome::Failed { problem: Problem::MergeRebaseDiffers },
+            MergeOutcome::Failed { problem: Problem::MergeTimedOut { secs: 900 } },
+            MergeOutcome::NotApplied { why: NotApplied::BaseMoved { found: Some("hotfix".into()), head: None } },
+            MergeOutcome::NotApplied { why: NotApplied::Collisions { files: vec![".env".into()], more: 0 } },
+            MergeOutcome::NotApplied { why: NotApplied::Refused { detail: "would be overwritten".into() } },
+            MergeOutcome::NotApplied { why: NotApplied::DryRun { detail: "not uptodate".into() } },
+            MergeOutcome::NotApplied { why: NotApplied::Locked { path: "/r/.git/refs/heads/main.lock".into() } },
+            MergeOutcome::StillRunning { secs: 60 },
+            MergeOutcome::Unverified { base_branch: Some("hotfix".into()), base_tip: Some("c".repeat(40)), moved: Some("hotfix".into()) },
+            MergeOutcome::PartlyWritten { base: "main".into(), base_head: "c".repeat(40), result: "d".repeat(40), detail: "cannot lock ref".into() },
+            MergeOutcome::Failed { problem: Problem::MergeHookChanged },
+        ]);
+        for outcome in outcomes {
+            let ev = AgentEvent::Merged { id: 4, key: "p".into(), outcome };
+            assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        }
+        let record = MergeRecord {
+            id: 3,
+            key: "p".into(),
+            strategy: MergeStrategy::Squash,
+            branch: "feat".into(),
+            base: "main".into(),
+            base_path: "/r".into(),
+            branch_path: "/w".into(),
+            base_head: "c".repeat(40),
+            branch_head: "b".repeat(40),
+            temp: Some("/home/me/.local/share/tcanvas/merge/work/m1".into()),
+            phase: MergePhase::Applying,
+            result: Some("d".repeat(40)),
+            pid: 7,
+            pid_start: 123,
+            git_pid: Some(8),
+            git_start: 456,
+            started: 1_700_000_000,
+        };
+        for ev in [
+            AgentEvent::MergeInterrupted { record, previous_alive: false, applied: true, base_tip: Some("d".repeat(40)), base_checkout: Some("main".into()), base_dirty: Some(false) },
+            AgentEvent::MergeRecordCorrupt { path: "/x.corrupt".into(), detail: "eof".into() },
+        ] {
+            assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        }
+        // An older agent: no merge capability; an older app skips the answer it does not know.
+        let old = r#"{"type":"Hello","version":"0.1.9","hooks":"Installed","review":true}"#;
+        assert!(matches!(decode::<AgentEvent>(old).unwrap(), AgentEvent::Hello { merge: false, review: true, .. }));
+        assert!(decode::<AgentEvent>(r#"{"type":"SomethingNewer","id":1}"#).is_err());
+        // A merge without a message (not a squash).
+        let short = r#"{"type":"Merge","id":1,"key":"p","worktree":"/w","branch":"b","base":"main","strategy":"rebase","branch_head":"a","base_head":"c"}"#;
+        assert!(matches!(decode::<AgentCmd>(short).unwrap(), AgentCmd::Merge { message: None, strategy: MergeStrategy::Rebase, .. }));
     }
 }

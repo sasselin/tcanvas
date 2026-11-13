@@ -78,6 +78,8 @@ pub fn parse_porcelain(out: &str) -> Vec<Worktree> {
         }
     }
     list.extend(current);
+    // The agent's own private worktrees (a merge prepared aside) are never shown nor offered.
+    list.retain(|w| w.main || !super::merge::is_private(&w.path));
     list
 }
 

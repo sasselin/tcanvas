@@ -1,7 +1,7 @@
 //! Event bus: the only way for one slice to act on another.
 
 use egui::{Pos2, Rect};
-use protocol::{AgentCmd, AgentEvent, LocalBranch, Problem, TermStatus, WorktreeBranch};
+use protocol::{AgentCmd, AgentEvent, LocalBranch, MergeStrategy, Problem, TaskStatus, TermStatus, WorktreeBranch};
 
 use super::world::{Camera, CardId, CommandTemplate, ProjectId, QuickMessage, TaskSettings};
 
@@ -208,6 +208,24 @@ pub enum Event {
     SetProjectTaskSettings(ProjectId, TaskSettings),
     /// Sets where a group's new worktrees go (`None`: the default location).
     SetProjectWorktreeLocation(ProjectId, Option<String>),
+    /// Remembers how the group's branches are merged from the review (`projects` slice).
+    SetProjectMergeStrategy(ProjectId, MergeStrategy),
+    /// Opens the group's cleanup window on one of its repository's worktrees, with its removal's
+    /// confirmation (and its branch's, with `delete_branch`) when the cleanup's own rule allows it;
+    /// otherwise the window says why it is kept (`worktrees` slice).
+    RemoveWorktree {
+        project: ProjectId,
+        path: String,
+        delete_branch: bool,
+    },
+    /// Moves a task of the group's list to `status`, refused if it is no longer `from` (`tasks`
+    /// slice: a normal change of the list, by the user's click).
+    SetTaskStatus {
+        project: ProjectId,
+        task: String,
+        status: TaskStatus,
+        from: TaskStatus,
+    },
     /// Opens the new-worktree dialog of a group.
     NewWorktree(ProjectId),
     /// A toast about nothing on the canvas (texts already translated).

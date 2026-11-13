@@ -268,6 +268,7 @@ mod tests {
                 messages: Vec::new(),
                 worktree_location: None,
                 task_settings: Default::default(),
+                merge_strategy: None,
             });
         }
         w
@@ -301,6 +302,7 @@ mod tests {
             messages: Vec::new(),
             worktree_location: None,
             task_settings: Default::default(),
+            merge_strategy: None,
         });
         let mut wires = Wires;
         wires.handle(&Event::AddWire("api".into(), "web".into()), &mut w, &mut vec![]);

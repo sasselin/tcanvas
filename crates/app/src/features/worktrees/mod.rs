@@ -217,6 +217,15 @@ impl Worktrees {
     pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
         match ev {
             Event::NewWorktree(project) => self.open_create(world, project),
+            Event::RemoveWorktree { project, path, delete_branch } => {
+                // A confirmation already up (of any group) is never replaced: the user answers it first.
+                let busy = self.cleanup.as_ref().is_some_and(|c| c.confirm.is_some());
+                if !busy && self.lists.contains_key(project) {
+                    self.open_cleanup(project);
+                    let (window, (_, list)) = (self.cleanup.as_mut().expect("just opened"), &self.lists[project]);
+                    window.ask_removal(list, world, path, *delete_branch);
+                }
+            }
             // A task's start: the same plan, the same checks and the same creation as the dialog's,
             // answered with events; its card opens in the worktree once it is there.
             Event::PlanTaskWorktree(spec) => {
@@ -565,6 +574,7 @@ mod tests {
             messages: Vec::new(),
             worktree_location: None,
             task_settings: Default::default(),
+            merge_strategy: None,
         });
         let mut ids = vec![];
         for cwd in cwds {
@@ -577,6 +587,21 @@ mod tests {
 
     fn list(key: &str, worktrees: Vec<Worktree>) -> WorktreeList {
         WorktreeList { key: key.into(), repo: Some("/home/me/shop".into()), default_branch: Some("main".into()), worktrees, merged_branches: vec![] }
+    }
+
+    #[test]
+    fn a_removal_asked_after_a_merge_never_replaces_a_confirmation_already_up() {
+        let (mut w, _) = world_with_cards(&[]);
+        let mut s = Worktrees::default();
+        let done = |path: &str, branch: &str| Worktree { merged: Some(true), branch_deletable: true, ..wt(path, false, Some(branch)) };
+        let l = list("p", vec![wt("/home/me/shop", true, Some("main")), done("/home/me/shop-a", "a"), done("/home/me/shop-b", "b")]);
+        s.handle(&Event::Agent(AgentEvent::Worktrees(l)), &mut w, &mut vec![]);
+        s.handle(&Event::RemoveWorktree { project: "p".into(), path: "/home/me/shop-a".into(), delete_branch: true }, &mut w, &mut vec![]);
+        let asked = |s: &Worktrees| s.cleanup.as_ref().and_then(|c| c.confirm.clone());
+        let first = asked(&s);
+        assert!(matches!(first.as_deref(), Some([protocol::Cleanup::RemoveWorktree { path, delete_branch: Some(b), .. }]) if path == "/home/me/shop-a" && b == "a"), "{first:?}");
+        s.handle(&Event::RemoveWorktree { project: "p".into(), path: "/home/me/shop-b".into(), delete_branch: false }, &mut w, &mut vec![]);
+        assert_eq!(asked(&s), first, "the confirmation up stays");
     }
 
     #[test]
@@ -786,6 +811,7 @@ mod tests {
             task_links: true,
             worktree_refresh: true,
             review: true,
+            merge: true,
             shell: None,
         };
         s.handle(&Event::Agent(hello), &mut w, &mut vec![]);

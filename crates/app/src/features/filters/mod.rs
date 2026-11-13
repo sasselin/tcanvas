@@ -231,6 +231,7 @@ mod tests {
             messages: Vec::new(),
             worktree_location: None,
             task_settings: Default::default(),
+            merge_strategy: None,
         });
         let mut a = Card::new(Rect::from_min_size(pos2(10.0, 10.0), Vec2::splat(100.0)), Some("/srv/api".into()));
         a.info = Some(SessionInfo {
@@ -355,6 +356,7 @@ mod tests {
             messages: Vec::new(),
             worktree_location: None,
             task_settings: Default::default(),
+            merge_strategy: None,
         });
         w.space = Some("other".into());
         assert_eq!(counts(&w), [0; 6], "the stalled terminal is in another space");

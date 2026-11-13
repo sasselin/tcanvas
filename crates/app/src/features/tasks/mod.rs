@@ -562,6 +562,10 @@ impl Tasks {
                     }
                 }
             }
+            Event::SetTaskStatus { project, task, status, from } => {
+                let op = TaskOp::SetStatus { task: task.clone(), status: *status, from: Some(*from) };
+                self.act(world, project, Action::Op(op, Pending::Panel), out);
+            }
             Event::TaskWorktreePlanned(plan) => self.starter_planned(plan),
             Event::TaskWorktreeCreated { task, path, branch, .. } => self.worktree_created(task, path, branch, out),
             Event::TaskWorktreeFailed { project, task, problem } => self.worktree_failed(world, project, task, problem),
@@ -1354,6 +1358,7 @@ mod tests {
             messages: Vec::new(),
             worktree_location: None,
             task_settings: Default::default(),
+            merge_strategy: None,
         }
     }
 
@@ -1376,6 +1381,7 @@ mod tests {
             task_links: true,
             worktree_refresh: true,
             review: true,
+            merge: true,
             shell: None,
         })
     }
