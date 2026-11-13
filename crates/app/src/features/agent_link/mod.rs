@@ -37,7 +37,7 @@ pub enum LinkState {
 }
 
 enum Msg {
-    Event(AgentEvent),
+    Event(Box<AgentEvent>),
     Closed(String),
     /// End of the self-installation (`Err`: why it failed).
     Installed(Result<(), String>),
@@ -106,7 +106,7 @@ impl AgentLink {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 match protocol::decode::<AgentEvent>(&line) {
                     Ok(ev) => {
-                        let _ = tx.send(Msg::Event(ev));
+                        let _ = tx.send(Msg::Event(Box::new(ev)));
                         ctx.request_repaint();
                     }
                     Err(e) => eprintln!("agent: ignored line ({e}): {line}"),
@@ -176,7 +176,7 @@ impl AgentLink {
         }
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
-                Msg::Event(ev) => events.push(Event::Agent(ev)),
+                Msg::Event(ev) => events.push(Event::Agent(*ev)),
                 Msg::Closed(why) => {
                     self.fail(why);
                     events.push(Event::AgentLost);

@@ -183,6 +183,8 @@ fn card_with_prompt(h: &mut Harness<'_, App>, prompt: &str) -> String {
         agent_session_id: Some("4f1c".into()),
         agent_transcript: Some("/home/me/.claude/projects/-home-me-api/4f1c.jsonl".into()),
         last_prompt: Some(prompt.into()),
+        agent_prompt_mark: None,
+        agent_turn_mark: None,
     };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
     steps(h, 2);
@@ -231,6 +233,8 @@ fn the_header_shows_the_last_prompt_elided_with_the_full_text_on_hover() {
         agent_session_id: None,
         agent_transcript: None,
         last_prompt: None,
+        agent_prompt_mark: None,
+        agent_turn_mark: None,
     };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
     steps(&mut h, 2);
@@ -439,6 +443,8 @@ fn agent_status_changes_raise_a_clickable_toast() {
         agent_session_id: None,
         agent_transcript: None,
         last_prompt: None,
+        agent_prompt_mark: None,
+        agent_turn_mark: None,
     };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info(TermStatus::Running)))]);
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info(TermStatus::Stalled)))]);
@@ -469,7 +475,7 @@ fn missing_tmux_is_shown_in_the_status_bar() {
 
 #[test]
 fn missing_shell_hooks_can_be_installed_from_the_status_bar() {
-    let hello = |hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true, task_hooks: None });
+    let hello = |hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true, task_hooks: None, task_links: true, shell: None });
     let installs = |h: &Harness<'_, App>| h.state().agent_sent().iter().filter(|c| **c == protocol::AgentCmd::InstallHooks).count();
     for (lang, label, button) in [(Lang::Fr, "⚠ hooks", "Installer"), (Lang::En, "⚠ hooks", "Install")] {
         let dir = temp_dir("hooks");
@@ -517,6 +523,8 @@ fn unknown_canvas_sessions_are_adopted() {
         agent_session_id: None,
         agent_transcript: None,
         last_prompt: None,
+        agent_prompt_mark: None,
+        agent_turn_mark: None,
     };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
     steps(&mut h, 2);
@@ -592,6 +600,7 @@ fn add_project(h: &mut Harness<'_, App>, name: &str, rect: Rect) -> String {
         templates: Vec::new(),
         messages: Vec::new(),
         worktree_location: None,
+        task_settings: Default::default(),
     });
     id
 }
@@ -1342,7 +1351,20 @@ fn a_terminal_dropped_onto_another_takes_its_place_and_the_group_rearranges() {
 
 fn set_status(h: &mut Harness<'_, App>, id: &str, status: TermStatus) {
     let session = h.state().world.card(id).unwrap().session();
-    let info = SessionInfo { session, status, command: None, cwd: None, last_exit: None, last_duration_secs: None, tail: vec![], agent_session_id: None, agent_transcript: None, last_prompt: None };
+    let info = SessionInfo {
+        session,
+        status,
+        command: None,
+        cwd: None,
+        last_exit: None,
+        last_duration_secs: None,
+        tail: vec![],
+        agent_session_id: None,
+        agent_transcript: None,
+        last_prompt: None,
+        agent_prompt_mark: None,
+        agent_turn_mark: None,
+    };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
 }
 
@@ -2605,7 +2627,7 @@ fn the_cleanup_window_in_english() {
 fn group_with_templates(h: &mut Harness<'_, App>, templates: &[(&str, &str)]) {
     linked_groups(h);
     let p = h.state_mut().world.projects.iter_mut().find(|p| p.id == "p-api").unwrap();
-    p.templates = templates.iter().map(|(name, command)| tcanvas::shell::world::CommandTemplate { name: (*name).into(), command: (*command).into() }).collect();
+    p.templates = templates.iter().map(|(name, command)| tcanvas::shell::world::CommandTemplate { name: (*name).into(), command: (*command).into(), task: false }).collect();
     steps(h, 2);
     h.get_by_label("● api").click();
     steps(h, 45);
@@ -2779,7 +2801,7 @@ fn group_with_messages(h: &mut Harness<'_, App>, messages: &[(&str, &str, bool)]
     let id = add_card(h, "srv", pos2(40.0, 40.0));
     let session = format!("tc_{id}");
     h.state_mut().dispatch(vec![
-        Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None }),
+        Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, shell: None }),
         Event::Agent(AgentEvent::Session(SessionInfo {
             session,
             status: TermStatus::Idle,
@@ -2791,6 +2813,8 @@ fn group_with_messages(h: &mut Harness<'_, App>, messages: &[(&str, &str, bool)]
             agent_session_id: None,
             agent_transcript: None,
             last_prompt: None,
+            agent_prompt_mark: None,
+            agent_turn_mark: None,
         })),
     ]);
     steps(h, 2);
@@ -3266,7 +3290,7 @@ fn the_dialog_offers_a_free_folder_an_existing_branch_and_refuses_a_bad_location
     let mut h = harness(&dir);
     // From the strip this time: the repository has linked worktrees.
     shop_group(&mut h);
-    h.state_mut().world.projects[0].templates = vec![tcanvas::shell::world::CommandTemplate { name: "Claude".into(), command: "claude".into() }];
+    h.state_mut().world.projects[0].templates = vec![tcanvas::shell::world::CommandTemplate { name: "Claude".into(), command: "claude".into(), task: false }];
     h.state_mut().dispatch(vec![shop_worktrees("p-shop")]);
     steps(&mut h, 3);
     h.get_by_label("+ Worktree").click();
@@ -3507,7 +3531,7 @@ fn the_dialog_shows_the_recipe_and_its_setup_runs_only_once_accepted() {
     let dir = temp_dir("new-worktree-recipe");
     let mut h = harness(&dir);
     new_worktree_dialog(&mut h, "Modèles de terminal du groupe shop", "⎇ Nouveau worktree…");
-    h.state_mut().world.projects[0].templates = vec![tcanvas::shell::world::CommandTemplate { name: "Claude".into(), command: "claude".into() }];
+    h.state_mut().world.projects[0].templates = vec![tcanvas::shell::world::CommandTemplate { name: "Claude".into(), command: "claude".into(), task: false }];
     let setup = "npm ci\nnpm run seed";
     answer_plan(&mut h, |p| p.recipe = Some(shop_recipe(setup)));
     // What the recipe will do, before anything is created, and the setup command in full.
@@ -3687,7 +3711,7 @@ fn shop_tasks() -> Vec<protocol::Task> {
 }
 
 fn agent_hello(h: &mut Harness<'_, App>) {
-    let hello = Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None });
+    let hello = Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, shell: None });
     h.state_mut().dispatch(vec![hello]);
 }
 
@@ -3809,7 +3833,7 @@ fn the_tasks_panel_adds_moves_and_removes_tasks() {
     task_menu(&mut h, "Customer search");
     h.get_by_label("Déplacer vers « En cours »").click();
     steps(&mut h, 3);
-    assert_eq!(last_edit(&h).1, TaskOp::SetStatus { task: "search".into(), status: TaskStatus::Active });
+    assert_eq!(last_edit(&h).1, TaskOp::SetStatus { task: "search".into(), status: TaskStatus::Active, from: None });
     // Refused: the panel says why.
     let (id, ..) = last_edit(&h);
     edited(&mut h, id, Some(protocol::Problem::TasksFailed { detail: "disk full".into() }));
@@ -4078,7 +4102,7 @@ fn the_tasks_panel_in_english() {
     h.key_press(Key::Escape);
     steps(&mut h, 2);
     // An older agent: said so.
-    let hello = Event::Agent(AgentEvent::Hello { version: "0.1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: false, task_hooks: None });
+    let hello = Event::Agent(AgentEvent::Hello { version: "0.1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: false, task_hooks: None, task_links: true, shell: None });
     h.state_mut().dispatch(vec![hello]);
     steps(&mut h, 3);
     assert!(h.query_by_label("The agent is too old to keep task lists: restart tcanvas to update it.").is_some());
@@ -4087,7 +4111,7 @@ fn the_tasks_panel_in_english() {
 #[test]
 fn coding_agents_get_the_tasks_only_once_enabled_from_the_panel() {
     let sets = |h: &Harness<'_, App>| h.state().agent_sent().iter().filter_map(|c| if let protocol::AgentCmd::SetTaskHooks { enabled } = c { Some(*enabled) } else { None }).collect::<Vec<_>>();
-    let hello = |task_hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks });
+    let hello = |task_hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks, task_links: true, shell: None });
     for (lang, missing, on, enable, disable) in [
         (Lang::Fr, "Les agents de code ne voient pas encore ces tâches.", "Les agents de code voient ces tâches.", "Activer", "Désactiver"),
         (Lang::En, "Coding agents cannot see these tasks yet.", "Coding agents see these tasks.", "Enable", "Disable"),
@@ -4129,4 +4153,434 @@ fn coding_agents_get_the_tasks_only_once_enabled_from_the_panel() {
         // The status bar's hooks indicator is not concerned.
         assert!(h.query_by_label("⚠ hooks").is_none());
     }
+}
+
+// --- Starting tasks --------------------------------------------------------------------------
+
+/// Group `shop` linked to its repository (only the main checkout), with a task command, its
+/// tasks panel open on the shop's tasks.
+fn start_group(h: &mut Harness<'_, App>) -> String {
+    let id = tasks_group(h);
+    h.state_mut().world.projects[0].templates = vec![tcanvas::shell::world::CommandTemplate { name: "Claude".into(), command: "claude {task}".into(), task: true }];
+    h.state_mut().dispatch(vec![only_main("p-shop"), Event::ToggleTasks, task_board("p-shop", shop_tasks())]);
+    steps(h, 3);
+    id
+}
+
+/// The button `label` in the row of the task titled `title`.
+fn row_button<'a>(h: &'a Harness<'_, App>, title: &str, label: &'a str) -> egui_kittest::Node<'a> {
+    let y = h.get_by_label(title).rect().center().y;
+    h.get_all_by_label(label).find(|n| (n.rect().center().y - y).abs() < 12.0).unwrap_or_else(|| panic!("no {label} in the row of {title}"))
+}
+
+fn disabled(node: &egui_kittest::Node<'_>) -> bool {
+    use egui_kittest::kittest::NodeT;
+    node.accesskit_node().is_disabled()
+}
+
+/// A report of the session with its hooks' counters: prompts submitted, turns ended.
+fn session_info(session: &str, status: TermStatus, prompts: u64, turns: u64) -> Event {
+    let mark = |n: u64| (n > 0).then(|| format!("{n}-1"));
+    Event::Agent(AgentEvent::Session(SessionInfo {
+        session: session.into(),
+        status,
+        command: Some("claude".into()),
+        cwd: None,
+        last_exit: None,
+        last_duration_secs: None,
+        tail: vec![],
+        agent_session_id: Some("s1".into()),
+        agent_transcript: None,
+        last_prompt: Some("Task #k3f".into()),
+        agent_prompt_mark: mark(prompts),
+        agent_turn_mark: mark(turns),
+    }))
+}
+
+#[test]
+fn starting_a_task_creates_its_worktree_then_opens_its_card_and_follows_its_agent() {
+    use protocol::{LinkChange, TaskOp, TaskStatus, WorktreeBranch};
+    let dir = temp_dir("task-start");
+    let mut h = harness(&dir);
+    start_group(&mut h);
+    row_button(&h, "Invoice PDF", "Démarrer").click();
+    steps(&mut h, 3);
+    assert!(h.state().tasks.starting());
+    let (_, folder, location) = sent_plans(&h).pop().expect("the plan asked");
+    assert_eq!((folder.as_str(), location), ("task-invoice-pdf-k3f", None));
+    answer_plan(&mut h, |_| {});
+    let path = "/home/me/shop/.claude/worktrees/task-invoice-pdf-k3f";
+    for label in [
+        "Démarrer la tâche #k3f",
+        "Nouveau worktree sur la nouvelle branche task/invoice-pdf-k3f, depuis main",
+        &format!("Dossier : {path}"),
+        "Commande : Claude",
+        "claude \"$TCANVAS_TASK\"",
+        "Prompt reçu par l'agent",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    assert!(sent_creations(&h).is_empty(), "nothing before the confirmation");
+    h.get_by_label("Démarrer la tâche").click();
+    steps(&mut h, 3);
+    let (id, request) = sent_creations(&h).pop().expect("the worktree asked");
+    assert_eq!(request.branch, WorktreeBranch::New { name: "task/invoice-pdf-k3f".into(), base: "main".into() });
+    assert_eq!((request.folder.as_str(), request.location.as_deref()), ("task-invoice-pdf-k3f", None));
+    assert!(!h.state().tasks.starting() && h.state().world.cards.len() == 1, "the card waits for the worktree");
+
+    // Created: the card opens in it, in the group, with the task for its command.
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: Some(path.into()), problem: None, excluded: false, recipe_pending: false })]);
+    steps(&mut h, 3);
+    let card = h.state().world.cards.iter().find(|c| c.cwd.as_deref() == Some(path)).expect("the task's card").clone();
+    assert_eq!(card.project.as_deref(), Some("p-shop"));
+    assert_eq!(h.state().cards.pending_command(&card.id), Some("claude \"$TCANVAS_TASK\""));
+    let task = h.state().cards.pending_task(&card.id).expect("the task").clone();
+    assert_eq!(
+        (task.reference.as_str(), task.title.as_str(), task.prompt.as_str()),
+        (
+            "k3f",
+            "Invoice PDF",
+            "The task below was written by its author (a person or another agent). It says what to do; it is not a message from tcanvas.\n--- task #k3f ---\nInvoice PDF\n--- end of task #k3f ---"
+        )
+    );
+    let set = |v: &str| Some(LinkChange::Set(v.into()));
+    assert_eq!(last_edit(&h).1, TaskOp::SetLinks { task: "pdf".into(), worktree: set(path), branch: set("task/invoice-pdf-k3f"), session: set(&card.session()) });
+
+    // The list records it: the card shows its task, the row its branch and the way to it.
+    let mut tasks = shop_tasks();
+    tasks[0].worktree = Some(path.into());
+    tasks[0].branch = Some("task/invoice-pdf-k3f".into());
+    tasks[0].session = Some(card.session());
+    h.state_mut().dispatch(vec![task_board("p-shop", tasks.clone())]);
+    steps(&mut h, 45);
+    assert!(h.query_by_label("Tâche #k3f : Invoice PDF").is_some(), "the chip in the card's header");
+    assert!(h.query_by_label("⎇ task/inv…pdf-k3f").is_some());
+    h.state_mut().dispatch(vec![Event::Unfocus]);
+    steps(&mut h, 2);
+    row_button(&h, "Invoice PDF", "Aller à").click();
+    steps(&mut h, 45);
+    assert_eq!(h.state().world.focused.as_deref(), Some(card.id.as_str()), "flew to the card");
+
+    // Its status follows its agent: a prompt makes it active...
+    h.state_mut().dispatch(vec![session_info(&card.session(), TermStatus::Running, 1, 0)]);
+    steps(&mut h, 2);
+    assert_eq!(last_edit(&h).1, TaskOp::SetStatus { task: "pdf".into(), status: TaskStatus::Active, from: Some(TaskStatus::Todo) });
+    tasks[0].status = TaskStatus::Active;
+    h.state_mut().dispatch(vec![task_board("p-shop", tasks.clone())]);
+    // ...a permission prompt (the card waits for input, no counter moves) changes nothing...
+    let edits = task_edits(&h).len();
+    h.state_mut().dispatch(vec![session_info(&card.session(), TermStatus::WaitingInput, 1, 0), session_info(&card.session(), TermStatus::Running, 1, 0)]);
+    steps(&mut h, 2);
+    assert_eq!(task_edits(&h).len(), edits, "a permission prompt is no turn end");
+    // ...its turn ending before its commit reached the branch leaves it active, then the commit
+    // moves it to review.
+    h.state_mut().dispatch(vec![session_info(&card.session(), TermStatus::WaitingInput, 1, 1)]);
+    steps(&mut h, 2);
+    assert_eq!(task_edits(&h).len(), edits, "no commit yet");
+    let committed = protocol::Worktree { ahead: Some(1), ..worktree(path, false, "task/invoice-pdf-k3f") };
+    let list = protocol::WorktreeList {
+        key: "p-shop".into(),
+        repo: Some("/home/me/shop".into()),
+        default_branch: Some("main".into()),
+        worktrees: vec![worktree("/home/me/shop", true, "main"), committed],
+        merged_branches: vec![],
+    };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Worktrees(list))]);
+    steps(&mut h, 2);
+    assert_eq!(last_edit(&h).1, TaskOp::SetStatus { task: "pdf".into(), status: TaskStatus::Review, from: Some(TaskStatus::Active) });
+}
+
+#[test]
+fn a_task_waiting_for_another_always_asks_and_others_can_start_at_once() {
+    use protocol::WorktreeBranch;
+    let dir = temp_dir("task-start-deps");
+    let mut h = harness(&dir);
+    start_group(&mut h);
+    h.state_mut().world.projects[0].task_settings.skip_confirm = true;
+    // Without the confirmation: started as soon as the agent answered.
+    row_button(&h, "Customer search", "Démarrer").click();
+    steps(&mut h, 3);
+    answer_plan(&mut h, |_| {});
+    let (_, request) = sent_creations(&h).pop().expect("started without asking");
+    assert_eq!(request.branch, WorktreeBranch::New { name: "task/customer-search-srh".into(), base: "main".into() });
+    assert!(h.query_by_label_contains("Démarrer la tâche").is_none());
+    // Waiting for an unfinished task: always asked, said why.
+    row_button(&h, "About page", "Démarrer").click();
+    steps(&mut h, 3);
+    answer_plan(&mut h, |_| {});
+    assert!(h.query_by_label("⚠ Elle attend des tâches non terminées : #k3f Invoice PDF (À faire). La démarrer quand même ?").is_some());
+    assert_eq!(sent_creations(&h).len(), 1, "not started before the answer");
+    h.get_by_label("Démarrer la tâche").click();
+    steps(&mut h, 3);
+    assert_eq!(sent_creations(&h).len(), 2);
+}
+
+#[test]
+fn the_first_start_asks_which_command_starts_the_tasks() {
+    use egui::accesskit::Role;
+    use tcanvas::shell::world::CommandTemplate;
+    let dir = temp_dir("task-start-template");
+    let mut h = harness(&dir);
+    start_group(&mut h);
+    let row = |name: &str, command: &str, task| CommandTemplate { name: name.into(), command: command.into(), task };
+    h.state_mut().world.projects[0].templates = vec![row("Claude", "claude", false), row("Logs", "tail -f log", false)];
+    row_button(&h, "Invoice PDF", "Démarrer").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Quelle commande démarre les tâches de shop ?").is_some());
+    h.get_by_label("Claude").click();
+    steps(&mut h, 2);
+    h.get_by_label("Utiliser celle-ci").click();
+    steps(&mut h, 3);
+    assert_eq!(h.state().world.projects[0].templates, vec![row("Claude", "claude", true), row("Logs", "tail -f log", false)]);
+    answer_plan(&mut h, |_| {});
+    assert!(h.query_by_label("Démarrer la tâche #k3f").is_some(), "then what will happen");
+    assert!(h.query_by_label("La commande n'utilise pas {task} : l'agent démarre sans la tâche").is_some());
+    h.get_by_label("Annuler").click();
+    steps(&mut h, 2);
+    assert!(!h.state().tasks.starting());
+
+    // No template at all: an example to edit, then created and used.
+    h.state_mut().world.projects[0].templates.clear();
+    row_button(&h, "Invoice PDF", "Démarrer").click();
+    steps(&mut h, 3);
+    let example = |n: egui_kittest::Node<'_>| n.value().as_deref() == Some("claude {task}");
+    assert!(h.get_all_by_role(Role::MultilineTextInput).any(example), "the example, editable");
+    h.get_by_label("Créer et utiliser").click();
+    steps(&mut h, 3);
+    assert_eq!(h.state().world.projects[0].templates, vec![row("Agent de code", "claude {task}", true)]);
+    assert!(h.query_by_label("Démarrer la tâche #k3f").is_some());
+}
+
+#[test]
+fn start_says_why_it_cannot_go_and_resume_reopens_a_closed_card() {
+    use protocol::{LinkChange, TaskOp};
+    let dir = temp_dir("task-start-blocked");
+    let mut h = harness(&dir);
+    tasks_group(&mut h);
+    h.state_mut().world.projects[0].templates = vec![tcanvas::shell::world::CommandTemplate { name: "Claude".into(), command: "claude {task}".into(), task: true }];
+    h.state_mut().dispatch(vec![Event::ToggleTasks, task_board("p-shop", shop_tasks())]);
+    steps(&mut h, 3);
+    // Not known yet whether the folder is in a repository: disabled, the reason on hover.
+    assert!(disabled(&row_button(&h, "Invoice PDF", "Démarrer")));
+    h.state_mut().dispatch(vec![only_main("p-shop")]);
+    steps(&mut h, 2);
+    assert!(!disabled(&row_button(&h, "Invoice PDF", "Démarrer")));
+    // The agent gone: disabled.
+    h.state_mut().dispatch(vec![Event::AgentLost]);
+    steps(&mut h, 2);
+    assert!(disabled(&row_button(&h, "Invoice PDF", "Démarrer")));
+    assert!(h.query_by_label("L'agent n'est pas connecté").is_none(), "on hover only");
+    agent_hello(&mut h);
+    h.state_mut().dispatch(vec![task_board("p-shop", shop_tasks())]);
+    steps(&mut h, 2);
+
+    // Started before, its card closed since: Resume, in the same worktree, without creating one.
+    let path = "/home/me/shop/.claude/worktrees/task-invoice-pdf-k3f";
+    let mut tasks = shop_tasks();
+    tasks[0].worktree = Some(path.into());
+    tasks[0].branch = Some("task/invoice-pdf-k3f".into());
+    tasks[0].session = Some("tc_closed".into());
+    let list = protocol::WorktreeList {
+        key: "p-shop".into(),
+        repo: Some("/home/me/shop".into()),
+        default_branch: Some("main".into()),
+        worktrees: vec![worktree("/home/me/shop", true, "main"), worktree(path, false, "task/invoice-pdf-k3f")],
+        merged_branches: vec![],
+    };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Worktrees(list)), task_board("p-shop", tasks)]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("terminal fermé").is_some());
+    row_button(&h, "Invoice PDF", "Reprendre").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label(&format!("Reprend son worktree {path} (branche task/invoice-pdf-k3f).")).is_some());
+    h.get_by_label("Démarrer la tâche").click();
+    steps(&mut h, 3);
+    assert!(sent_creations(&h).is_empty() && sent_plans(&h).is_empty(), "nothing created");
+    let card = h.state().world.cards.iter().find(|c| c.cwd.as_deref() == Some(path)).expect("a card in its worktree").clone();
+    let set = |v: &str| Some(LinkChange::Set(v.into()));
+    assert_eq!(last_edit(&h).1, TaskOp::SetLinks { task: "pdf".into(), worktree: set(path), branch: set("task/invoice-pdf-k3f"), session: set(&card.session()) });
+
+    // The cleanup removed its worktree: the link goes at the next list, the task stays.
+    let mut linked = shop_tasks();
+    linked[0].worktree = Some(path.into());
+    linked[0].branch = Some("task/invoice-pdf-k3f".into());
+    linked[0].session = Some(card.session());
+    h.state_mut().dispatch(vec![task_board("p-shop", linked), only_main("p-shop")]);
+    steps(&mut h, 2);
+    assert_eq!(last_edit(&h).1, TaskOp::SetLinks { task: "pdf".into(), worktree: Some(LinkChange::Clear), branch: None, session: None });
+
+    // Outside git (another folder): a plain card in the group's folder, always confirmed.
+    let outside = protocol::WorktreeList { key: "p-shop".into(), repo: None, default_branch: None, worktrees: vec![], merged_branches: vec![] };
+    h.state_mut().world.projects[0].task_settings.skip_confirm = true;
+    h.state_mut().dispatch(vec![Event::SetProjectCwd("p-shop".into(), Some("/home/me/notes".into())), task_board("p-shop", shop_tasks()), Event::Agent(AgentEvent::Worktrees(outside))]);
+    steps(&mut h, 2);
+    row_button(&h, "Customer search", "Démarrer").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Pas de dépôt git : la commande tourne dans le dossier du groupe /home/me/notes, sans worktree ni branche.").is_some());
+}
+
+#[test]
+fn starting_a_task_in_english() {
+    let dir = temp_dir("task-start-en");
+    let mut h = harness_in(&dir, Lang::En);
+    start_group(&mut h);
+    row_button(&h, "Invoice PDF", "Start").click();
+    steps(&mut h, 3);
+    answer_plan(&mut h, |_| {});
+    for label in ["Start task #k3f", "New worktree on the new branch task/invoice-pdf-k3f, from main", "Command: Claude", "Prompt the agent receives", "Task settings of this group", "Start task"] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    h.get_by_label("Cancel").click();
+    steps(&mut h, 2);
+    let session = h.state().world.cards[0].session();
+    let mut tasks = shop_tasks();
+    tasks[0].session = Some(session);
+    h.state_mut().dispatch(vec![task_board("p-shop", tasks)]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Task #k3f: Invoice PDF").is_some(), "the chip in the card's header");
+    assert!(row_button(&h, "Invoice PDF", "Go to").rect().width() > 0.0);
+}
+
+#[test]
+fn a_task_starts_once_until_its_session_is_recorded() {
+    use protocol::{LinkChange, TaskOp};
+    let dir = temp_dir("task-start-once");
+    let mut h = harness(&dir);
+    start_group(&mut h);
+    h.state_mut().world.projects[0].task_settings.skip_confirm = true;
+    // Two clicks in a row: one start.
+    row_button(&h, "Customer search", "Démarrer").click();
+    steps(&mut h, 2);
+    row_button(&h, "Customer search", "Démarrer").click();
+    steps(&mut h, 2);
+    assert!(!h.state().tasks.has_dialog(), "waiting for the agent without a dialog: the keyboard stays with the terminals");
+    answer_plan(&mut h, |_| {});
+    assert_eq!(sent_plans(&h).len(), 1);
+    assert_eq!(sent_creations(&h).len(), 1);
+    assert!(disabled(&row_button(&h, "Customer search", "Démarrer")), "being started");
+    row_button(&h, "Customer search", "Démarrer").click();
+    steps(&mut h, 3);
+    assert_eq!(sent_creations(&h).len(), 1, "a second Start does nothing");
+    // Created: the link is written; refused, it is sent again.
+    let (id, _) = sent_creations(&h).pop().unwrap();
+    let path = "/home/me/shop/.claude/worktrees/task-customer-search-srh";
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: Some(path.into()), problem: None, excluded: false, recipe_pending: false })]);
+    steps(&mut h, 3);
+    let (link, op, _) = last_edit(&h);
+    assert!(matches!(&op, TaskOp::SetLinks { worktree: Some(LinkChange::Set(w)), .. } if w == path));
+    edited(&mut h, link, Some(protocol::Problem::TasksLocked { secs: 5 }));
+    assert_eq!(last_edit(&h).1, op, "sent again");
+    assert!(disabled(&row_button(&h, "Customer search", "Démarrer")), "still being started");
+    // Recorded: done, its card is there.
+    let card = h.state().world.cards.iter().find(|c| c.cwd.as_deref() == Some(path)).expect("the card").clone();
+    let mut tasks = shop_tasks();
+    tasks[2].session = Some(card.session());
+    tasks[2].worktree = Some(path.into());
+    h.state_mut().dispatch(vec![task_board("p-shop", tasks)]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Aller à").is_some());
+}
+
+#[test]
+fn a_group_in_a_repository_is_never_started_as_a_plain_card_after_an_empty_list() {
+    let dir = temp_dir("task-start-empty-list");
+    let mut h = harness(&dir);
+    start_group(&mut h);
+    // Git failed for a moment: an empty list.
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Worktrees(protocol::WorktreeList { key: "p-shop".into(), repo: None, default_branch: None, worktrees: vec![], merged_branches: vec![] }))]);
+    steps(&mut h, 2);
+    row_button(&h, "Invoice PDF", "Démarrer").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label_contains("Pas de dépôt git").is_none(), "still a worktree");
+    assert!(!sent_plans(&h).is_empty(), "its worktree is planned");
+}
+
+#[test]
+fn starting_tasks_needs_bash_or_zsh_and_a_safe_command() {
+    let dir = temp_dir("task-start-shell");
+    let mut h = harness(&dir);
+    start_group(&mut h);
+    // The login shell is fish: Start is disabled, with the reason.
+    let fish = Event::Agent(AgentEvent::Hello {
+        version: "1".into(),
+        hooks: protocol::Hooks::Installed,
+        send_text: true,
+        tasks: true,
+        task_hooks: Some(protocol::TaskHooks::Installed),
+        task_links: true,
+        shell: Some(protocol::ShellKind::Fish),
+    });
+    h.state_mut().dispatch(vec![fish, task_board("p-shop", shop_tasks())]);
+    steps(&mut h, 3);
+    assert!(disabled(&row_button(&h, "Invoice PDF", "Démarrer")));
+    agent_hello(&mut h);
+    h.state_mut().dispatch(vec![task_board("p-shop", shop_tasks())]);
+    steps(&mut h, 3);
+    assert!(!disabled(&row_button(&h, "Invoice PDF", "Démarrer")));
+    // A placeholder inside double quotes: refused at Start, said, nothing created.
+    h.state_mut().world.projects[0].templates[0].command = "bash -c \"claude {task}\"".into();
+    row_button(&h, "Invoice PDF", "Démarrer").click();
+    steps(&mut h, 3);
+    answer_plan(&mut h, |_| {});
+    assert!(h.query_by_label_contains("Cette commande ne peut pas recevoir la tâche : un champ entre guillemets ({task})").is_some());
+    assert!(disabled(&h.get_by_label("Démarrer la tâche")));
+}
+
+#[test]
+fn a_new_agent_resending_every_session_moves_no_task() {
+    use protocol::{TaskOp, TaskStatus};
+    let dir = temp_dir("task-start-reconnect");
+    let mut h = harness(&dir);
+    start_group(&mut h);
+    // A task in review, resumed in its worktree: a card started in this run.
+    let path = "/home/me/shop/.claude/worktrees/task-invoice-pdf-k3f";
+    let list = protocol::WorktreeList {
+        key: "p-shop".into(),
+        repo: Some("/home/me/shop".into()),
+        default_branch: Some("main".into()),
+        worktrees: vec![worktree("/home/me/shop", true, "main"), worktree(path, false, "task/invoice-pdf-k3f")],
+        merged_branches: vec![],
+    };
+    let mut tasks = shop_tasks();
+    tasks[0].status = TaskStatus::Review;
+    tasks[0].worktree = Some(path.into());
+    tasks[0].branch = Some("task/invoice-pdf-k3f".into());
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Worktrees(list)), task_board("p-shop", tasks.clone())]);
+    steps(&mut h, 3);
+    row_button(&h, "Invoice PDF", "Reprendre").click();
+    steps(&mut h, 3);
+    h.get_by_label("Démarrer la tâche").click();
+    steps(&mut h, 3);
+    let card = h.state().world.cards.iter().find(|c| c.cwd.as_deref() == Some(path)).expect("its card").clone();
+    tasks[0].session = Some(card.session());
+    h.state_mut().dispatch(vec![task_board("p-shop", tasks)]);
+    steps(&mut h, 2);
+    // The agent restarts and sends every session again, its marks written long before: a
+    // baseline, no signal.
+    agent_hello(&mut h);
+    let edits = task_edits(&h).len();
+    h.state_mut().dispatch(vec![session_info(&card.session(), TermStatus::WaitingInput, 1, 1)]);
+    steps(&mut h, 2);
+    assert_eq!(task_edits(&h).len(), edits, "a reconnect moves nothing");
+    // The next real prompt does.
+    h.state_mut().dispatch(vec![session_info(&card.session(), TermStatus::Running, 2, 1)]);
+    steps(&mut h, 2);
+    assert_eq!(last_edit(&h).1, TaskOp::SetStatus { task: "pdf".into(), status: TaskStatus::Active, from: Some(TaskStatus::Review) });
+}
+
+#[test]
+fn two_quick_starts_without_confirmation_both_go() {
+    let dir = temp_dir("task-start-queue");
+    let mut h = harness(&dir);
+    start_group(&mut h);
+    h.state_mut().world.projects[0].task_settings.skip_confirm = true;
+    row_button(&h, "Customer search", "Démarrer").click();
+    steps(&mut h, 2);
+    // A second one while the first waits for its plan: queued, not dropped.
+    row_button(&h, "Changelog", "Démarrer").click();
+    steps(&mut h, 2);
+    answer_plan(&mut h, |_| {});
+    answer_plan(&mut h, |_| {});
+    let branches: Vec<String> = sent_creations(&h).into_iter().map(|(_, r)| r.branch.name().to_string()).collect();
+    assert_eq!(branches, vec!["task/customer-search-srh".to_string(), "task/changelog-chg".into()]);
 }

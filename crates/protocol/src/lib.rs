@@ -3,6 +3,26 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod task_command;
+
+/// A branch name git accepts, by the rules of `git check-ref-format --branch` (the agent asks
+/// git itself), never one that could pass for an option or a revision.
+pub fn branch_name_valid(name: &str) -> bool {
+    let bad_char = |c: char| c.is_control() || c.is_whitespace() || matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\');
+    !name.is_empty()
+        && !name.starts_with('-')
+        && name != "@"
+        && name != "HEAD"
+        && !name.contains("@{")
+        && !name.contains("..")
+        && !name.contains("//")
+        && !name.starts_with('/')
+        && !name.ends_with('/')
+        && !name.ends_with('.')
+        && !name.chars().any(bad_char)
+        && name.split('/').all(|part| !part.starts_with('.') && !part.ends_with(".lock"))
+}
+
 /// Dedicated tmux socket (`tmux -L tcanvas`), isolated from the user's regular tmux.
 pub const TMUX_SOCKET: &str = "tcanvas";
 /// Prefix of the tmux sessions managed by the canvas.
@@ -280,6 +300,14 @@ pub enum Problem {
     TasksLocked {
         secs: u64,
     },
+    /// Task list: the status change named the status it expected (`TaskOp::SetStatus::from`),
+    /// and the task (its reference) has another one now: nothing changed.
+    TaskStatusChanged {
+        task: String,
+    },
+    /// Task list: a link (worktree, branch, session) is empty, longer than `MAX_TASK_LINK` bytes,
+    /// or holds control characters.
+    TaskLinkRefused,
 }
 
 /// Which text of a task a limit is about.
@@ -767,6 +795,33 @@ pub enum TaskHooks {
     Unsupported,
 }
 
+/// The kind of the user's login shell.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellKind {
+    Bash,
+    Zsh,
+    Fish,
+    Other,
+}
+
+impl ShellKind {
+    /// From a shell path (`/usr/bin/zsh`, `-bash`...).
+    pub fn from_path(path: &str) -> ShellKind {
+        match path.rsplit('/').next().unwrap_or_default().trim_start_matches('-') {
+            "bash" => ShellKind::Bash,
+            "zsh" => ShellKind::Zsh,
+            "fish" => ShellKind::Fish,
+            _ => ShellKind::Other,
+        }
+    }
+
+    /// It runs a card's task script (`export` lines, `$(...)` in double quotes).
+    pub fn runs_task_script(self) -> bool {
+        matches!(self, ShellKind::Bash | ShellKind::Zsh)
+    }
+}
+
 /// Shell hooks (exit code and duration of each command) for the user's login shell.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Hooks {
@@ -798,6 +853,14 @@ pub struct SessionInfo {
     pub agent_transcript: Option<String>,
     #[serde(default)]
     pub last_prompt: Option<String>,
+    /// Marks a coding agent's hooks write in this pane at each submitted prompt, and at each end
+    /// of a turn (the agent's reply over, not a question it asks meanwhile): a new value means a
+    /// new prompt (a new turn end) since the last one seen. Opaque, never compared otherwise
+    /// (`None`: none written yet, or an older agent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_prompt_mark: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_turn_mark: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -1109,6 +1172,8 @@ pub const MAX_TASK_NOTES: usize = 200;
 pub const MAX_TASKS: usize = 1000;
 /// Most removed tasks kept in a list's trash: past that, the oldest are purged early.
 pub const MAX_TRASH: usize = 1000;
+/// Longest link of a task (a worktree path, a branch, a session name), in bytes.
+pub const MAX_TASK_LINK: usize = 4096;
 
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Hash, Default)]
 #[serde(rename_all = "snake_case")]
@@ -1210,7 +1275,8 @@ pub struct Task {
     /// In the trash since then (Unix seconds): hidden, restorable, purged after a while.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub removed: Option<u64>,
-    /// Where the task is being worked on (filled by later features).
+    /// Where the task is being worked on: its worktree's folder, its branch, and the tmux session
+    /// of the card started for it (`TaskOp::SetLinks`, from the app only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1325,10 +1391,25 @@ pub enum TaskOp {
         #[serde(default)]
         priority: Option<Priority>,
     },
-    /// Moves the task to another status, last of it.
+    /// Moves the task to another status, last of it. `from`: the status the caller saw; when
+    /// given and the task has another one now, refused with `Problem::TaskStatusChanged` (an
+    /// automatic change never overrides one made meanwhile).
     SetStatus {
         task: String,
         status: TaskStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<TaskStatus>,
+    },
+    /// Sets or clears where the task is worked on; a link not given is left as it is. Sent by the
+    /// app when it starts a task; the command line has no way to send it.
+    SetLinks {
+        task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worktree: Option<LinkChange>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<LinkChange>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<LinkChange>,
     },
     /// Moves the task just before `before` (a task of the same status), or last of its status.
     Move {
@@ -1368,6 +1449,7 @@ impl TaskOp {
             TaskOp::Add { .. } => None,
             TaskOp::Edit { task, .. }
             | TaskOp::SetStatus { task, .. }
+            | TaskOp::SetLinks { task, .. }
             | TaskOp::Move { task, .. }
             | TaskOp::AddNote { task, .. }
             | TaskOp::AddDependency { task, .. }
@@ -1376,6 +1458,14 @@ impl TaskOp {
             | TaskOp::Restore { task } => Some(task),
         }
     }
+}
+
+/// A change of one link of a task (`TaskOp::SetLinks`).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkChange {
+    Set(String),
+    Clear,
 }
 
 /// `task` waiting for `on` would close a loop: `on` is `task`, or already waits for it, directly
@@ -1413,6 +1503,13 @@ pub enum AgentEvent {
         /// The task integration's state (`None` from older agents: they cannot install it).
         #[serde(default)]
         task_hooks: Option<TaskHooks>,
+        /// The agent takes `TaskOp::SetLinks` and `TaskOp::SetStatus::from` (missing from older
+        /// agents: tasks cannot be started with them).
+        #[serde(default)]
+        task_links: bool,
+        /// The user's login shell, the one the cards run (`None` from older agents).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shell: Option<ShellKind>,
     },
     /// A subscribed task list, on subscribing and whenever it changes.
     Tasks(Box<TaskBoard>),
@@ -1676,6 +1773,8 @@ mod tests {
             agent_session_id: None,
             agent_transcript: None,
             last_prompt: None,
+            agent_prompt_mark: None,
+            agent_turn_mark: None,
         });
         let line = encode(&ev);
         assert!(line.ends_with('\n') && !line[..line.len() - 1].contains('\n'));
@@ -1695,6 +1794,8 @@ mod tests {
             agent_session_id: Some("0b1c-42".into()),
             agent_transcript: Some("/home/me/.claude/projects/x/0b1c-42.jsonl".into()),
             last_prompt: Some("add the total with taxes to the PDF \"now\" \u{e9}t\u{e9}".into()),
+            agent_prompt_mark: None,
+            agent_turn_mark: None,
         });
         assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
     }
@@ -1729,6 +1830,8 @@ mod tests {
             agent_session_id: Some("s".into()),
             agent_transcript: None,
             last_prompt: Some("hi".into()),
+            agent_prompt_mark: None,
+            agent_turn_mark: None,
         };
         let old: OldSessionInfo = decode(&encode(&new)).unwrap();
         assert_eq!(old.session, "tc_a");
@@ -2229,7 +2332,7 @@ mod tests {
     #[test]
     fn roundtrip_hooks() {
         for hooks in [Hooks::Installed, Hooks::Missing, Hooks::Unsupported] {
-            let ev = AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true, task_hooks: Some(TaskHooks::Missing) };
+            let ev = AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true, task_hooks: Some(TaskHooks::Missing), task_links: true, shell: None };
             assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
             let ev = AgentEvent::HooksChanged { hooks };
             assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
@@ -2301,6 +2404,24 @@ mod tests {
     }
 
     #[test]
+    fn task_links_and_guarded_statuses_on_the_wire() {
+        // Only the links given travel; a status change without `from` reads as before.
+        let op = TaskOp::SetLinks { task: "a1".into(), worktree: Some(LinkChange::Set("/w".into())), branch: None, session: Some(LinkChange::Clear) };
+        assert_eq!(serde_json::to_string(&op).unwrap(), r#"{"op":"set_links","task":"a1","worktree":{"set":"/w"},"session":"clear"}"#);
+        let old = r#"{"op":"set_status","task":"a1","status":"todo"}"#;
+        assert_eq!(decode::<TaskOp>(old).unwrap(), TaskOp::SetStatus { task: "a1".into(), status: TaskStatus::Todo, from: None });
+        assert_eq!(serde_json::to_string(&TaskOp::SetStatus { task: "a1".into(), status: TaskStatus::Todo, from: None }).unwrap(), old);
+        assert_eq!(op.task(), Some("a1"));
+        // An older agent's hello: it cannot start tasks.
+        let hello = r#"{"type":"Hello","version":"0.1","hooks":"Installed"}"#;
+        assert!(matches!(decode::<AgentEvent>(hello).unwrap(), AgentEvent::Hello { task_links: false, .. }));
+        for p in [Problem::TaskStatusChanged { task: "k3f".into() }, Problem::TaskLinkRefused] {
+            let ev = AgentEvent::TasksEdited { id: 1, key: "p".into(), task: None, problem: Some(p), content_rev: None };
+            assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        }
+    }
+
+    #[test]
     fn roundtrip_tasks() {
         let mut full = task("a1", &["b2"]);
         full.description = "## Steps\n- one \"quoted\"\n- caf\u{e9}".into();
@@ -2320,7 +2441,7 @@ mod tests {
         let ops = [
             TaskOp::Add { title: "Invoice PDF".into(), description: String::new(), priority: Priority::High, status: TaskStatus::Inbox },
             TaskOp::Edit { task: "a1".into(), title: Some("x".into()), description: None, priority: Some(Priority::Low) },
-            TaskOp::SetStatus { task: "a1".into(), status: TaskStatus::Done },
+            TaskOp::SetStatus { task: "a1".into(), status: TaskStatus::Done, from: None },
             TaskOp::Move { task: "a1".into(), before: Some("b2".into()) },
             TaskOp::Move { task: "a1".into(), before: None },
             TaskOp::AddNote { task: "a1".into(), text: "n".into(), author: Author::User },
@@ -2328,6 +2449,8 @@ mod tests {
             TaskOp::RemoveDependency { task: "a1".into(), on: "b2".into() },
             TaskOp::Remove { task: "a1".into() },
             TaskOp::Restore { task: "a1".into() },
+            TaskOp::SetStatus { task: "a1".into(), status: TaskStatus::Review, from: Some(TaskStatus::Active) },
+            TaskOp::SetLinks { task: "a1".into(), worktree: Some(LinkChange::Set("/home/me/it's here".into())), branch: Some(LinkChange::Clear), session: None },
         ];
         for op in ops {
             let cmd = AgentCmd::EditTasks { id: 3, key: "p1".into(), op, expect: Some(4), list: Some("/home/me/shop".into()) };

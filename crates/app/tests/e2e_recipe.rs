@@ -192,9 +192,10 @@ fn a_worktree_created_with_its_recipe() {
         color: [94, 129, 244],
         rect: egui::Rect::from_min_size(egui::pos2(0.0, 0.0), Vec2::new(3000.0, 1500.0)),
         cwd: Some(repo.clone()),
-        templates: vec![tcanvas::shell::world::CommandTemplate { name: "Log".into(), command: "test -f .env && echo template >> order.txt".into() }],
+        templates: vec![tcanvas::shell::world::CommandTemplate { name: "Log".into(), command: "test -f .env && echo template >> order.txt".into(), task: false }],
         messages: Vec::new(),
         worktree_location: None,
+        task_settings: Default::default(),
     });
     h.state_mut().dispatch(vec![Event::EnterSpace(Some("shop".into()))]);
     wait(&mut h, "the agent and the repository's worktrees", 30, |h| matches!(h.state().agent_state(), LinkState::Connected { .. }) && h.state().worktrees.list("shop").is_some());

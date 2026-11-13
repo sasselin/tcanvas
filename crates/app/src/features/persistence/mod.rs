@@ -167,7 +167,10 @@ mod tests {
     }
 
     fn sample_templates() -> Vec<CommandTemplate> {
-        vec![CommandTemplate { name: "Review".into(), command: "claude \"review it's $HOME\"\nnpm test".into() }, CommandTemplate { name: "Logs".into(), command: "tail -f log/*.log".into() }]
+        vec![
+            CommandTemplate { name: "Review".into(), command: "claude \"review it's $HOME\"\nnpm test".into(), task: true },
+            CommandTemplate { name: "Logs".into(), command: "tail -f log/*.log".into(), task: false },
+        ]
     }
 
     fn sample_messages() -> Vec<QuickMessage> {
@@ -195,6 +198,7 @@ mod tests {
             templates: sample_templates(),
             messages: sample_messages(),
             worktree_location: Some("../{repo}-{name}".into()),
+            task_settings: crate::shell::world::TaskSettings { prompt: Some("Do {task_title}".into()), branch_prefix: Some("work/".into()), skip_confirm: true },
         });
         w.projects.push(Project {
             id: "p2".into(),
@@ -205,6 +209,7 @@ mod tests {
             templates: Vec::new(),
             messages: Vec::new(),
             worktree_location: None,
+            task_settings: Default::default(),
         });
         w.wires.push(Wire { from: "p1".into(), to: "p2".into() });
         w.add_card(a);

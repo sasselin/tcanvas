@@ -548,6 +548,7 @@ mod tests {
             templates: Vec::new(),
             messages: Vec::new(),
             worktree_location: None,
+            task_settings: Default::default(),
         }
     }
 
@@ -604,7 +605,11 @@ mod tests {
         let mut ev = vec![];
         c.poll(&w, &mut ev);
         assert_eq!(ev.len(), 1);
-        c.handle(&Event::Agent(AgentEvent::Hello { version: "x".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None }), &mut world(), &mut vec![]);
+        c.handle(
+            &Event::Agent(AgentEvent::Hello { version: "x".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, shell: None }),
+            &mut world(),
+            &mut vec![],
+        );
         let mut ev = vec![];
         c.poll(&w, &mut ev);
         assert!(matches!(ev.as_slice(), [Event::ToAgent(AgentCmd::Watch { .. })]));

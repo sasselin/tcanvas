@@ -82,3 +82,15 @@ pub fn text_prompt(ctx: &egui::Context, id: &str, title: &str, text: &mut String
     }
     result
 }
+
+/// `feat/very-long-branch-name` -> `feat/ver…anch-name`: keeps both ends, which tell branches apart.
+pub fn elide_middle(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max || max < 3 {
+        return s.to_string();
+    }
+    let tail = (max - 1) / 2;
+    let head = max - 1 - tail;
+    let chars: Vec<char> = s.chars().collect();
+    format!("{}…{}", chars[..head].iter().collect::<String>(), chars[n - tail..].iter().collect::<String>())
+}

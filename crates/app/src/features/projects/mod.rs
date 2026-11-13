@@ -30,6 +30,10 @@ trait Row: Clone + Default + PartialEq {
     fn enter_mut(&mut self) -> Option<&mut bool> {
         None
     }
+    /// The "starts the group's tasks" flag, for rows that have one (at most one row has it on).
+    fn task_mut(&mut self) -> Option<&mut bool> {
+        None
+    }
     fn renamed(&self, name: String) -> Self;
 }
 
@@ -45,6 +49,9 @@ impl Row for CommandTemplate {
     }
     fn body_mut(&mut self) -> &mut String {
         &mut self.command
+    }
+    fn task_mut(&mut self) -> Option<&mut bool> {
+        Some(&mut self.task)
     }
     fn renamed(&self, name: String) -> Self {
         Self { name, ..self.clone() }
@@ -145,6 +152,7 @@ const MENU_NAME_CHARS: usize = 32;
 /// itself is kept as typed.
 fn clean_rows<R: Row>(rows: &[R]) -> Vec<R> {
     let mut out: Vec<R> = Vec::new();
+    let mut task_taken = false;
     for r in rows.iter().filter(|r| !r.body().trim().is_empty()) {
         let base: String = match r.name().trim() {
             "" => r.body().trim().lines().next().unwrap_or_default().chars().take(40).collect(),
@@ -152,7 +160,13 @@ fn clean_rows<R: Row>(rows: &[R]) -> Vec<R> {
         };
         let taken = |n: &str| out.iter().any(|t| t.name() == n);
         let name = (1..).map(|k| if k == 1 { base.clone() } else { format!("{base} ({k})") }).find(|n| !taken(n)).expect("a free name");
-        out.push(r.renamed(name));
+        let mut row = r.renamed(name);
+        // One row at most starts the tasks: the first one ticked.
+        if let Some(task) = row.task_mut() {
+            *task = *task && !task_taken;
+            task_taken |= *task;
+        }
+        out.push(row);
     }
     out
 }
@@ -178,6 +192,7 @@ fn rows_dialog<R: Row>(ctx: &egui::Context, editor: &mut RowEditor<R>, group: &s
         ui.label(egui::RichText::new(texts.help).color(theme::TEXT_DIM));
         ui.add_space(6.0);
         let mut remove = None;
+        let mut task_row = None;
         egui::ScrollArea::vertical().max_height((ctx.content_rect().height() * 0.6).max(160.0)).show(ui, |ui| {
             for (k, row) in editor.rows.iter_mut().enumerate() {
                 ui.horizontal(|ui| {
@@ -196,9 +211,30 @@ fn rows_dialog<R: Row>(ctx: &egui::Context, editor: &mut RowEditor<R>, group: &s
                 if let Some(enter) = row.enter_mut() {
                     ui.checkbox(enter, t().message_enter);
                 }
+                if let Some(task) = row.task_mut()
+                    && ui.checkbox(task, t().template_starts_tasks).on_hover_text(t().template_starts_tasks_hint).changed()
+                    && *task
+                {
+                    task_row = Some(k);
+                }
+                // A task command whose placeholders cannot be expanded safely is refused at Start:
+                // said here, where it is written.
+                if row.task_mut().is_some_and(|t| *t) {
+                    for (what, spot) in protocol::task_command::expand_task_command(row.body()).refused {
+                        ui.label(egui::RichText::new((t().start_placeholder_refused)(&what, (t().task_spot)(spot))).small().color(egui::Color32::from_rgb(235, 95, 95)));
+                    }
+                }
                 ui.separator();
             }
         });
+        // One template starts the tasks: ticking one unticks the others.
+        if let Some(k) = task_row {
+            for (i, row) in editor.rows.iter_mut().enumerate() {
+                if let Some(task) = row.task_mut() {
+                    *task = i == k;
+                }
+            }
+        }
         if let Some(k) = remove {
             editor.rows.remove(k);
         }
@@ -836,6 +872,7 @@ impl Projects {
                     templates: Vec::new(),
                     messages: Vec::new(),
                     worktree_location: None,
+                    task_settings: Default::default(),
                 };
                 self.start_rename(&p);
                 let id = p.id.clone();
@@ -870,6 +907,30 @@ impl Projects {
                     p.templates = templates.clone();
                 }
                 world.touch();
+            }
+            Event::UseTaskTemplate(id, n) => {
+                if let Some(p) = world.projects.iter_mut().find(|p| &p.id == id).filter(|p| *n < p.templates.len()) {
+                    for (k, tpl) in p.templates.iter_mut().enumerate() {
+                        tpl.task = k == *n;
+                    }
+                    world.touch();
+                }
+            }
+            Event::AddTaskTemplate(id, template) => {
+                if let Some(p) = world.projects.iter_mut().find(|p| &p.id == id) {
+                    let mut rows: Vec<CommandTemplate> = p.templates.iter().map(|t| CommandTemplate { task: false, ..t.clone() }).collect();
+                    rows.push(CommandTemplate { task: true, ..template.clone() });
+                    p.templates = clean_rows(&rows);
+                    world.touch();
+                }
+            }
+            Event::SetProjectTaskSettings(id, settings) => {
+                if let Some(p) = world.projects.iter_mut().find(|p| &p.id == id)
+                    && p.task_settings != *settings
+                {
+                    p.task_settings = settings.clone();
+                    world.touch();
+                }
             }
             Event::SetProjectWorktreeLocation(id, location) => {
                 if let Some(p) = world.projects.iter_mut().find(|p| &p.id == id)
@@ -950,6 +1011,7 @@ mod tests {
             templates: Vec::new(),
             messages: Vec::new(),
             worktree_location: None,
+            task_settings: Default::default(),
         });
         let mut member = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::splat(50.0)), None);
         member.project = Some("p".into());
@@ -975,6 +1037,7 @@ mod tests {
             templates: Vec::new(),
             messages: Vec::new(),
             worktree_location: None,
+            task_settings: Default::default(),
         });
         let mut a = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::splat(50.0)), None);
         a.name = Some("server".into());
@@ -990,6 +1053,8 @@ mod tests {
             agent_session_id: None,
             agent_transcript: None,
             last_prompt: None,
+            agent_prompt_mark: None,
+            agent_turn_mark: None,
         });
         let (ia, outside) = (a.id.clone(), Card::new(Rect::from_min_size(pos2(5000.0, 0.0), Vec2::splat(50.0)), None));
         w.add_card(a);
@@ -1013,6 +1078,7 @@ mod tests {
                 templates: Vec::new(),
                 messages: Vec::new(),
                 worktree_location: None,
+                task_settings: Default::default(),
             });
         }
         let mut c = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::new(300.0, 200.0)), None);
@@ -1090,7 +1156,7 @@ mod tests {
 
     #[test]
     fn saved_templates_drop_empty_rows_and_name_the_unnamed() {
-        let row = |name: &str, command: &str| CommandTemplate { name: name.into(), command: command.into() };
+        let row = |name: &str, command: &str| CommandTemplate { name: name.into(), command: command.into(), task: false };
         let rows = [row("Review", "claude \"review\"\n"), row("  ", "  npm test -- --watch\nsecond line"), row("empty", "  \n"), row("", "")];
         assert_eq!(clean_templates(&rows), vec![row("Review", "claude \"review\"\n"), row("npm test -- --watch", "  npm test -- --watch\nsecond line")]);
         // Names stay apart in the menu.
@@ -1104,6 +1170,19 @@ mod tests {
         Projects::default().handle(&Event::SetProjectTemplates("api".into(), vec![row("a", "b")]), &mut w, &mut vec![]);
         assert_eq!(w.project("api").unwrap().templates, vec![row("a", "b")]);
         assert!(w.project("web").unwrap().templates.is_empty());
+    }
+
+    #[test]
+    fn one_template_at_most_starts_the_tasks_and_the_settings_are_kept() {
+        let row = |name: &str, task| CommandTemplate { name: name.into(), command: format!("{name} {{task}}"), task };
+        let saved = clean_templates(&[row("empty", true).renamed(String::new()), row("claude", true), row("codex", true), row("logs", false)]);
+        let flags: Vec<(String, bool)> = saved.iter().map(|t| (t.name.clone(), t.task)).collect();
+        assert_eq!(flags, vec![("empty {task}".to_string(), true), ("claude".into(), false), ("codex".into(), false), ("logs".into(), false)], "the first one ticked");
+        let (mut w, _) = two_groups();
+        let settings = crate::shell::world::TaskSettings { prompt: Some("Do {task_title}".into()), branch_prefix: Some("me/".into()), skip_confirm: true };
+        Projects::default().handle(&Event::SetProjectTaskSettings("api".into(), settings.clone()), &mut w, &mut vec![]);
+        assert_eq!(w.project("api").unwrap().task_settings, settings);
+        assert!(w.project("web").unwrap().task_settings.is_default());
     }
 
     #[test]
@@ -1153,6 +1232,7 @@ mod tests {
             templates: Vec::new(),
             messages: Vec::new(),
             worktree_location: None,
+            task_settings: Default::default(),
         });
         w.space = Some("api".into());
         let mut out = vec![];
@@ -1174,6 +1254,7 @@ mod tests {
             templates: Vec::new(),
             messages: Vec::new(),
             worktree_location: None,
+            task_settings: Default::default(),
         });
         // "All" view, camera centered on the existing group, or creation at a precise point inside it.
         for at in [None, Some(pos2(20.0, 10.0))] {

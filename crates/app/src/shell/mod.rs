@@ -203,7 +203,7 @@ impl App {
         self.agent.poll(&mut events);
         self.cards.poll(&mut self.world, &mut events);
         self.changes.poll(&self.world, &mut events);
-        self.tasks.poll(&self.world, &mut events);
+        self.tasks.poll(&mut self.world, &mut events);
         self.worktrees.poll(&mut self.world);
         self.notifications.poll(&ctx, &mut events);
         self.notifications.acknowledge_watched(&mut self.world);
@@ -267,7 +267,7 @@ impl App {
         self.cards.dialogs(&ctx, &self.world, &mut events);
         self.projects.dialogs(&ctx, &self.world, &mut events);
         self.worktrees.dialogs(&ctx, &self.world, &mut events);
-        self.tasks.dialogs(&ctx, &mut events);
+        self.tasks.dialogs(&ctx, &self.world, &mut events);
         self.notifications.ui(&ctx, &self.world, &mut events);
         self.updates.dialogs(&ctx);
         self.shortcuts_help.ui(&ctx);

@@ -307,6 +307,7 @@ fn add_project(h: &mut Harness<'_, App>, name: &str, color: [u8; 3], at: Pos2) -
         templates: Vec::new(),
         messages: Vec::new(),
         worktree_location: None,
+        task_settings: Default::default(),
     });
     id
 }
@@ -342,6 +343,8 @@ fn add_card(h: &mut Harness<'_, App>, id: &str, t: Term<'_>) {
         agent_session_id: None,
         agent_transcript: None,
         last_prompt: None,
+        agent_prompt_mark: None,
+        agent_turn_mark: None,
     };
     app.dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
 }
@@ -409,6 +412,7 @@ fn demo_canvas(h: &mut Harness<'_, App>) {
         templates: Vec::new(),
         messages: Vec::new(),
         worktree_location: None,
+        task_settings: Default::default(),
     });
     h.state_mut().dispatch(vec![Event::AddWire(api.clone(), web), Event::AddWire(api, infra), Event::Agent(AgentEvent::Changes(api_changes()))]);
     steps(h, 5);
@@ -521,7 +525,7 @@ fn tasks() {
     ctrl_shift(&h, Key::Num1);
     steps(&mut h, 45);
     let board = TaskBoard { key: "p-shop-api".into(), list: Some(api_tasks()), read_only: false, problem: None, found: vec![] };
-    let hello = AgentEvent::Hello { version: "X.X.X".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None };
+    let hello = AgentEvent::Hello { version: "X.X.X".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, shell: None };
     h.state_mut().dispatch(vec![Event::Agent(hello), Event::Agent(AgentEvent::Tasks(Box::new(board)))]);
     ctrl_shift(&h, Key::T);
     steps(&mut h, 3);
@@ -531,6 +535,78 @@ fn tasks() {
     assert!(h.query_by_label("waits for #h4c").is_some() && h.query_by_label("ready").is_some(), "blocked and ready marks shown");
     h.event(egui::Event::PointerGone);
     save(&mut h, "tasks");
+}
+
+/// Starting a task: the API's Claude Code card works on the rate limit (its header names the
+/// task, its row offers `Go to`), and the invoice task is about to start in its own worktree.
+#[test]
+#[ignore = "renders README screenshots; run ./scripts/screenshots.sh"]
+fn task_start() {
+    let mut h = harness("task-start");
+    demo_canvas(&mut h);
+    h.state_mut().world.projects[0].templates = vec![tcanvas::shell::world::CommandTemplate { name: "Claude Code".into(), command: "claude {task}".into(), task: true }];
+    ctrl_shift(&h, Key::Num1);
+    steps(&mut h, 45);
+    let mut tasks = api_tasks();
+    let rate_limit = &mut tasks.tasks[0];
+    rate_limit.status = TaskStatus::Active;
+    rate_limit.session = Some("tc_t0".into());
+    rate_limit.branch = Some("task/rate-limit-the-login-route-q7m".into());
+    rate_limit.worktree = Some("/home/me/code/shop-api/.claude/worktrees/task-rate-limit-the-login-route-q7m".into());
+    let board = TaskBoard { key: "p-shop-api".into(), list: Some(tasks), read_only: false, problem: None, found: vec![] };
+    let hello =
+        AgentEvent::Hello { version: "X.X.X".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: Some(protocol::TaskHooks::Installed), task_links: true, shell: None };
+    let main = protocol::Worktree {
+        path: "/home/me/code/shop-api".into(),
+        head: Some("a".repeat(40)),
+        branch: Some("main".into()),
+        detached: false,
+        main: true,
+        bare: false,
+        locked: false,
+        lock_reason: None,
+        prunable: false,
+        dirty: Some(false),
+        ahead: Some(0),
+        behind: Some(0),
+        merged: None,
+        last_commit: Some(unix_now() - 3_600),
+        branch_deletable: false,
+        reflog_commits: false,
+    };
+    let list =
+        protocol::WorktreeList { key: "p-shop-api".into(), repo: Some("/home/me/code/shop-api".into()), default_branch: Some("origin/main".into()), worktrees: vec![main], merged_branches: vec![] };
+    h.state_mut().dispatch(vec![Event::Agent(hello), Event::Agent(AgentEvent::Worktrees(list)), Event::Agent(AgentEvent::Tasks(Box::new(board)))]);
+    ctrl_shift(&h, Key::T);
+    steps(&mut h, 3);
+    ctrl_shift(&h, Key::Num0);
+    steps(&mut h, 45);
+    assert!(h.query_by_label("Task #q7m: Rate limit the login route").is_some() && h.query_by_label("Go to").is_some(), "the task's card and its row");
+    let y = h.get_by_label("Invoice PDF with taxes").rect().center().y;
+    h.get_all_by_label("Start").find(|n| (n.rect().center().y - y).abs() < 12.0).expect("the invoice's Start").click();
+    steps(&mut h, 3);
+    let Some(protocol::AgentCmd::PlanWorktree { id, folder, location, .. }) = h.state().agent_sent().iter().rev().find(|c| matches!(c, protocol::AgentCmd::PlanWorktree { .. })).cloned() else {
+        panic!("the start asks the agent")
+    };
+    let plan = protocol::WorktreePlan {
+        id,
+        key: "p-shop-api".into(),
+        branches: vec![protocol::LocalBranch { name: "main".into(), checked_out: Some("/home/me/code/shop-api".into()) }],
+        current_branch: Some("main".into()),
+        default_branch: Some("origin/main".into()),
+        path: Some(format!("/home/me/code/shop-api/.claude/worktrees/{folder}")),
+        folder,
+        location,
+        problem: None,
+        free_folder: None,
+        exclude: None,
+        recipe: None,
+    };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreePlan(Box::new(plan)))]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Start task #k3f").is_some() && h.query_by_label("New worktree on the new branch task/invoice-pdf-with-taxes-k3f, from origin/main").is_some());
+    h.event(egui::Event::PointerGone);
+    save(&mut h, "task-start");
 }
 
 #[test]
@@ -642,7 +718,7 @@ fn worktrees() {
 fn new_worktree() {
     let mut h = harness("new-worktree");
     worktrees_canvas(&mut h, false);
-    h.state_mut().world.projects[0].templates = vec![tcanvas::shell::world::CommandTemplate { name: "Claude".into(), command: "claude".into() }];
+    h.state_mut().world.projects[0].templates = vec![tcanvas::shell::world::CommandTemplate { name: "Claude".into(), command: "claude".into(), task: false }];
     h.get_by_label("+ Worktree").click();
     steps(&mut h, 3);
     assert!(h.state().worktrees.create_open());
@@ -851,8 +927,20 @@ fn api_claude(h: &mut Harness<'_, App>, lines: Vec<String>, status: TermStatus) 
     app.cards.show_canned(&app.world, "t0", screen(lines).as_bytes());
     let session = app.world.card("t0").unwrap().session();
     let tail = vec!["Do you want to proceed?".into()];
-    let info =
-        SessionInfo { session, status, command: Some("claude".into()), cwd: None, last_exit: None, last_duration_secs: None, tail, agent_session_id: None, agent_transcript: None, last_prompt: None };
+    let info = SessionInfo {
+        session,
+        status,
+        command: Some("claude".into()),
+        cwd: None,
+        last_exit: None,
+        last_duration_secs: None,
+        tail,
+        agent_session_id: None,
+        agent_transcript: None,
+        last_prompt: None,
+        agent_prompt_mark: None,
+        agent_turn_mark: None,
+    };
     app.dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
 }
 

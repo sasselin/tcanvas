@@ -7,9 +7,9 @@ use protocol::SESSION_PREFIX;
 
 use super::agent_hooks::{self, AgentMark, Owned};
 
-const FORMAT: &str = "#{session_name}\t#{pane_active}\t#{window_active}\t#{pane_pid}\t#{pane_dead}\t#{alternate_on}\t#{window_activity}\t#{@tc_started}\t#{@tc_ended}\t#{@tc_exit}\t#{@tc_agent}\t#{@tc_agent_session}\t#{@tc_agent_transcript}\t#{@tc_agent_prompt}\t#{pane_current_path}";
+const FORMAT: &str = "#{session_name}\t#{pane_active}\t#{window_active}\t#{pane_pid}\t#{pane_dead}\t#{alternate_on}\t#{window_activity}\t#{@tc_started}\t#{@tc_ended}\t#{@tc_exit}\t#{@tc_agent}\t#{@tc_agent_session}\t#{@tc_agent_transcript}\t#{@tc_agent_prompt}\t#{@tc_agent_prompt_mark}\t#{@tc_agent_turn_mark}\t#{pane_current_path}";
 /// Fields in `FORMAT`; the path comes last since it may contain tabs.
-const FIELDS: usize = 15;
+const FIELDS: usize = 17;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneRow {
@@ -29,6 +29,10 @@ pub struct PaneRow {
     pub agent_session: Option<Owned>,
     pub transcript: Option<Owned>,
     pub prompt: Option<Owned>,
+    /// The marks of the last prompt submitted and turn ended in the pane
+    /// (`agent_hooks::PROMPTS_OPTION`), if any.
+    pub prompts: Option<String>,
+    pub turns: Option<String>,
     pub path: String,
 }
 
@@ -95,7 +99,9 @@ fn parse_row(line: &str) -> Option<PaneRow> {
         agent_session: agent_hooks::decode_owned(f[11]),
         transcript: agent_hooks::decode_owned(f[12]),
         prompt: agent_hooks::decode_owned(f[13]),
-        path: f[14].to_string(),
+        prompts: Some(f[14].trim().to_string()).filter(|m| !m.is_empty()),
+        turns: Some(f[15].trim().to_string()).filter(|m| !m.is_empty()),
+        path: f[16].to_string(),
     })
 }
 
@@ -137,10 +143,10 @@ mod tests {
 
     #[test]
     fn parses_active_canvas_panes_only() {
-        let out = "tc_a\t1\t1\t42\t0\t0\t1700\t1690\t1695\t3\twaiting 50,42\t50,42 7331\t50 2f742e6a736f6e6c\t42,50 48690a7468657265\t/home/me/my\tdir\n\
-                   tc_a\t0\t1\t43\t0\t0\t1700\t\t\t\t\t\t\t\t/tmp\n\
-                   personal\t1\t1\t44\t0\t0\t1700\t\t\t\t\t\t\t\t/tmp\n\
-                   tc_b\t1\t1\t45\t1\t1\t1600\t\t\t\t\t7331\t45 zz\t\t/\n";
+        let out = "tc_a\t1\t1\t42\t0\t0\t1700\t1690\t1695\t3\twaiting 50,42\t50,42 7331\t50 2f742e6a736f6e6c\t42,50 48690a7468657265\t3\t2\t/home/me/my\tdir\n\
+                   tc_a\t0\t1\t43\t0\t0\t1700\t\t\t\t\t\t\t\t\t\t/tmp\n\
+                   personal\t1\t1\t44\t0\t0\t1700\t\t\t\t\t\t\t\t\t\t/tmp\n\
+                   tc_b\t1\t1\t45\t1\t1\t1600\t\t\t\t\t7331\t45 zz\t\tx\t\t/\n";
         let rows = parse_rows(out);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].session, "tc_a");
@@ -154,6 +160,7 @@ mod tests {
         assert_eq!(rows[1].agent, None);
         assert_eq!((&rows[1].agent_session, &rows[1].prompt), (&None, &None), "no owner, malformed or empty: nothing");
         assert!(rows[1].dead && rows[1].alternate);
+        assert_eq!((rows[0].prompts.as_deref(), rows[0].turns.as_deref(), rows[1].prompts.as_deref(), rows[1].turns.as_deref()), (Some("3"), Some("2"), Some("x"), None), "marks as written");
     }
 
     #[test]

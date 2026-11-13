@@ -104,6 +104,7 @@ fn command_card(h: &mut Harness<'_, App>, folder: &str, command: &str) -> String
             templates: Vec::new(),
             messages: Vec::new(),
             worktree_location: None,
+            task_settings: Default::default(),
         };
         h.state_mut().world.projects.push(group);
     }

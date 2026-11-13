@@ -119,6 +119,33 @@ fn is_prompt_event(event: &str) -> bool {
     matches!(event.to_ascii_lowercase().as_str(), "userpromptsubmit" | "userpromptsubmitted" | "beforeagent")
 }
 
+/// Pane options marking the last prompt submitted and the last turn ended by a coding agent in the
+/// pane: each event writes a new token (its time and the hook's pid), in the hook's single tmux
+/// call (no read first: concurrent hooks never lose one). Never unset (not even at `SessionEnd`):
+/// a reader tells a new prompt or a new turn end from a token that changed.
+pub const PROMPTS_OPTION: &str = "@tc_agent_prompt_mark";
+pub const TURNS_OPTION: &str = "@tc_agent_turn_mark";
+
+/// The counter an event moves: a submitted prompt, or the end of a turn (the agent's reply is
+/// over: `Stop`, `agentStop`, `AfterAgent`). Attention requests (`Notification`,
+/// `PermissionRequest`) and tool events move none: the turn goes on.
+pub fn counter_of(event: &str) -> Option<&'static str> {
+    if is_prompt_event(event) {
+        return Some(PROMPTS_OPTION);
+    }
+    matches!(event.to_ascii_lowercase().as_str(), "stop" | "agentstop" | "afteragent").then_some(TURNS_OPTION)
+}
+
+/// `; set -p -t <pane> <option> <token>`: the mark's new value, chained to the hook's call.
+pub fn counter_args(pane: &str, option: &str, token: &str) -> Vec<String> {
+    [";", "set", "-p", "-t", pane, option, token].map(String::from).to_vec()
+}
+
+/// A token no other hook writes: the time in nanoseconds and this process's id.
+pub fn mark_token(nanos: u128, pid: u32) -> String {
+    format!("{nanos}-{pid}")
+}
+
 /// First JSON value of `reader`, without waiting for the end of the stream (some callers
 /// leave stdin open). `None` for empty or invalid input.
 pub fn read_payload(reader: impl Read) -> Option<Value> {
@@ -266,9 +293,15 @@ pub fn hook_cli(event: Option<&str>) -> io::Result<()> {
         let value = rx.recv_timeout(Duration::from_millis(300)).ok().flatten();
         let payload = payload_of(event, value.as_ref());
         let pids = if change.is_some() { ancestors() } else { Vec::new() };
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let count = counter_of(event).map(|option| counter_args(&pane, option, &mark_token(nanos, std::process::id()))).unwrap_or_default();
+        let with_count = |mut args: Vec<String>| {
+            args.extend(count.iter().cloned());
+            args
+        };
         // The payload must never cost the mark: if the combined call fails, set the mark alone.
-        if !run_tmux(&tmux_args(&pane, change, &pids, &payload)) && payload != Payload::default() {
-            run_tmux(&tmux_args(&pane, change, &pids, &Payload::default()));
+        if !run_tmux(&with_count(tmux_args(&pane, change, &pids, &payload))) && payload != Payload::default() {
+            run_tmux(&with_count(tmux_args(&pane, change, &pids, &Payload::default())));
         }
     } else {
         let _ = rx.recv_timeout(Duration::from_millis(300));
@@ -1165,5 +1198,34 @@ mod tests {
         assert!(fs::symlink_metadata(home.join(".claude/settings.json")).unwrap().file_type().is_symlink(), "still a link");
         assert_eq!(read_json(&home.join("dotfiles/claude.json")), json!({}));
         let _ = fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn prompts_and_turn_ends_are_counted_attention_requests_are_not() {
+        for e in ["UserPromptSubmit", "userPromptSubmitted", "BeforeAgent"] {
+            assert_eq!(counter_of(e), Some(PROMPTS_OPTION), "{e}");
+        }
+        for e in ["Stop", "agentStop", "AfterAgent"] {
+            assert_eq!(counter_of(e), Some(TURNS_OPTION), "{e}");
+        }
+        for e in ["Notification", "PermissionRequest", "permissionRequest", "PostToolUse", "AfterTool", "SessionEnd", "SessionStart"] {
+            assert_eq!(counter_of(e), None, "{e}");
+        }
+        // Every agent has both: its prompts and its turn ends are counted.
+        for a in ADAPTERS {
+            assert!(a.events.iter().any(|(e, _)| counter_of(e) == Some(PROMPTS_OPTION)), "{}", a.name);
+            assert!(a.events.iter().any(|(e, _)| counter_of(e) == Some(TURNS_OPTION)), "{}", a.name);
+        }
+        assert_eq!(counter_args("%3", TURNS_OPTION, "17-42").join(" "), "; set -p -t %3 @tc_agent_turn_mark 17-42");
+        // One tmux call per event: the mark goes with the state, in the same argument list.
+        let mut one = tmux_args("%3", Some(AgentState::Waiting), &[9], &Payload::default());
+        one.extend(counter_args("%3", TURNS_OPTION, &mark_token(17, 42)));
+        assert_eq!(one.join(" "), "set -p -t %3 @tc_agent waiting 9 ; set -p -t %3 @tc_agent_turn_mark 17-42");
+        // Concurrent hooks (same instant, other processes) and a restarted agent (time goes on)
+        // write other tokens: none is lost, none repeats.
+        assert_ne!(mark_token(17, 42), mark_token(17, 43));
+        assert_ne!(mark_token(17, 42), mark_token(18, 42));
+        // `SessionEnd` unsets the mark and the payload, never the counters.
+        assert!(!tmux_args("%3", None, &[], &Payload::default()).iter().any(|a| a == PROMPTS_OPTION || a == TURNS_OPTION));
     }
 }
