@@ -86,6 +86,15 @@ pub struct SessionInfo {
     pub last_duration_secs: Option<u64>,
     /// Last non-empty lines of the screen, for the zoomed-out preview.
     pub tail: Vec<String>,
+    /// From the hooks of the coding agent in the foreground (empty without one, or when its
+    /// hooks did not send them): its own session id, its transcript file, and the last
+    /// prompt the user submitted (one line, truncated).
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
+    #[serde(default)]
+    pub agent_transcript: Option<String>,
+    #[serde(default)]
+    pub last_prompt: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -271,10 +280,65 @@ mod tests {
             last_exit: Some(2),
             last_duration_secs: Some(31),
             tail: vec!["$ false".into()],
+            agent_session_id: None,
+            agent_transcript: None,
+            last_prompt: None,
         });
         let line = encode(&ev);
         assert!(line.ends_with('\n') && !line[..line.len() - 1].contains('\n'));
         assert_eq!(decode::<AgentEvent>(&line).unwrap(), ev);
+    }
+
+    #[test]
+    fn roundtrip_agent_session_fields() {
+        let ev = AgentEvent::Session(SessionInfo {
+            session: "tc_ab12".into(),
+            status: TermStatus::Running,
+            command: Some("claude".into()),
+            cwd: None,
+            last_exit: None,
+            last_duration_secs: None,
+            tail: vec![],
+            agent_session_id: Some("0b1c-42".into()),
+            agent_transcript: Some("/home/me/.claude/projects/x/0b1c-42.jsonl".into()),
+            last_prompt: Some("add the total with taxes to the PDF \"now\" \u{e9}t\u{e9}".into()),
+        });
+        assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+    }
+
+    #[test]
+    fn session_info_decodes_across_versions() {
+        // What an older agent sends: no agent session fields.
+        let old = r#"{"type":"Session","session":"tc_a","status":{"kind":"Idle"},"command":null,"cwd":"/home","last_exit":null,"last_duration_secs":null,"tail":[]}"#;
+        let AgentEvent::Session(info) = decode::<AgentEvent>(old).unwrap() else { panic!("a session") };
+        assert_eq!((info.agent_session_id, info.agent_transcript, info.last_prompt), (None, None, None));
+
+        // What an older app reads: the new fields are ignored.
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OldSessionInfo {
+            session: String,
+            status: TermStatus,
+            command: Option<String>,
+            cwd: Option<String>,
+            last_exit: Option<i32>,
+            last_duration_secs: Option<u64>,
+            tail: Vec<String>,
+        }
+        let new = SessionInfo {
+            session: "tc_a".into(),
+            status: TermStatus::Idle,
+            command: None,
+            cwd: None,
+            last_exit: None,
+            last_duration_secs: None,
+            tail: vec![],
+            agent_session_id: Some("s".into()),
+            agent_transcript: None,
+            last_prompt: Some("hi".into()),
+        };
+        let old: OldSessionInfo = decode(&encode(&new)).unwrap();
+        assert_eq!(old.session, "tc_a");
     }
 
     #[test]

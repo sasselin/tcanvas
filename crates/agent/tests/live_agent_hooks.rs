@@ -126,3 +126,83 @@ fn hooks_mark_the_pane_while_their_agent_runs() {
     assert!(out.status.success());
     assert_eq!(String::from_utf8_lossy(&out.stdout), "{}\n", "a valid 'no decision' for every agent");
 }
+
+#[test]
+fn a_prompt_sent_to_the_hook_is_reported_with_the_session() {
+    if !has("tmux") || !has("bash") {
+        eprintln!("tmux or bash missing: test skipped");
+        return;
+    }
+    let server = Server { socket: format!("tcanvas-agentprompt-{}", std::process::id()) };
+    let session = "tc_prompt";
+    server.tmux(&["new-session", "-d", "-s", session, "-x", "100", "-y", "20", "bash --norc --noprofile -i"]);
+    thread::sleep(Duration::from_millis(300));
+
+    // A prompt holding what could break the pane listing or be expanded by tmux.
+    let dir = TempDir(std::env::temp_dir().join(format!("tcanvas-agentprompt-{}", std::process::id())));
+    std::fs::create_dir_all(&dir.0).unwrap();
+    let payload_file = dir.0.join("payload.json");
+    let payload = serde_json::json!({
+        "session_id": "4f1c-session",
+        "transcript_path": "/home/me/.claude/projects/-home-me-api/4f1c-session.jsonl",
+        "cwd": "/home/me/api",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "add the total\twith taxes\nto the PDF #{session_name} \u{e9}t\u{e9}",
+    });
+    std::fs::write(&payload_file, payload.to_string()).unwrap();
+
+    let mut child = Command::new(AGENT).env("TCANVAS_TMUX_SOCKET", &server.socket).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let _stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, events) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = tx.send(protocol::decode(&line).expect("valid JSON line"));
+        }
+    });
+    let agent = Agent { child, events };
+    agent.wait_status(session, "Idle", |i| i.status == TermStatus::Idle);
+
+    let expected = "add the total with taxes to the PDF #{session_name} \u{e9}t\u{e9}";
+    let fake = format!("sh -c '{AGENT} hook UserPromptSubmit <{} >/dev/null; sleep 30'", payload_file.display());
+    server.type_line(session, &fake);
+    agent.wait_status(session, "the prompt from the hook payload", |i| {
+        i.last_prompt.as_deref() == Some(expected)
+            && i.agent_session_id.as_deref() == Some("4f1c-session")
+            && i.agent_transcript.as_deref() == Some("/home/me/.claude/projects/-home-me-api/4f1c-session.jsonl")
+    });
+
+    // The agent quits (without SessionEnd): its prompt is no longer reported.
+    server.tmux(&["send-keys", "-t", session, "C-c"]);
+    agent.wait_status(session, "no prompt once the agent is gone", |i| i.status == TermStatus::Idle && i.last_prompt.is_none() && i.agent_session_id.is_none());
+
+    // Another agent starts in the same pane; its hook brings no prompt nor transcript. It owns
+    // the mark now, but must not be credited with the first agent's prompt and transcript.
+    let other_file = dir.0.join("other.json");
+    std::fs::write(&other_file, r#"{"sessionId":"other"}"#).unwrap();
+    server.type_line(session, &format!("sh -c '{AGENT} hook agentStop <{} >/dev/null; sleep 30'", other_file.display()));
+    agent.wait_status(session, "the second agent, without the first one's prompt", |i| {
+        i.status == TermStatus::WaitingInput && i.agent_session_id.as_deref() == Some("other") && i.last_prompt.is_none() && i.agent_transcript.is_none()
+    });
+    server.tmux(&["send-keys", "-t", session, "C-c"]);
+    agent.wait_status(session, "Idle again", |i| i.status == TermStatus::Idle);
+
+    // SessionEnd clears what the hooks kept.
+    let kept = |s: &Server| s.tmux(&["display", "-p", "-t", session, "#{@tc_agent_session}#{@tc_agent_transcript}#{@tc_agent_prompt}"]);
+    assert!(!kept(&server).is_empty());
+    server.type_line(session, &format!("{AGENT} hook SessionEnd </dev/null"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !kept(&server).is_empty() {
+        assert!(Instant::now() < deadline, "SessionEnd did not clear the payload");
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Removed even when an assertion fails.
+struct TempDir(std::path::PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}

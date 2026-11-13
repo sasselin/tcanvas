@@ -240,7 +240,18 @@ mod tests {
     use egui::{Pos2, Rect, Vec2};
 
     fn info(status: TermStatus, exit: Option<i32>, secs: Option<u64>) -> SessionInfo {
-        SessionInfo { session: "tc_a".into(), status, command: None, cwd: None, last_exit: exit, last_duration_secs: secs, tail: vec!["Continue? [y/N]".into()] }
+        SessionInfo {
+            session: "tc_a".into(),
+            status,
+            command: None,
+            cwd: None,
+            last_exit: exit,
+            last_duration_secs: secs,
+            tail: vec!["Continue? [y/N]".into()],
+            agent_session_id: None,
+            agent_transcript: None,
+            last_prompt: None,
+        }
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protocol::{AgentCmd, AgentEvent, DEFAULT_STALL_SECS, Problem, SessionInfo, TermStatus};
 
-use super::{changes, hooks, kill, status, timing, tmux};
+use super::{agent_hooks, changes, hooks, kill, status, timing, tmux};
 
 const POLL: Duration = Duration::from_secs(1);
 const TAIL_LINES: usize = 3;
@@ -119,6 +119,10 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64, mono: Instant, clock:
     let marks = timing::Marks { started: row.started, ended: row.ended, exit: row.exit };
     let last = t.last_command.observe(marks, t.shell, fg.is_some(), mono, clock);
 
+    // A mark left by an agent that has since quit names other processes: ignored. The payload
+    // values need a trusted mark too, and must have been written by the same foreground agent.
+    let mark = row.agent.as_ref().filter(|m| fg.as_ref().is_some_and(|f| m.pids.contains(&f.pid)));
+    let agent_pid = mark.and(fg.as_ref().map(|f| f.pid));
     let obs = status::Observation {
         now,
         dead: row.dead,
@@ -129,8 +133,7 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64, mono: Instant, clock:
         last_line: t.tail.last().map(String::as_str),
         last_exit: last.and_then(|l| l.exit),
         stall_secs: if t.stall_secs == 0 { DEFAULT_STALL_SECS } else { t.stall_secs },
-        // A mark left by an agent that has since quit names other processes: ignored.
-        agent: row.agent.as_ref().filter(|m| fg.as_ref().is_some_and(|f| m.pids.contains(&f.pid))).map(|m| m.state),
+        agent: mark.map(|m| m.state),
         coding_agent: fg.as_ref().is_some_and(|f| status::is_coding_agent(&f.cmdline)),
         busy_secs,
         was_waiting: t.last_sent.as_ref().is_some_and(|i| i.status == TermStatus::WaitingInput),
@@ -145,6 +148,9 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64, mono: Instant, clock:
         last_exit: last.and_then(|l| l.exit),
         last_duration_secs: last.and_then(|l| l.secs),
         tail: t.tail.clone(),
+        agent_session_id: agent_hooks::trusted(row.agent_session.as_ref(), agent_pid),
+        agent_transcript: agent_hooks::trusted(row.transcript.as_ref(), agent_pid),
+        last_prompt: agent_hooks::trusted(row.prompt.as_ref(), agent_pid),
     }
 }
 

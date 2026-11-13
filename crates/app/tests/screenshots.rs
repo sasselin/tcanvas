@@ -322,7 +322,18 @@ fn add_card(h: &mut Harness<'_, App>, id: &str, t: Term<'_>) {
     let session = card.session();
     app.world.add_card(card);
     app.cards.show_canned(&app.world, id, t.output.as_bytes());
-    let info = SessionInfo { session, status: t.status, command: t.command.map(String::from), cwd: None, last_exit: None, last_duration_secs: None, tail: vec![] };
+    let info = SessionInfo {
+        session,
+        status: t.status,
+        command: t.command.map(String::from),
+        cwd: None,
+        last_exit: None,
+        last_duration_secs: None,
+        tail: vec![],
+        agent_session_id: None,
+        agent_transcript: None,
+        last_prompt: None,
+    };
     app.dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
 }
 
@@ -620,7 +631,8 @@ fn api_claude(h: &mut Harness<'_, App>, lines: Vec<String>, status: TermStatus) 
     app.cards.show_canned(&app.world, "t0", screen(lines).as_bytes());
     let session = app.world.card("t0").unwrap().session();
     let tail = vec!["Do you want to proceed?".into()];
-    let info = SessionInfo { session, status, command: Some("claude".into()), cwd: None, last_exit: None, last_duration_secs: None, tail };
+    let info =
+        SessionInfo { session, status, command: Some("claude".into()), cwd: None, last_exit: None, last_duration_secs: None, tail, agent_session_id: None, agent_transcript: None, last_prompt: None };
     app.dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
 }
 

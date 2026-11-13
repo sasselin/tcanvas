@@ -415,7 +415,7 @@ impl TerminalCards {
             Some(s) => format!("{}  ·  {}", card.title(), t().status(s)),
             None => card.title(),
         };
-        title_painter.text(pos2(dot.x + 12.0 * zoom, dot.y), Align2::LEFT_CENTER, label, title_font.clone(), theme::TEXT);
+        let label_rect = title_painter.text(pos2(dot.x + 12.0 * zoom, dot.y), Align2::LEFT_CENTER, label, title_font.clone(), theme::TEXT);
         let mut right = title_rect.max.x - 10.0 * zoom;
         if let Some(close_r) = &close_r {
             let hot = close_r.hovered();
@@ -430,8 +430,25 @@ impl TerminalCards {
             title_painter.line_segment([c + vec2(-arm, arm), c + vec2(arm, -arm)], stroke);
             right = close_rect.min.x - 6.0 * zoom;
         }
-        if let Some(cwd) = card.current_cwd() {
-            title_painter.text(pos2(right, dot.y), Align2::RIGHT_CENTER, cwd, FontId::proportional(11.0 * zoom), theme::TEXT_DIM);
+        let prompt = header_prompt(card);
+        let cwd = card.current_cwd().map(|cwd| title_painter.layout_no_wrap(cwd.to_string(), FontId::proportional(11.0 * zoom), theme::TEXT_DIM));
+        let layout = header_layout(label_rect.max.x, right, cwd.as_ref().map(|g| g.size().x), prompt.is_some(), zoom);
+        if let Some(cwd) = cwd.filter(|_| layout.cwd) {
+            title_painter.galley(pos2(right - cwd.size().x, dot.y - cwd.size().y / 2.0), cwd, theme::TEXT_DIM);
+        }
+        // The coding agent's last prompt, elided between the title and the folder.
+        if let Some(prompt) = prompt
+            && let Some((x0, x1)) = layout.prompt
+        {
+            let mut job = egui::text::LayoutJob::single_section((t().last_prompt)(prompt), egui::TextFormat::simple(FontId::proportional(12.0 * zoom), theme::TEXT_DIM));
+            job.wrap = egui::text::TextWrapping::truncate_at_width(x1 - x0);
+            let galley = title_painter.layout_job(job);
+            let rect = Rect::from_min_size(pos2(x0, dot.y - galley.size().y / 2.0), galley.size());
+            title_painter.galley(rect.min, galley, theme::TEXT_DIM);
+            // Hover only: clicks and drags still go to the title bar underneath.
+            let r = ui.interact(rect, eid.with("prompt"), Sense::hover()).on_hover_text(prompt);
+            let a11y = (t().last_prompt_a11y)(prompt);
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &a11y));
         }
 
         let font_px = quantize(BASE_FONT * zoom);
@@ -766,6 +783,42 @@ pub fn close_message(card: &Card) -> (String, String) {
     (title, body)
 }
 
+/// Last prompt the card's coding agent received (empty when no agent reports one).
+pub fn header_prompt(card: &Card) -> Option<&str> {
+    if card.pty_dead {
+        return None;
+    }
+    card.info.as_ref()?.last_prompt.as_deref().map(str::trim).filter(|p| !p.is_empty())
+}
+
+/// What the title bar shows right of the title.
+#[derive(Debug, PartialEq)]
+struct HeaderLayout {
+    /// The folder, right-aligned against the close button.
+    cwd: bool,
+    /// Horizontal span (screen x) of the prompt.
+    prompt: Option<(f32, f32)>,
+}
+
+/// Lays out the folder and the prompt between the end of the title and `right` (the close
+/// button). The prompt wins over the folder when space is short, and always keeps at least a
+/// small hover target (an ellipsis) so its full text stays reachable.
+fn header_layout(title_end: f32, right: f32, cwd_width: Option<f32>, has_prompt: bool, zoom: f32) -> HeaderLayout {
+    let gap = 14.0 * zoom;
+    if !has_prompt {
+        return HeaderLayout { cwd: cwd_width.is_some(), prompt: None };
+    }
+    let x0 = title_end + gap;
+    if let Some(w) = cwd_width
+        && right - w - gap - x0 >= 120.0 * zoom
+    {
+        return HeaderLayout { cwd: true, prompt: Some((x0, right - w - gap)) };
+    }
+    let min_target = 16.0 * zoom;
+    let span = if right - x0 >= min_target { (x0, right) } else { (right - min_target, right) };
+    HeaderLayout { cwd: false, prompt: Some(span) }
+}
+
 fn cell_px(cell: Vec2) -> (u16, u16) {
     (cell.x.round().max(1.0) as u16, cell.y.round().max(1.0) as u16)
 }
@@ -843,8 +896,53 @@ mod tests {
             last_exit: None,
             last_duration_secs: None,
             tail: vec![],
+            agent_session_id: None,
+            agent_transcript: None,
+            last_prompt: None,
         });
         assert!(close_message(&card).1.starts_with("« cargo run » est en cours"));
+    }
+
+    #[test]
+    fn the_header_prompt_comes_from_the_agent_while_the_terminal_lives() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
+        let mut card = Card::new(Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.0)), None);
+        assert_eq!(header_prompt(&card), None);
+        let session = card.session();
+        let info = |prompt: Option<&str>| protocol::SessionInfo {
+            session: session.clone(),
+            status: protocol::TermStatus::Running,
+            command: Some("claude".into()),
+            cwd: None,
+            last_exit: None,
+            last_duration_secs: None,
+            tail: vec![],
+            agent_session_id: None,
+            agent_transcript: None,
+            last_prompt: prompt.map(String::from),
+        };
+        card.info = Some(info(Some("  ajoute le total TTC ")));
+        assert_eq!(header_prompt(&card), Some("ajoute le total TTC"));
+        assert_eq!((t().last_prompt)("ajoute le total TTC"), "« ajoute le total TTC »");
+        card.info = Some(info(Some("  ")));
+        assert_eq!(header_prompt(&card), None);
+        card.info = Some(info(Some("x")));
+        card.pty_dead = true;
+        assert_eq!(header_prompt(&card), None, "nothing on a dead terminal");
+    }
+
+    #[test]
+    fn the_prompt_wins_over_the_folder_when_space_is_short() {
+        // No prompt: the folder, as before.
+        assert_eq!(header_layout(100.0, 500.0, Some(80.0), false, 1.0), HeaderLayout { cwd: true, prompt: None });
+        // Room for both: the prompt sits between the title and the folder.
+        assert_eq!(header_layout(100.0, 500.0, Some(80.0), true, 1.0), HeaderLayout { cwd: true, prompt: Some((114.0, 406.0)) });
+        assert_eq!(header_layout(100.0, 500.0, None, true, 1.0), HeaderLayout { cwd: false, prompt: Some((114.0, 500.0)) });
+        // Short: the folder goes, the prompt takes its room.
+        assert_eq!(header_layout(100.0, 300.0, Some(80.0), true, 1.0), HeaderLayout { cwd: false, prompt: Some((114.0, 300.0)) });
+        // No room at all: still a small hover target against the close button.
+        assert_eq!(header_layout(290.0, 300.0, Some(80.0), true, 1.0), HeaderLayout { cwd: false, prompt: Some((284.0, 300.0)) });
+        assert_eq!(header_layout(290.0, 300.0, Some(80.0), true, 0.5), HeaderLayout { cwd: false, prompt: Some((292.0, 300.0)) });
     }
 
     #[test]

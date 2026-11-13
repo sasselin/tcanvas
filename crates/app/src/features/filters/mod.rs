@@ -231,6 +231,9 @@ mod tests {
             last_exit: None,
             last_duration_secs: None,
             tail: vec![],
+            agent_session_id: None,
+            agent_transcript: None,
+            last_prompt: None,
         });
         a.name = Some("server".into());
         a.project = Some("api".into());

@@ -5,10 +5,11 @@ use std::process::{Command, Output};
 
 use protocol::SESSION_PREFIX;
 
-use super::agent_hooks::{self, AgentMark};
+use super::agent_hooks::{self, AgentMark, Owned};
 
-const FORMAT: &str =
-    "#{session_name}\t#{pane_active}\t#{window_active}\t#{pane_pid}\t#{pane_dead}\t#{alternate_on}\t#{window_activity}\t#{@tc_started}\t#{@tc_ended}\t#{@tc_exit}\t#{@tc_agent}\t#{pane_current_path}";
+const FORMAT: &str = "#{session_name}\t#{pane_active}\t#{window_active}\t#{pane_pid}\t#{pane_dead}\t#{alternate_on}\t#{window_activity}\t#{@tc_started}\t#{@tc_ended}\t#{@tc_exit}\t#{@tc_agent}\t#{@tc_agent_session}\t#{@tc_agent_transcript}\t#{@tc_agent_prompt}\t#{pane_current_path}";
+/// Fields in `FORMAT`; the path comes last since it may contain tabs.
+const FIELDS: usize = 15;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneRow {
@@ -24,6 +25,10 @@ pub struct PaneRow {
     pub exit: Option<i32>,
     /// Value set by a coding agent's hooks (`@tc_agent`).
     pub agent: Option<AgentMark>,
+    /// Payload kept by the same hooks (decoded from hex), with the pids that wrote it.
+    pub agent_session: Option<Owned>,
+    pub transcript: Option<Owned>,
+    pub prompt: Option<Owned>,
     pub path: String,
 }
 
@@ -45,8 +50,8 @@ pub fn parse_rows(out: &str) -> Vec<PaneRow> {
 }
 
 fn parse_row(line: &str) -> Option<PaneRow> {
-    let f: Vec<&str> = line.splitn(12, '\t').collect();
-    if f.len() != 12 || !f[0].starts_with(SESSION_PREFIX) || f[1] != "1" || f[2] != "1" {
+    let f: Vec<&str> = line.splitn(FIELDS, '\t').collect();
+    if f.len() != FIELDS || !f[0].starts_with(SESSION_PREFIX) || f[1] != "1" || f[2] != "1" {
         return None;
     }
     Some(PaneRow {
@@ -59,7 +64,10 @@ fn parse_row(line: &str) -> Option<PaneRow> {
         ended: f[8].parse().ok(),
         exit: f[9].parse().ok(),
         agent: agent_hooks::parse_mark(f[10]),
-        path: f[11].to_string(),
+        agent_session: agent_hooks::decode_owned(f[11]),
+        transcript: agent_hooks::decode_owned(f[12]),
+        prompt: agent_hooks::decode_owned(f[13]),
+        path: f[14].to_string(),
     })
 }
 
@@ -101,10 +109,10 @@ mod tests {
 
     #[test]
     fn parses_active_canvas_panes_only() {
-        let out = "tc_a\t1\t1\t42\t0\t0\t1700\t1690\t1695\t3\twaiting 50,42\t/home/me/my\tdir\n\
-                   tc_a\t0\t1\t43\t0\t0\t1700\t\t\t\t\t/tmp\n\
-                   personal\t1\t1\t44\t0\t0\t1700\t\t\t\t\t/tmp\n\
-                   tc_b\t1\t1\t45\t1\t1\t1600\t\t\t\t\t/\n";
+        let out = "tc_a\t1\t1\t42\t0\t0\t1700\t1690\t1695\t3\twaiting 50,42\t50,42 7331\t50 2f742e6a736f6e6c\t42,50 48690a7468657265\t/home/me/my\tdir\n\
+                   tc_a\t0\t1\t43\t0\t0\t1700\t\t\t\t\t\t\t\t/tmp\n\
+                   personal\t1\t1\t44\t0\t0\t1700\t\t\t\t\t\t\t\t/tmp\n\
+                   tc_b\t1\t1\t45\t1\t1\t1600\t\t\t\t\t7331\t45 zz\t\t/\n";
         let rows = parse_rows(out);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].session, "tc_a");
@@ -112,7 +120,11 @@ mod tests {
         assert_eq!(rows[0].path, "/home/me/my\tdir");
         assert_eq!(rows[0].agent, Some(AgentMark { state: agent_hooks::AgentState::Waiting, pids: vec![50, 42] }));
         assert_eq!(rows[1].started, None);
+        assert_eq!(rows[0].agent_session, Some(Owned { pids: vec![50, 42], text: "s1".into() }));
+        assert_eq!(rows[0].transcript, Some(Owned { pids: vec![50], text: "/t.jsonl".into() }));
+        assert_eq!(rows[0].prompt, Some(Owned { pids: vec![42, 50], text: "Hi\nthere".into() }));
         assert_eq!(rows[1].agent, None);
+        assert_eq!((&rows[1].agent_session, &rows[1].prompt), (&None, &None), "no owner, malformed or empty: nothing");
         assert!(rows[1].dead && rows[1].alternate);
     }
 
