@@ -4,6 +4,10 @@
 //! is missing. Every removal goes through a confirmation, by click only, listing exactly what
 //! will be deleted (ignored files included); the agent checks the same rule again on its own
 //! fresh data before it deletes anything.
+//!
+//! The window belongs to the group it was opened from: when another group (or "All") is shown,
+//! it closes, its confirmation with it. Actions already sent keep going: their answers, or the
+//! lack of one, come back as toasts about that group (`Unattended`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -24,6 +28,12 @@ const MAX_RESULTS: usize = 8;
 /// An action the agent has not answered by then is given up (an older agent ignores the
 /// command; a restarted one forgot it).
 pub const PENDING_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The window of `project` stays open only while that group is the one shown (`space`, from
+/// `World::space`): another group, or "All", closes it.
+pub fn stays_open(project: &str, space: Option<&str>) -> bool {
+    space == Some(project)
+}
 
 /// The safe-to-remove rule as the app sees it: another worktree inside, a card's folder in it,
 /// or a group's.
@@ -161,6 +171,60 @@ fn still_listed(action: &Cleanup, list: &WorktreeList) -> bool {
     }
 }
 
+/// A group's name, for titles (its id if it is gone).
+pub fn group_name(world: &World, project: &str) -> String {
+    world.project(project).map_or_else(|| project.to_string(), |p| p.name.clone())
+}
+
+/// Actions sent from a window that closed before the agent answered (another group was shown,
+/// or the user closed it): each answer, or its absence after `PENDING_TIMEOUT`, becomes a toast
+/// about that group. Opening the group's window again takes them back.
+#[derive(Default)]
+pub struct Unattended {
+    /// (group, its name when the window closed, action, when it was sent).
+    items: Vec<(ProjectId, String, Cleanup, Instant)>,
+}
+
+impl Unattended {
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// Takes over what a closing window still waits for.
+    pub fn adopt(&mut self, window: CleanupWindow, group: String) {
+        let project = window.project;
+        self.items.extend(window.pending.into_iter().map(|(action, at)| (project.clone(), group.clone(), action, at)));
+    }
+
+    /// Gives back a group's actions to its window, opened again.
+    pub fn take(&mut self, project: &str) -> Vec<(Cleanup, Instant)> {
+        let (mine, others): (Vec<_>, Vec<_>) = std::mem::take(&mut self.items).into_iter().partition(|(p, ..)| p == project);
+        self.items = others;
+        mine.into_iter().map(|(_, _, action, at)| (action, at)).collect()
+    }
+
+    /// The agent's answer to one of these actions: a toast about its group (only that group's
+    /// answer to that very action).
+    pub fn answer(&mut self, ev: &AgentEvent) -> Option<Event> {
+        let AgentEvent::Cleaned { key, action, deleted_branch, problem } = ev else { return None };
+        let i = self.items.iter().position(|(p, _, a, _)| p == key && a == action)?;
+        let (project, group, action, _) = self.items.remove(i);
+        Some(notice(project, &group, &Outcome { action, deleted_branch: deleted_branch.clone(), problem: problem.clone(), timed_out: false }))
+    }
+
+    /// Gives up on actions the agent never answered, with a toast for each.
+    pub fn expire(&mut self, now: Instant) -> Vec<Event> {
+        let (late, waiting): (Vec<_>, Vec<_>) = std::mem::take(&mut self.items).into_iter().partition(|(.., at)| now.duration_since(*at) >= PENDING_TIMEOUT);
+        self.items = waiting;
+        late.into_iter().map(|(project, group, action, _)| notice(project, &group, &Outcome { action, deleted_branch: None, problem: None, timed_out: true })).collect()
+    }
+}
+
+fn notice(project: ProjectId, group: &str, outcome: &Outcome) -> Event {
+    let mark = if outcome.ok() { "✔" } else { "⚠" };
+    Event::GroupNotice { project, title: (t().cleanup_title)(group), body: format!("{mark} {}", outcome.text()) }
+}
+
 /// The open cleanup window of one group.
 pub struct CleanupWindow {
     pub project: ProjectId,
@@ -280,6 +344,7 @@ impl CleanupWindow {
 
     /// Draws the window (and its confirmation). `false`: closed.
     pub fn ui(&mut self, ctx: &egui::Context, list: &WorktreeList, world: &World, events: &mut Vec<Event>) -> bool {
+        let title = (t().cleanup_title)(&group_name(world, &self.project));
         self.expire(Instant::now());
         if !self.pending.is_empty() {
             ctx.request_repaint_after(Duration::from_secs(1));
@@ -287,7 +352,7 @@ impl CleanupWindow {
         let offered = self.offered(list, world);
         self.ask_sizes(&offered, events);
         let mut open = true;
-        Window::new(t().cleanup_title).id(Id::unique("worktree-cleanup")).collapsible(false).resizable(false).default_width(560.0).open(&mut open).show(ctx, |ui| {
+        Window::new(title).id(Id::unique("worktree-cleanup")).collapsible(false).resizable(false).default_width(560.0).open(&mut open).show(ctx, |ui| {
             let max = ctx.content_rect().height() * 0.6;
             ScrollArea::vertical().max_height(max).show(ui, |ui| self.body(ui, list, world, &offered));
         });
@@ -429,6 +494,7 @@ mod tests {
             last_commit: None,
             branch_deletable: true,
             reflog_commits: false,
+            new_branch: false,
         }
     }
 
@@ -475,6 +541,58 @@ mod tests {
         let w = World::default();
         l.worktrees.push(wt("/home/me/shop-taxes/.claude/worktrees/inner", "inner"));
         assert_eq!(verdict(&l.worktrees[1], &l, &w), Some(KeepReason::HoldsWorktree));
+    }
+
+    #[test]
+    fn a_branch_with_no_commit_of_its_own_is_kept_for_that_reason() {
+        i18n::set(Lang::Fr);
+        let mut l = list();
+        l.worktrees.push(Worktree { merged: None, new_branch: true, ..wt("/home/me/shop-fresh", "fresh") });
+        let w = World::default();
+        assert_eq!(verdict(&l.worktrees[5], &l, &w), Some(KeepReason::NewBranch));
+        assert_eq!(t().keep_reason(KeepReason::NewBranch, Some("main")), "pas encore de commit à elle (nouvelle branche)");
+        // Nothing ahead but not known as new (detached, older agent): still "not merged".
+        assert_eq!(verdict(&Worktree { merged: None, ..wt("/home/me/shop-x", "x") }, &l, &w), Some(KeepReason::NotMerged));
+        assert!(!removable(&l, &w).iter().any(|w| w.path == "/home/me/shop-fresh"));
+    }
+
+    #[test]
+    fn the_window_stays_only_on_its_group() {
+        assert!(stays_open("p", Some("p")));
+        assert!(!stays_open("p", Some("q")), "another group");
+        assert!(!stays_open("p", None), "'All'");
+    }
+
+    #[test]
+    fn answers_to_a_closed_window_become_toasts_about_its_group() {
+        i18n::set(Lang::Fr);
+        let removal = Cleanup::RemoveWorktree { path: "/home/me/shop-taxes".into(), delete_branch: Some("taxes".into()), ignored: Ignored::default() };
+        let branch = Cleanup::DeleteBranch { branch: "fix/typo".into() };
+        let start = Instant::now();
+        let mut window = CleanupWindow::new("p".into());
+        window.pending = vec![(removal.clone(), start), (branch.clone(), start)];
+        window.confirm = Some(vec![Cleanup::Prune { paths: vec![] }]);
+        let mut u = Unattended::default();
+        u.adopt(window, "shop".into());
+        // Another group's answer to the same action, or an answer to something else: not this.
+        assert!(u.answer(&AgentEvent::Cleaned { key: "q".into(), action: removal.clone(), deleted_branch: None, problem: None }).is_none());
+        assert!(u.answer(&AgentEvent::Cleaned { key: "p".into(), action: Cleanup::Prune { paths: vec![] }, deleted_branch: None, problem: None }).is_none(), "the confirmation was never sent");
+        let Some(Event::GroupNotice { project, title, body }) = u.answer(&AgentEvent::Cleaned { key: "p".into(), action: removal.clone(), deleted_branch: Some("taxes".into()), problem: None }) else {
+            panic!("a toast")
+        };
+        assert_eq!((project.as_str(), title.as_str(), body.as_str()), ("p", "Nettoyer les worktrees - shop", "✔ Supprimés : /home/me/shop-taxes et la branche taxes"));
+        assert!(u.answer(&AgentEvent::Cleaned { key: "p".into(), action: removal, deleted_branch: None, problem: None }).is_none(), "answered once");
+        // The one left: given back when the window opens again, or given up on with a toast.
+        assert_eq!(u.take("q"), vec![]);
+        assert_eq!(u.expire(start + PENDING_TIMEOUT / 2).len(), 0);
+        let late = u.expire(start + PENDING_TIMEOUT);
+        assert!(matches!(late.as_slice(), [Event::GroupNotice { body, .. }] if body == "⚠ Pas de réponse de l'agent : réessayer"));
+        assert!(u.is_empty());
+        let mut window = CleanupWindow::new("p".into());
+        window.pending = vec![(branch.clone(), start)];
+        u.adopt(window, "shop".into());
+        assert_eq!(u.take("p"), vec![(branch, start)]);
+        assert!(u.is_empty());
     }
 
     #[test]
