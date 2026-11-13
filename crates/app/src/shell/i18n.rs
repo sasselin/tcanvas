@@ -1172,7 +1172,7 @@ pub struct Texts {
     pub start_new_branch_instead: &'static str,
     pub start_no_base: &'static str,
     pub start_preparing: &'static str,
-    pub start_folder: fn(&str) -> String,
+    pub start_folder: &'static str,
     pub start_command: fn(&str) -> String,
     pub start_placeholder_refused: fn(&str, &str) -> String,
     pub task_spot: fn(Spot) -> &'static str,
@@ -1998,7 +1998,7 @@ pub const EN: Texts = Texts {
     start_new_branch_instead: "New branch instead",
     start_no_base: "The repository has no default branch to start from (origin/HEAD, main or master).",
     start_preparing: "Asking the agent…",
-    start_folder: |path| format!("Folder: {path}"),
+    start_folder: "Folder:",
     start_command: |name| format!("Command: {name}"),
     start_placeholder_refused: |what, construct| {
         format!(
@@ -2858,7 +2858,7 @@ pub const FR: Texts = Texts {
     start_new_branch_instead: "Plutôt une nouvelle branche",
     start_no_base: "Le dépôt n'a pas de branche par défaut d'où partir (origin/HEAD, main ou master).",
     start_preparing: "Question à l'agent…",
-    start_folder: |path| format!("Dossier : {path}"),
+    start_folder: "Dossier :",
     start_command: |name| format!("Commande : {name}"),
     start_placeholder_refused: |what, construct| {
         format!(

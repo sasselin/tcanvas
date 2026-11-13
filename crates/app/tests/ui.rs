@@ -2259,11 +2259,60 @@ fn the_worktrees_strip_lists_the_repository_and_its_terminals() {
     assert!(h.query_by_label_contains("Branche : feat/invoices").is_none());
 }
 
+/// The user pans the view by dragging empty canvas (near the viewport's bottom left corner).
+fn pan_by_hand(h: &mut Harness<'_, App>, by: Vec2) {
+    let vp = h.state().viewport();
+    let from = pos2(vp.min.x + 15.0, vp.max.y - 15.0);
+    let camera = h.state().world.camera;
+    h.drag_at(from);
+    h.step();
+    for k in 1..=4 {
+        h.hover_at(from + by * (k as f32 / 4.0));
+        h.step();
+    }
+    h.drop_at(from + by);
+    steps(h, 2);
+    assert_ne!(h.state().world.camera, camera, "the view moved");
+}
+
+#[test]
+fn an_opened_group_is_framed_below_the_worktrees_strip() {
+    let dir = temp_dir("worktrees-framed");
+    let mut h = harness(&dir);
+    // A tall group: framed, it fills the canvas' height, its label right under the toolbar.
+    let id = add_project(&mut h, "shop", Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 1500.0)));
+    h.state_mut().world.projects[0].cwd = Some("/home/me/shop".into());
+    for (name, at) in [("front", pos2(40.0, 40.0)), ("pdf", pos2(700.0, 40.0)), ("logs", pos2(40.0, 1100.0))] {
+        let card = add_card(&mut h, name, at);
+        h.state_mut().world.card_mut(&card).unwrap().cwd = Some("/home/me/shop".into());
+    }
+    // A linked group: its chip takes a row between the label and the frame.
+    let web = add_project(&mut h, "web", Rect::from_min_size(pos2(5000.0, 0.0), Vec2::new(800.0, 500.0)));
+    h.state_mut().dispatch(vec![Event::AddWire(id.clone(), web), Event::EnterSpace(Some(id))]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("⇄ web").is_some());
+    // The agent's list arrives after the space was framed: the strip shows above the canvas.
+    h.state_mut().dispatch(vec![shop_worktrees("p-shop")]);
+    steps(&mut h, 3);
+    let strip = h.get_by_label("⎇ 3 worktrees").rect();
+    let vp = h.state().viewport();
+    assert!(vp.min.y >= strip.max.y - 0.5, "the canvas starts below the strip: {vp:?} {strip:?}");
+    // The whole label bar of the group, from its number to its close button, below the strip.
+    for label in ["Fermer le groupe shop", "Dossier du groupe shop"] {
+        let r = h.get_by_label(label).rect();
+        assert!(r.min.y >= strip.max.y && vp.contains_rect(r), "{label} hidden: {r:?}, strip {strip:?}, canvas {vp:?}");
+    }
+    let frame = screen_of(&h, h.state().world.projects[0].rect);
+    assert!(vp.contains_rect(frame), "the whole group shows: {frame:?} in {vp:?}");
+}
+
 #[test]
 fn cards_stay_put_when_the_worktrees_strip_shows_or_hides() {
     let dir = temp_dir("worktrees-still");
     let mut h = harness(&dir);
     let (main, _) = shop_group(&mut h);
+    // The user moved the view: from then on the cards stay where they are on screen.
+    pan_by_hand(&mut h, Vec2::new(40.0, -30.0));
     let on_screen = |h: &Harness<'_, App>| screen_of(h, h.state().world.card(&main).unwrap().rect);
     let before = on_screen(&h);
     let viewport = h.state().viewport();
@@ -4278,7 +4327,8 @@ fn starting_a_task_creates_its_worktree_then_opens_its_card_and_follows_its_agen
     for label in [
         "Démarrer la tâche #k3f",
         "Nouveau worktree sur la nouvelle branche task/invoice-pdf-k3f, depuis main",
-        &format!("Dossier : {path}"),
+        "Dossier :",
+        path,
         "Commande : Claude",
         "claude \"$TCANVAS_TASK\"",
         "Prompt reçu par l'agent",

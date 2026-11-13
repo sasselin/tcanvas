@@ -6,6 +6,7 @@
 use egui::scroll_area::{ScrollBarVisibility, ScrollSource};
 use egui::{Align, Button, Color32, CursorIcon, Layout, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Ui, Vec2};
 
+use crate::features::canvas::{FIT_MARGIN, FIT_MAX_ZOOM};
 use crate::shell::event::Event;
 use crate::shell::i18n::t;
 use crate::shell::theme;
@@ -85,7 +86,7 @@ pub fn enter(world: &mut World, target: Option<ProjectId>, vp: Rect) -> bool {
     }
     world.space_cameras.insert(camera_key(world.space.as_deref()), world.camera);
     world.space = target;
-    let fitted = || space_bounds(world).map(|r| Camera::fitting(r, vp, 60.0, 1.0)).unwrap_or(world.camera);
+    let fitted = || space_bounds(world).map(|r| Camera::fitting(r, vp, FIT_MARGIN, FIT_MAX_ZOOM)).unwrap_or(world.camera);
     world.camera = match (&world.space, world.space_cameras.get(&camera_key(world.space.as_deref()))) {
         (None, Some(cam)) => *cam,
         _ => fitted(),

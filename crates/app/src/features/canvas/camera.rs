@@ -6,6 +6,14 @@ use crate::shell::world::Camera;
 
 pub const MIN_ZOOM: f32 = 0.05;
 pub const MAX_ZOOM: f32 = 3.0;
+/// Screen margin and largest zoom of the app's framings (a space, a card, a group...).
+pub const FIT_MARGIN: f32 = 60.0;
+pub const FIT_MAX_ZOOM: f32 = 1.0;
+
+/// The viewport's top or left edge moved.
+pub fn leading_edge_moved(old_vp: Rect, new_vp: Rect) -> bool {
+    (old_vp.min.x - new_vp.min.x).abs() > 0.01 || (old_vp.min.y - new_vp.min.y).abs() > 0.01
+}
 
 impl Camera {
     pub fn to_screen(&self, p: Pos2, vp: Rect) -> Pos2 {
@@ -47,6 +55,23 @@ impl Camera {
         let corner = Vec2::new(follow(old_vp.min.x, new_vp.min.x, old_vp.max.x, new_vp.max.x), follow(old_vp.min.y, new_vp.min.y, old_vp.max.y, new_vp.max.y));
         let delta = (new_vp.center() - old_vp.center()) - corner;
         self.center += delta / self.zoom;
+    }
+
+    /// Follows a viewport change. `framed`: the view is still the app's framing of that world
+    /// area (a space just opened, a "show all"...), untouched by the user since. When the top or
+    /// left edge moved (a strip above, a panel on the left), a framed view is framed again for the
+    /// new viewport, at once (nothing would be hidden under the strip or the panel); any other
+    /// view keeps its screen positions (`keep_anchor`).
+    pub fn follow_viewport(&mut self, old_vp: Rect, new_vp: Rect, framed: Option<Rect>) {
+        match framed.filter(|_| leading_edge_moved(old_vp, new_vp)) {
+            Some(target) => *self = Camera::fitting(target, new_vp, FIT_MARGIN, FIT_MAX_ZOOM),
+            None => self.keep_anchor(old_vp, new_vp),
+        }
+    }
+
+    /// Roughly the same view (to tell whether something else moved the camera).
+    pub fn same_view(&self, other: &Camera) -> bool {
+        (self.center - other.center).length() * self.zoom < 0.5 && (self.zoom / other.zoom - 1.0).abs() < 1e-4
     }
 
     /// Camera that shows all of `target` with a margin (screen pixels).
@@ -153,6 +178,41 @@ mod tests {
         let narrower = Rect::from_min_max(vp().min + Vec2::new(40.0, 0.0), vp().max);
         cam.keep_anchor(vp(), narrower);
         assert!(close(cam.to_screen(p, narrower), before));
+    }
+
+    #[test]
+    fn a_framed_view_is_framed_again_when_the_top_or_left_edge_moves() {
+        let target = Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(1000.0, 500.0));
+        for new_vp in [
+            // A strip under the toolbar.
+            Rect::from_min_max(vp().min + Vec2::new(0.0, 50.0), vp().max),
+            // A panel on the left.
+            Rect::from_min_max(vp().min + Vec2::new(300.0, 0.0), vp().max),
+        ] {
+            let mut cam = Camera::fitting(target, vp(), FIT_MARGIN, FIT_MAX_ZOOM);
+            cam.follow_viewport(vp(), new_vp, Some(target));
+            assert_eq!(cam, Camera::fitting(target, new_vp, FIT_MARGIN, FIT_MAX_ZOOM));
+            let on_screen = cam.rect_to_screen(target, new_vp);
+            assert!(new_vp.shrink(FIT_MARGIN - 1.0).contains_rect(on_screen), "{on_screen:?} in {new_vp:?}");
+        }
+    }
+
+    #[test]
+    fn a_view_the_user_moved_keeps_its_screen_positions() {
+        let target = Rect::from_min_size(pos2(0.0, 0.0), Vec2::new(1000.0, 500.0));
+        let mut cam = Camera::fitting(target, vp(), FIT_MARGIN, FIT_MAX_ZOOM);
+        cam.pan_screen(Vec2::new(35.0, -12.0));
+        let p = pos2(10.0, 20.0);
+        let before = cam.to_screen(p, vp());
+        let shorter = Rect::from_min_max(vp().min + Vec2::new(0.0, 50.0), vp().max);
+        cam.follow_viewport(vp(), shorter, None);
+        assert!(close(cam.to_screen(p, shorter), before));
+        // A framed view whose right edge moves (the Changes panel) keeps its positions too.
+        let mut framed = Camera::fitting(target, vp(), FIT_MARGIN, FIT_MAX_ZOOM);
+        let before = framed.to_screen(p, vp());
+        let narrower = Rect::from_min_max(vp().min, vp().max - Vec2::new(300.0, 0.0));
+        framed.follow_viewport(vp(), narrower, Some(target));
+        assert!(close(framed.to_screen(p, narrower), before));
     }
 
     #[test]
