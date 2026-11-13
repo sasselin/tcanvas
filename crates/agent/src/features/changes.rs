@@ -2,6 +2,7 @@
 //! Runs on its own thread: `git` never delays watching the terminals.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::ffi::OsString;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protocol::{AgentEvent, ChangeKind, ChangeSet, CommitInfo, DirEntry, DirListing, FileChange, Problem, WorktreeList};
 
-use super::{cleanup, create, recipe, tmux, worktrees};
+use super::{cleanup, create, recipe, review, tmux, worktrees};
 
 const SCAN_EVERY: Duration = Duration::from_secs(2);
 const MAX_FILES: usize = 500;
@@ -21,11 +22,11 @@ const MAX_FILES: usize = 500;
 const MAX_COMMITS: usize = 20;
 /// Walking a non-git folder stops beyond this many entries.
 const MAX_WALK: usize = 20_000;
-const MAX_DIFF: usize = 512 * 1024;
+pub const MAX_DIFF: usize = 512 * 1024;
 /// Bytes read to count the lines of an untracked file.
 const MAX_COUNT: u64 = 1024 * 1024;
 /// git's empty tree: diff base for a repository without commits.
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+pub const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// Folders skipped outside git (dependencies, build outputs).
 const SKIP_DIRS: [&str; 4] = ["node_modules", "target", "dist", "build"];
 
@@ -75,6 +76,16 @@ pub enum Cmd {
         key: String,
         seq: u64,
     },
+    /// A review request (`AgentCmd::Review`, `ReviewFiles`, `ReviewDiff`), answered on the review
+    /// thread.
+    Review(review::Request),
+}
+
+impl Cmd {
+    /// The review request `cmd` is, if it is one.
+    pub fn review(cmd: protocol::AgentCmd) -> Option<Cmd> {
+        review::Request::of(cmd).map(Cmd::Review)
+    }
 }
 
 /// A command that writes, run on the cleanup thread (one at a time).
@@ -129,8 +140,14 @@ pub fn spawn(send: impl Fn(&AgentEvent) + Send + Sync + 'static) -> Sender<Cmd> 
     let paths: WatchedPaths = Arc::default();
     let measuring: Measuring = Arc::default();
     let recipes = spawn_recipes(send.clone(), tx.clone());
-    let workers =
-        Workers { jobs: spawn_cleaner(send.clone(), tx.clone(), paths.clone(), recipes), sizes: spawn_measurer(send.clone(), measuring.clone()), plans: spawn_planner(send.clone()), paths, measuring };
+    let workers = Workers {
+        jobs: spawn_cleaner(send.clone(), tx.clone(), paths.clone(), recipes),
+        sizes: spawn_measurer(send.clone(), measuring.clone()),
+        plans: spawn_planner(send.clone()),
+        reviews: spawn_reviewer(send.clone()),
+        paths,
+        measuring,
+    };
     thread::spawn(move || run(rx, send, workers));
     tx
 }
@@ -140,6 +157,7 @@ struct Workers {
     jobs: Sender<Job>,
     sizes: Sender<SizeJob>,
     plans: Sender<PlanJob>,
+    reviews: Sender<(review::Request, Result<PathBuf, Problem>)>,
     paths: WatchedPaths,
     measuring: Measuring,
 }
@@ -176,6 +194,26 @@ fn spawn_planner(send: Sink) -> Sender<PlanJob> {
                     Err(problem) => create::refused_plan(job.id, &job.key, &job.folder, job.location.as_deref(), problem.clone()),
                 };
                 send(&AgentEvent::WorktreePlan(Box::new(plan)));
+            }
+        }
+    });
+    tx
+}
+
+/// Reviews are answered on their own thread (a big branch takes a while to list: the scans go on
+/// meanwhile); of several waiting of the same kind for one key, only the last is answered.
+fn spawn_reviewer(send: Sink) -> Sender<(review::Request, Result<PathBuf, Problem>)> {
+    let (tx, rx) = mpsc::channel::<(review::Request, Result<PathBuf, Problem>)>();
+    thread::spawn(move || {
+        while let Ok(first) = rx.recv() {
+            let mut waiting = vec![first];
+            waiting.extend(rx.try_iter());
+            let n = waiting.len();
+            for (i, (request, dir)) in waiting.iter().enumerate() {
+                if waiting[i + 1..n].iter().any(|(later, _)| request.superseded_by(later)) {
+                    continue;
+                }
+                send(&review::answer(request.clone(), dir.clone()));
             }
         }
     });
@@ -335,6 +373,10 @@ fn run(rx: Receiver<Cmd>, send: Sink, workers: Workers) {
                 Some(Err(problem)) => send(&AgentEvent::WorktreeCreated { id, key, path: None, problem: Some(problem), excluded: false, recipe_pending: false }),
                 None => send(&AgentEvent::WorktreeCreated { id, key, path: None, problem: Some(Problem::NotAGitRepo), excluded: false, recipe_pending: false }),
             },
+            Ok(Cmd::Review(request)) => {
+                let dir = watched.get(&request.key).map(|w| resolve(&w.path)).unwrap_or(Err(Problem::NotAGitRepo));
+                let _ = workers.reviews.send((request, dir));
+            }
             Ok(Cmd::Rescan) => next_scan = Instant::now(),
             Ok(Cmd::Refresh { key, seq }) => {
                 refreshes.push((key, seq));
@@ -350,7 +392,7 @@ fn run(rx: Receiver<Cmd>, send: Sink, workers: Workers) {
                     // that top, the status just run covers the whole worktree: no second one.
                     let top = set.root.clone().filter(|_| set.git);
                     let whole = top.is_some() && resolve(&w.path).ok().map(|d| d.to_string_lossy().into_owned()) == top;
-                    inputs.push(worktrees::Input { key: key.clone(), top, dirty: whole.then_some(!set.files.is_empty()) });
+                    inputs.push(worktrees::Input { key: key.clone(), top, dirty: whole.then_some(!set.files.is_empty()), mark: whole.then(|| files_mark(&set.files)) });
                     if w.last_sent.as_ref() != Some(&set) {
                         send(&AgentEvent::Changes(set.clone()));
                         w.last_sent = Some(set);
@@ -431,6 +473,11 @@ fn git(dir: &Path, args: &[&str]) -> Option<Output> {
     git_command(dir).args(args).env("GIT_OPTIONAL_LOCKS", "0").output().ok()
 }
 
+/// `git` with arguments that may not be UTF-8 (file names).
+fn git_os(dir: &Path, args: &[OsString]) -> Option<Output> {
+    git_command(dir).args(args).env("GIT_OPTIONAL_LOCKS", "0").output().ok()
+}
+
 pub fn git_ok(dir: &Path, args: &[&str]) -> Option<String> {
     git(dir, args).filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
 }
@@ -479,15 +526,21 @@ pub fn scan(key: &str, path: &str, since: u64) -> ChangeSet {
 
 fn git_files(dir: &Path, repo: &Repo) -> Vec<FileChange> {
     let Some(status) = git(dir, &["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."]) else { return Vec::new() };
-    let entries = parse_porcelain(&String::from_utf8_lossy(&status.stdout));
-    let numstat = git(dir, &["diff", &repo.base, "--numstat", "-z", "-M", "--no-ext-diff", "--", "."]).map(|o| parse_numstat(&String::from_utf8_lossy(&o.stdout))).unwrap_or_default();
+    let entries = parse_porcelain(&status.stdout);
+    let numstat = git(dir, &["diff", &repo.base, "--numstat", "-z", "-M", "--no-ext-diff", "--", "."]).map(|o| parse_numstat(&o.stdout)).unwrap_or_default();
+    file_changes(&repo.top, entries, &numstat)
+}
+
+/// The listed files of a worktree whose top is `top`, with their counts: from the numstat, else,
+/// for an untracked regular file, its lines (a symbolic link is never followed, a pipe never read).
+pub fn file_changes(top: &Path, entries: Vec<(String, ChangeKind)>, numstat: &HashMap<String, (Option<u32>, Option<u32>)>) -> Vec<FileChange> {
     entries
         .into_iter()
         .map(|(path, kind)| {
-            let full = repo.top.join(&path);
+            let full = top.join(name_path(&path));
             let (added, removed, binary) = match (&kind, numstat.get(&path)) {
                 (_, Some(&(a, r))) => (a, r, a.is_none()),
-                (ChangeKind::Untracked, None) => match count_lines(&full) {
+                (ChangeKind::Untracked, None) if is_regular(&full) => match count_lines(&full) {
                     Some(n) => (Some(n), Some(0), false),
                     None => (None, None, true),
                 },
@@ -498,8 +551,50 @@ fn git_files(dir: &Path, repo: &Repo) -> Vec<FileChange> {
         .collect()
 }
 
+/// A regular file itself (`lstat`: a symbolic link is not one, whatever it points to).
+pub fn is_regular(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file())
+}
+
+/// A file name as git gives it (bytes), as text: unchanged when it is UTF-8 and does not start
+/// with `"`; otherwise quoted the way git quotes names (`"caf\351.txt"`), which `name_bytes` turns
+/// back into the exact bytes.
+pub fn name_text(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(text) if !text.starts_with('"') => text.to_string(),
+        _ => {
+            let mut out = String::from("\"");
+            for &b in bytes {
+                match b {
+                    b'"' => out.push_str("\\\""),
+                    b'\\' => out.push_str("\\\\"),
+                    b'\n' => out.push_str("\\n"),
+                    b'\t' => out.push_str("\\t"),
+                    0x20..=0x7e => out.push(b as char),
+                    _ => out.push_str(&format!("\\{b:03o}")),
+                }
+            }
+            out.push('"');
+            out
+        }
+    }
+}
+
+/// The exact bytes of a name `name_text` gave.
+pub fn name_bytes(text: &str) -> Vec<u8> {
+    match text.strip_prefix('"').and_then(|t| t.strip_suffix('"')) {
+        Some(inner) if text.len() >= 2 => worktrees::unquote_bytes(inner),
+        _ => text.as_bytes().to_vec(),
+    }
+}
+
+pub fn name_path(text: &str) -> PathBuf {
+    use std::os::unix::ffi::OsStringExt;
+    PathBuf::from(OsString::from_vec(name_bytes(text)))
+}
+
 /// Field separator for the `git log` format (the "unit separator" character).
-const FIELD: char = '\u{1f}';
+pub const FIELD: char = '\u{1f}';
 
 fn recent_commits(dir: &Path) -> Vec<CommitInfo> {
     let format = format!("--format=%H{FIELD}%ct{FIELD}%an{FIELD}%s");
@@ -534,19 +629,19 @@ fn show_commit(w: &Watched, sha: &str) -> Result<(String, bool), Problem> {
 }
 
 /// `git status --porcelain=v1 -z`: `XY path\0`, followed by `origin\0` for a rename or a copy.
-pub fn parse_porcelain(out: &str) -> Vec<(String, ChangeKind)> {
-    let mut fields = out.split('\0').filter(|f| !f.is_empty());
+/// Names as `name_text` gives them.
+pub fn parse_porcelain(out: &[u8]) -> Vec<(String, ChangeKind)> {
+    let mut fields = out.split(|&b| b == 0).filter(|f| !f.is_empty());
     let mut entries = Vec::new();
     while let Some(entry) = fields.next() {
         if entry.len() < 4 {
             continue;
         }
-        let (xy, path) = (&entry[..2], entry[3..].to_string());
-        let (x, y) = (xy.as_bytes()[0], xy.as_bytes()[1]);
-        let kind = if xy == "??" {
+        let (x, y, path) = (entry[0], entry[1], name_text(&entry[3..]));
+        let kind = if (x, y) == (b'?', b'?') {
             ChangeKind::Untracked
         } else if x == b'R' || x == b'C' {
-            let from = fields.next().unwrap_or_default().to_string();
+            let from = name_text(fields.next().unwrap_or_default());
             if x == b'R' { ChangeKind::Renamed(from) } else { ChangeKind::Added }
         } else if x == b'D' || y == b'D' {
             ChangeKind::Deleted
@@ -561,12 +656,12 @@ pub fn parse_porcelain(out: &str) -> Vec<(String, ChangeKind)> {
 }
 
 /// `git diff --numstat -z`: `added\tremoved\tpath\0`, or `added\tremoved\t\0origin\0target\0`
-/// for a rename. `-` for a binary (→ `None`). Key: target path.
-pub fn parse_numstat(out: &str) -> HashMap<String, (Option<u32>, Option<u32>)> {
+/// for a rename. `-` for a binary (→ `None`). Key: target path, as `name_text` gives it.
+pub fn parse_numstat(out: &[u8]) -> HashMap<String, (Option<u32>, Option<u32>)> {
     let mut map = HashMap::new();
-    let mut fields = out.split('\0');
+    let mut fields = out.split(|&b| b == 0);
     while let Some(entry) = fields.next() {
-        let mut parts = entry.splitn(3, '\t');
+        let mut parts = entry.splitn(3, |&b| b == b'\t');
         let (Some(a), Some(r), Some(path)) = (parts.next(), parts.next(), parts.next()) else { continue };
         let path = if path.is_empty() {
             let _from = fields.next();
@@ -574,15 +669,23 @@ pub fn parse_numstat(out: &str) -> HashMap<String, (Option<u32>, Option<u32>)> {
         } else {
             path
         };
-        map.insert(path.to_string(), (a.parse().ok(), r.parse().ok()));
+        let count = |c: &[u8]| std::str::from_utf8(c).ok().and_then(|c| c.parse().ok());
+        map.insert(name_text(path), (count(a), count(r)));
     }
     map
 }
 
-/// Line count of a text file; `None` for a binary or unreadable file.
-fn count_lines(path: &Path) -> Option<u32> {
+/// Line count of a regular text file; `None` for a binary, unreadable or other file. Opened
+/// without following a symbolic link nor waiting on a pipe, then checked on the open file, and
+/// read up to `MAX_COUNT` bytes.
+pub fn count_lines(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path).ok()?;
+    if !file.metadata().ok()?.file_type().is_file() {
+        return None;
+    }
     let mut buf = Vec::new();
-    fs::File::open(path).ok()?.take(MAX_COUNT).read_to_end(&mut buf).ok()?;
+    file.take(MAX_COUNT).read_to_end(&mut buf).ok()?;
     if buf.contains(&0) {
         return None;
     }
@@ -682,10 +785,21 @@ pub fn is_worktree_gitdir(text: &str) -> bool {
     target.parent().and_then(Path::file_name).is_some_and(|name| name == "worktrees")
 }
 
-/// A relative path that does not escape the repository.
-fn safe_relative(file: &str) -> bool {
-    let p = Path::new(file);
-    !file.is_empty() && p.is_relative() && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
+/// A fingerprint of a scan's files (`Worktree::status_mark` of a watched worktree).
+fn files_mark(files: &[FileChange]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for f in files {
+        (&f.path, f.kind.letter(), f.mtime, f.added, f.removed).hash(&mut h);
+    }
+    h.finish()
+}
+
+/// A relative path (a name as `name_text` gives it) that does not escape the repository.
+pub fn safe_relative(file: &str) -> bool {
+    let bytes = name_bytes(file);
+    let p = name_path(file);
+    !bytes.is_empty() && !bytes.contains(&0) && p.is_relative() && !p.components().any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
 fn diff(w: &Watched, file: &str) -> Result<(String, bool), Problem> {
@@ -695,11 +809,19 @@ fn diff(w: &Watched, file: &str) -> Result<(String, bool), Problem> {
     let dir = resolve(&w.path)?;
     let repo = repo(&dir).ok_or(Problem::NotAGitRepo)?;
     let entry = w.last_sent.as_ref().and_then(|s| s.files.iter().find(|f| f.path == file));
-    let out = match entry.map(|f| &f.kind) {
-        Some(ChangeKind::Untracked) => git(&repo.top, &["diff", "--no-index", "--no-color", "--no-ext-diff", "--", "/dev/null", file]),
-        Some(ChangeKind::Renamed(from)) => git(&repo.top, &["diff", &repo.base, "--no-color", "--no-ext-diff", "-M", "--", from, file]),
-        _ => git(&repo.top, &["diff", &repo.base, "--no-color", "--no-ext-diff", "--", file]),
+    let os = |args: &[&str]| args.iter().map(OsString::from).collect::<Vec<_>>();
+    let args = match entry.map(|f| &f.kind) {
+        Some(ChangeKind::Untracked) => {
+            // `--no-index` reads what a symbolic link points to (a pipe would never end).
+            if !is_regular(&repo.top.join(name_path(file))) {
+                return Err(Problem::NotARegularFile { path: file.to_string() });
+            }
+            [os(&["diff", "--no-index", "--no-color", "--no-ext-diff", "--", "/dev/null"]), vec![name_path(file).into_os_string()]].concat()
+        }
+        Some(ChangeKind::Renamed(from)) => [os(&["diff", &repo.base, "--no-color", "--no-ext-diff", "-M", "--"]), vec![name_path(from).into_os_string(), name_path(file).into_os_string()]].concat(),
+        _ => [os(&["diff", &repo.base, "--no-color", "--no-ext-diff", "--"]), vec![name_path(file).into_os_string()]].concat(),
     };
+    let out = git_os(&repo.top, &args);
     let text = out.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap_or_default();
     if text.is_empty() {
         return Err(Problem::NoDiff);
@@ -739,7 +861,7 @@ mod tests {
     fn porcelain_kinds_and_renames() {
         let out = " M src/a.rs\0A  new.rs\0R  b.rs\0old b.rs\0 D gone.rs\0?? notes/todo.md\0MM both.rs\0";
         assert_eq!(
-            parse_porcelain(out),
+            parse_porcelain(out.as_bytes()),
             vec![
                 ("src/a.rs".into(), ChangeKind::Modified),
                 ("new.rs".into(), ChangeKind::Added),
@@ -749,13 +871,50 @@ mod tests {
                 ("both.rs".into(), ChangeKind::Modified),
             ]
         );
-        assert!(parse_porcelain("").is_empty());
+        assert!(parse_porcelain(b"").is_empty());
+        // Names that are not UTF-8, or start with a quote: quoted, the exact bytes kept.
+        let odd = parse_porcelain(b"?? caf\xe9.txt\0R  \"q\0old\xff\0");
+        assert_eq!(odd, vec![("\"caf\\351.txt\"".into(), ChangeKind::Untracked), ("\"\\\"q\"".into(), ChangeKind::Renamed("\"old\\377\"".into()))]);
+    }
+
+    #[test]
+    fn names_round_trip_to_their_exact_bytes() {
+        for bytes in [&b"src/a.rs"[..], b"caf\xe9.txt", b"\"quoted\"", b"tab\there", b"back\\slash \xff\x01", "\u{e9}t\u{e9}".as_bytes()] {
+            let text = name_text(bytes);
+            assert_eq!(name_bytes(&text), bytes, "{text}");
+        }
+        assert_eq!(name_text("\u{e9}t\u{e9} x.md".as_bytes()), "\u{e9}t\u{e9} x.md", "UTF-8 stays readable");
+        assert_eq!(name_text(b"caf\xe9.txt"), "\"caf\\351.txt\"");
+        assert!(safe_relative("\"caf\\351.txt\""));
+        assert!(!safe_relative("\"..\\057x\""), "an escape hidden in quotes");
+        assert!(!safe_relative("\"a\\000b\""), "a NUL byte");
+    }
+
+    #[test]
+    fn lines_are_counted_in_regular_files_only_never_through_a_link_or_a_pipe() {
+        let root = std::env::temp_dir().join(format!("tcanvas-count-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("a.txt"), "1\n2\n3").unwrap();
+        std::os::unix::fs::symlink(root.join("a.txt"), root.join("link")).unwrap();
+        let fifo = std::ffi::CString::new(root.join("pipe").to_str().unwrap()).unwrap();
+        // SAFETY: a plain system call on a path of our own.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert_eq!(count_lines(&root.join("a.txt")), Some(3));
+        assert_eq!(count_lines(&root.join("link")), None, "a symbolic link is not followed");
+        assert_eq!(count_lines(&root.join("pipe")), None, "a pipe is not read (nor waited on)");
+        assert!(is_regular(&root.join("a.txt")) && !is_regular(&root.join("link")) && !is_regular(&root.join("pipe")));
+        let entries = vec![("link".to_string(), ChangeKind::Untracked), ("pipe".to_string(), ChangeKind::Untracked), ("a.txt".to_string(), ChangeKind::Untracked)];
+        let files = file_changes(&root, entries, &HashMap::new());
+        let counts: Vec<(Option<u32>, bool)> = files.iter().map(|f| (f.added, f.binary)).collect();
+        assert_eq!(counts, vec![(None, false), (None, false), (Some(3), false)]);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
     fn numstat_counts_binaries_and_renames() {
         let out = "3\t1\tsrc/a.rs\0-\t-\timg.png\x000\t2\t\0old.rs\0new.rs\0";
-        let map = parse_numstat(out);
+        let map = parse_numstat(out.as_bytes());
         assert_eq!(map["src/a.rs"], (Some(3), Some(1)));
         assert_eq!(map["img.png"], (None, None));
         assert_eq!(map["new.rs"], (Some(0), Some(2)));

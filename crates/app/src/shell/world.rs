@@ -326,6 +326,9 @@ pub struct World {
     /// Groups whose folder is in a git repository (kept by the `worktrees` slice): they offer
     /// to create a worktree.
     pub git_groups: std::collections::BTreeSet<ProjectId>,
+    /// The connected agent cannot review branches (an older one; kept by the `changes` slice):
+    /// the "Review" actions are disabled.
+    pub review_unsupported: bool,
     pub window_focused: bool,
     /// Incremented on every change that needs saving.
     pub revision: u64,

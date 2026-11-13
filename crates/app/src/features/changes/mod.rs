@@ -1,11 +1,14 @@
 //! Changes: modified files in the folder linked to the open group, and their diffs, live.
 //! The agent does the work (git in WSL); this slice keeps the list of watched folders
-//! up to date, shows the side panel and requests diffs.
+//! up to date, shows the side panel and requests diffs. The panel has a second mode, the review
+//! of a worktree's whole branch against its base (`review`).
 
-use std::collections::{BTreeMap, HashMap};
+pub mod review;
+
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use egui::{Align, Align2, Button, Color32, CornerRadius, FontId, Layout, Panel, RichText, ScrollArea, Sense, Ui, vec2};
-use protocol::{AgentCmd, AgentEvent, ChangeKind, ChangeSet, CommitInfo, FileChange, Problem};
+use protocol::{AgentCmd, AgentEvent, ChangeKind, ChangeSet, CommitInfo, FileChange, Problem, WorktreeList};
 
 use crate::shell::event::Event;
 use crate::shell::i18n::t;
@@ -18,6 +21,7 @@ const RECENT_SECS: u64 = 10;
 const ADD: Color32 = Color32::from_rgb(90, 200, 120);
 const DEL: Color32 = Color32::from_rgb(235, 95, 95);
 const HUNK: Color32 = Color32::from_rgb(110, 160, 255);
+const MODIFIED: Color32 = Color32::from_rgb(230, 180, 80);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineKind {
@@ -151,11 +155,37 @@ pub struct Changes {
     shown: Option<ProjectId>,
     /// Panel group in the previous frame: switching group re-requests its diff.
     last_panel: Option<ProjectId>,
+    /// Groups whose panel shows their review (for this session only).
+    reviewing: HashSet<ProjectId>,
+    /// Each group's review, kept while its panel shows the working changes.
+    reviews: HashMap<ProjectId, review::Review>,
+    /// Each group's worktree list: its default branch, and the heads that make a review stale.
+    lists: HashMap<ProjectId, WorktreeList>,
+    /// Last review request id.
+    next_id: u64,
+    /// The agent restarted: the reviews shown are asked again once the folders are watched.
+    resend_reviews: bool,
+    /// The connected agent cannot review (an older one).
+    review_unsupported: bool,
 }
 
 impl Default for Changes {
     fn default() -> Self {
-        Self { watched: BTreeMap::new(), sets: HashMap::new(), selected: HashMap::new(), diff: None, follow: true, shown: None, last_panel: None }
+        Self {
+            watched: BTreeMap::new(),
+            sets: HashMap::new(),
+            selected: HashMap::new(),
+            diff: None,
+            follow: true,
+            shown: None,
+            last_panel: None,
+            reviewing: HashSet::new(),
+            reviews: HashMap::new(),
+            lists: HashMap::new(),
+            next_id: 0,
+            resend_reviews: false,
+            review_unsupported: false,
+        }
     }
 }
 
@@ -191,6 +221,10 @@ impl Changes {
     /// diff when the panel switches to another group.
     pub fn poll(&mut self, world: &World, events: &mut Vec<Event>) {
         events.extend(reconcile(&mut self.watched, &world.projects).into_iter().map(Event::ToAgent));
+        // After the watches: the agent answers a review only for a folder it watches.
+        if std::mem::take(&mut self.resend_reviews) {
+            self.resend_reviews(events);
+        }
         let panel = self.panel_project(world).map(|p| p.id.clone());
         if panel != self.last_panel {
             self.last_panel = panel.clone();
@@ -250,7 +284,37 @@ impl Changes {
     pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
         match ev {
             // Agent (re)started: it watches nothing anymore, so resend everything next frame.
-            Event::Agent(AgentEvent::Hello { .. }) => self.watched.clear(),
+            Event::Agent(AgentEvent::Hello { review, .. }) => {
+                self.watched.clear();
+                self.lose_review_requests();
+                self.resend_reviews = true;
+                self.review_unsupported = !review;
+                if world.review_unsupported != !review {
+                    world.review_unsupported = !review;
+                }
+            }
+            Event::AgentLost => self.lose_review_requests(),
+            Event::ReviewWorktree { project, path } => {
+                if !self.review_unsupported && world.project(project).is_some_and(|p| p.cwd.is_some()) {
+                    self.start_review(project, path, out);
+                    if !world.changes_open {
+                        world.changes_open = true;
+                        world.touch();
+                    }
+                    // The panel shows the open group, else the one chosen in the "All" view.
+                    match &world.space {
+                        Some(open) if open != project => out.push(Event::EnterSpace(Some(project.clone()))),
+                        Some(_) => {}
+                        None => self.shown = Some(project.clone()),
+                    }
+                }
+            }
+            Event::Agent(ev @ (AgentEvent::Review { .. } | AgentEvent::ReviewFiles { .. } | AgentEvent::ReviewDiff { .. })) => self.on_review_event(ev, out),
+            Event::Agent(AgentEvent::Worktrees(list)) => {
+                if world.project(&list.key).is_some_and(|p| p.cwd.is_some()) {
+                    self.on_worktrees(list, out);
+                }
+            }
             Event::ToggleChanges => {
                 world.changes_open = !world.changes_open;
                 world.touch();
@@ -281,6 +345,7 @@ impl Changes {
                 }
             }
             Event::SetProjectCwd(id, _) | Event::RemoveProject(id) => {
+                self.forget_review(id);
                 self.sets.remove(id);
                 self.selected.remove(id);
                 world.file_activity.remove(id);
@@ -319,6 +384,9 @@ impl Changes {
                     if ui.small_button("×").on_hover_text(t().close_panel).clicked() {
                         events.push(Event::ToggleChanges);
                     }
+                    if self.reviewing(&project.id) {
+                        return;
+                    }
                     let follow = ui.checkbox(&mut self.follow, t().follow).on_hover_text(t().follow_hint);
                     if follow.changed()
                         && self.follow
@@ -328,6 +396,11 @@ impl Changes {
                     }
                 });
             });
+            self.mode_ui(ui, &project.id, events);
+            if self.reviewing(&project.id) {
+                self.review_ui(ui, &project.id, events);
+                return;
+            }
             let Some(set) = self.sets.get(&project.id).cloned() else {
                 ui.label(RichText::new(format!("📁 {}", project.cwd.as_deref().unwrap_or_default())).color(theme::TEXT_DIM));
                 ui.label(RichText::new(t().waiting_for_agent).color(theme::TEXT_DIM));
@@ -423,7 +496,7 @@ impl Changes {
             ChangeKind::Added | ChangeKind::Untracked => ADD,
             ChangeKind::Deleted => DEL,
             ChangeKind::Renamed(_) => HUNK,
-            ChangeKind::Modified => Color32::from_rgb(230, 180, 80),
+            ChangeKind::Modified => MODIFIED,
         };
         let mono = FontId::monospace(12.0);
         let y = rect.center().y;
@@ -498,26 +571,31 @@ impl Changes {
             ui.label(RichText::new(t().problem(p)).color(theme::TEXT_DIM));
             return;
         }
-        let mono = FontId::monospace(12.0);
-        let row_h = ui.fonts_mut(|f| f.row_height(&mono));
-        ScrollArea::both().id_salt("changes-diff").auto_shrink([false, false]).show_rows(ui, row_h, lines.len() + usize::from(d.truncated), |ui, range| {
-            for i in range {
-                let Some((kind, text)) = lines.get(i) else {
-                    ui.label(RichText::new(t().diff_truncated).color(theme::TEXT_DIM));
-                    continue;
-                };
-                let (color, bg) = match kind {
-                    LineKind::Add => (ADD, ADD.gamma_multiply(0.10)),
-                    LineKind::Del => (DEL, DEL.gamma_multiply(0.10)),
-                    LineKind::Hunk => (HUNK, Color32::TRANSPARENT),
-                    LineKind::Meta => (theme::TEXT_DIM, Color32::TRANSPARENT),
-                    LineKind::Context => (theme::TEXT, Color32::TRANSPARENT),
-                };
-                let text = RichText::new(text.replace('\t', "    ")).font(mono.clone()).color(color).background_color(bg);
-                ui.add(egui::Label::new(text).extend());
-            }
-        });
+        diff_body(ui, lines, d.truncated, "changes-diff");
     }
+}
+
+/// The lines of a diff, colored, then the truncation notice when it was cut.
+fn diff_body(ui: &mut Ui, lines: &[(LineKind, String)], truncated: bool, salt: &str) {
+    let mono = FontId::monospace(12.0);
+    let row_h = ui.fonts_mut(|f| f.row_height(&mono));
+    ScrollArea::both().id_salt(salt).auto_shrink([false, false]).show_rows(ui, row_h, lines.len() + usize::from(truncated), |ui, range| {
+        for i in range {
+            let Some((kind, text)) = lines.get(i) else {
+                ui.label(RichText::new(t().diff_truncated).color(theme::TEXT_DIM));
+                continue;
+            };
+            let (color, bg) = match kind {
+                LineKind::Add => (ADD, ADD.gamma_multiply(0.10)),
+                LineKind::Del => (DEL, DEL.gamma_multiply(0.10)),
+                LineKind::Hunk => (HUNK, Color32::TRANSPARENT),
+                LineKind::Meta => (theme::TEXT_DIM, Color32::TRANSPARENT),
+                LineKind::Context => (theme::TEXT, Color32::TRANSPARENT),
+            };
+            let text = RichText::new(text.replace('\t', "    ")).font(mono.clone()).color(color).background_color(bg);
+            ui.add(egui::Label::new(text).extend());
+        }
+    });
 }
 
 #[cfg(test)]
@@ -601,6 +679,7 @@ mod tests {
                 task_hooks: None,
                 task_links: true,
                 worktree_refresh: true,
+                review: true,
                 shell: None,
             }),
             &mut world(),
@@ -739,6 +818,342 @@ mod tests {
         c.handle(&Event::Agent(AgentEvent::Changes(set("api", vec![file("a.rs", 1, 1)]))), &mut w, &mut vec![]);
         c.handle(&Event::SetProjectCwd("api".into(), Some("~/other".into())), &mut w, &mut vec![]);
         assert!(c.set("api").is_none() && c.selected("api").is_none() && !w.file_activity.contains_key("api"));
+    }
+
+    fn review_cmds(out: &[Event]) -> Vec<AgentCmd> {
+        out.iter()
+            .filter_map(|e| match e {
+                Event::ToAgent(c @ (AgentCmd::Review { .. } | AgentCmd::ReviewFiles { .. } | AgentCmd::ReviewDiff { .. })) => Some(c.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn summary_id(out: &[Event]) -> u64 {
+        match review_cmds(out).as_slice() {
+            [AgentCmd::Review { id, .. }] => *id,
+            other => panic!("one review asked: {other:?}"),
+        }
+    }
+
+    fn review_summary(head: &str) -> protocol::ReviewSummary {
+        let f = |path: &str| FileChange { path: path.into(), kind: ChangeKind::Modified, added: Some(1), removed: Some(0), mtime: 0, binary: false };
+        protocol::ReviewSummary {
+            worktree: "/home/me/api-wt".into(),
+            branch: Some("feat".into()),
+            head: head.into(),
+            base: "main".into(),
+            base_sha: "b".repeat(40),
+            merge_base: Some("m".repeat(40)),
+            state: protocol::ReviewState::Ahead,
+            ahead: 1,
+            behind: 0,
+            commits: vec![commit('c', 5)],
+            more_commits: 0,
+            files: protocol::ReviewFiles { files: vec![f("a.rs"), f("b.rs")], more: 0, added: 2, removed: 0 },
+            uncommitted: protocol::ReviewFiles::default(),
+            base_kind: protocol::BaseKind::Branch,
+            several_merge_bases: false,
+            merges: vec![],
+        }
+    }
+
+    fn worktrees(head: &str) -> Event {
+        worktrees_with(head, None, true)
+    }
+
+    fn worktrees_with(head: &str, mark: Option<u64>, listed: bool) -> Event {
+        let main = protocol::Worktree { path: "/home/me/api".into(), branch: Some("main".into()), main: true, ..worktree_of(head, None) };
+        let wt = worktree_of(head, mark);
+        let worktrees = if listed { vec![main, wt] } else { vec![main] };
+        Event::Agent(AgentEvent::Worktrees(WorktreeList { key: "api".into(), repo: Some("/home/me/api".into()), default_branch: Some("main".into()), worktrees, merged_branches: vec![] }))
+    }
+
+    fn worktree_of(head: &str, mark: Option<u64>) -> protocol::Worktree {
+        protocol::Worktree {
+            path: "/home/me/api-wt".into(),
+            head: Some(head.into()),
+            branch: Some("feat".into()),
+            detached: false,
+            main: false,
+            bare: false,
+            locked: false,
+            lock_reason: None,
+            prunable: false,
+            dirty: Some(false),
+            ahead: Some(1),
+            behind: Some(0),
+            merged: Some(false),
+            last_commit: None,
+            branch_deletable: false,
+            reflog_commits: false,
+            status_mark: mark,
+        }
+    }
+
+    fn hello(review: bool) -> Event {
+        Event::Agent(AgentEvent::Hello {
+            version: "x".into(),
+            hooks: protocol::Hooks::Installed,
+            send_text: true,
+            tasks: true,
+            task_hooks: None,
+            task_links: true,
+            worktree_refresh: true,
+            review,
+            shell: None,
+        })
+    }
+
+    /// A review of `api-wt` answered with `review_summary(head)`, and its first file's diff.
+    fn answered_review(c: &mut Changes, w: &mut World, head: &str) {
+        let mut out = vec![];
+        c.handle(&Event::ReviewWorktree { project: "api".into(), path: "/home/me/api-wt".into() }, w, &mut out);
+        let id = summary_id(&out);
+        let mut out = vec![];
+        c.handle(&Event::Agent(AgentEvent::Review { id, key: "api".into(), summary: Some(Box::new(review_summary(head))), bases: vec![], problem: None }), w, &mut out);
+        answer_diff(c, w, &out, "+first\n");
+    }
+
+    /// Answers the diff asked in `out`.
+    fn answer_diff(c: &mut Changes, w: &mut World, out: &[Event], text: &str) {
+        let id = review_cmds(out)
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                AgentCmd::ReviewDiff { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("a diff asked");
+        c.handle(&Event::Agent(AgentEvent::ReviewDiff { id, key: "api".into(), text: text.into(), truncated: false, problem: None }), w, &mut vec![]);
+    }
+
+    fn shown_lines(c: &Changes) -> Vec<String> {
+        c.review("api").and_then(|r| r.diff.as_ref()).and_then(|d| d.lines.clone()).unwrap_or_default().into_iter().map(|(_, l)| l).collect()
+    }
+
+    #[test]
+    fn requests_lost_with_the_agent_are_asked_again() {
+        let mut c = Changes::default();
+        let mut w = world();
+        answered_review(&mut c, &mut w, "1");
+        // A file picked, its diff not answered when the link closes.
+        let mut out = vec![];
+        c.act("api", review::Act::File("b.rs".into()), &mut out);
+        assert_eq!(review_cmds(&out).len(), 1);
+        c.handle(&Event::AgentLost, &mut w, &mut vec![]);
+        // Picking it again asks it again (it was never answered).
+        let mut out = vec![];
+        c.act("api", review::Act::File("b.rs".into()), &mut out);
+        assert!(matches!(review_cmds(&out).as_slice(), [AgentCmd::ReviewDiff { path: Some(p), .. }] if p == "b.rs"), "{out:?}");
+        // A commit's files lost too: a new agent asks them again, with the diff.
+        let mut out = vec![];
+        c.act("api", review::Act::Commit("c".repeat(40)), &mut out);
+        c.handle(&hello(true), &mut w, &mut vec![]);
+        let mut out = vec![];
+        c.poll(&w, &mut out);
+        let cmds = review_cmds(&out);
+        assert!(matches!(&cmds[..], [AgentCmd::Review { .. }, AgentCmd::ReviewFiles { .. }, AgentCmd::ReviewDiff { .. }]), "{cmds:?}");
+        // An answer to a request of the old agent changes nothing.
+        let mut lost = vec![];
+        c.handle(&Event::AgentLost, &mut w, &mut vec![]);
+        c.handle(&Event::Agent(AgentEvent::ReviewFiles { id: 0, key: "api".into(), files: protocol::ReviewFiles::default(), problem: None }), &mut w, &mut lost);
+        assert!(c.review("api").unwrap().commit_files.as_ref().unwrap().files.is_none());
+    }
+
+    #[test]
+    fn an_agent_that_cannot_review_disables_it() {
+        let mut c = Changes::default();
+        let mut w = world();
+        c.handle(&hello(false), &mut w, &mut vec![]);
+        assert!(w.review_unsupported);
+        let mut out = vec![];
+        c.handle(&Event::ReviewWorktree { project: "api".into(), path: "/home/me/api-wt".into() }, &mut w, &mut out);
+        assert!(!c.reviewing("api") && review_cmds(&out).is_empty());
+        c.handle(&hello(true), &mut w, &mut vec![]);
+        assert!(!w.review_unsupported);
+    }
+
+    #[test]
+    fn uncommitted_changes_refresh_alone_keeping_the_selection_and_the_lines() {
+        let mut c = Changes::default();
+        let mut w = world();
+        c.handle(&worktrees_with("1", Some(7), true), &mut w, &mut vec![]);
+        let mut out = vec![];
+        c.handle(&Event::ReviewWorktree { project: "api".into(), path: "/home/me/api-wt".into() }, &mut w, &mut out);
+        let id = summary_id(&out);
+        let mut s = review_summary("1");
+        let notes = |added| protocol::ReviewFiles {
+            files: vec![FileChange { path: "notes.txt".into(), kind: ChangeKind::Untracked, added: Some(added), removed: Some(0), mtime: 0, binary: false }],
+            more: 0,
+            added: u64::from(added),
+            removed: 0,
+        };
+        s.uncommitted = notes(1);
+        c.handle(&Event::Agent(AgentEvent::Review { id, key: "api".into(), summary: Some(Box::new(s)), bases: vec![], problem: None }), &mut w, &mut vec![]);
+        let mut out = vec![];
+        c.act("api", review::Act::Uncommitted(true), &mut out);
+        // Opening it asks it fresh, alone.
+        let files_id = |out: &[Event]| {
+            review_cmds(out).iter().find_map(|c| match c {
+                AgentCmd::ReviewFiles { id, scope: protocol::ReviewScope::Uncommitted, .. } => Some(*id),
+                _ => None,
+            })
+        };
+        let id = files_id(&out).expect("asked");
+        c.handle(&Event::Agent(AgentEvent::ReviewFiles { id, key: "api".into(), files: notes(1), problem: None }), &mut w, &mut out);
+        answer_diff(&mut c, &mut w, &out, "+one\n");
+        assert_eq!(shown_lines(&c), vec!["+one"]);
+
+        // The agent writes again: same head, new status mark: only what is not committed is asked.
+        let mut out = vec![];
+        c.handle(&worktrees_with("1", Some(8), true), &mut w, &mut out);
+        let id = files_id(&out).expect("the uncommitted files asked again");
+        assert!(!review_cmds(&out).iter().any(|c| matches!(c, AgentCmd::Review { .. })), "not the whole branch");
+        let mut out = vec![];
+        c.handle(&Event::Agent(AgentEvent::ReviewFiles { id, key: "api".into(), files: notes(2), problem: None }), &mut w, &mut out);
+        let r = c.review("api").unwrap();
+        assert_eq!((r.selection.clone(), r.summary.as_ref().unwrap().uncommitted.added), (review::Selection::Uncommitted, 2));
+        assert_eq!(shown_lines(&c), vec!["+one"], "the lines stay while the new ones come: the reader keeps their place");
+        answer_diff(&mut c, &mut w, &out, "+one\n+two\n");
+        assert_eq!(shown_lines(&c), vec!["+one", "+two"]);
+    }
+
+    #[test]
+    fn new_commits_keep_the_file_being_read() {
+        let mut c = Changes::default();
+        let mut w = world();
+        c.handle(&worktrees("1"), &mut w, &mut vec![]);
+        answered_review(&mut c, &mut w, "1");
+        let mut out = vec![];
+        c.act("api", review::Act::File("b.rs".into()), &mut out);
+        answer_diff(&mut c, &mut w, &out, "+b\n");
+        let mut out = vec![];
+        c.handle(&worktrees("2"), &mut w, &mut out);
+        let id = summary_id(&out);
+        let mut out = vec![];
+        c.handle(&Event::Agent(AgentEvent::Review { id, key: "api".into(), summary: Some(Box::new(review_summary("2"))), bases: vec![], problem: None }), &mut w, &mut out);
+        assert!(matches!(review_cmds(&out).as_slice(), [AgentCmd::ReviewDiff { path: Some(p), scope: protocol::ReviewScope::Branch { head, .. }, .. }] if p == "b.rs" && head == "2"));
+        assert_eq!(shown_lines(&c), vec!["+b"], "still shown until the new diff comes");
+    }
+
+    #[test]
+    fn a_reviewed_worktree_that_went_falls_back_on_the_group_folder() {
+        let mut c = Changes::default();
+        let mut w = world();
+        c.handle(&worktrees("1"), &mut w, &mut vec![]);
+        let mut set = set("api", vec![]);
+        set.root = Some("/home/me/api".into());
+        set.branch = Some("fix".into());
+        c.handle(&Event::Agent(AgentEvent::Changes(set)), &mut w, &mut vec![]);
+        answered_review(&mut c, &mut w, "1");
+        let mut out = vec![];
+        c.handle(&worktrees_with("1", None, false), &mut w, &mut out);
+        assert_eq!(c.review("api").map(|r| r.worktree.as_str()), Some("/home/me/api"), "the group's own folder");
+        assert!(matches!(review_cmds(&out).as_slice(), [AgentCmd::Review { worktree, .. }] if worktree == "/home/me/api"));
+    }
+
+    #[test]
+    fn a_review_started_before_its_worktree_is_listed_is_kept() {
+        let mut c = Changes::default();
+        let mut w = world();
+        c.handle(&Event::ReviewWorktree { project: "api".into(), path: "/home/me/api-wt".into() }, &mut w, &mut vec![]);
+        c.handle(&worktrees_with("1", None, false), &mut w, &mut vec![]);
+        assert!(c.reviewing("api"), "never seen yet: a list from before its creation");
+    }
+
+    #[test]
+    fn a_review_is_asked_answered_in_order_and_follows_new_commits() {
+        let mut c = Changes::default();
+        let mut w = world();
+        let mut out = vec![];
+        c.handle(&worktrees("1"), &mut w, &mut out);
+        assert!(out.is_empty(), "no review yet");
+        c.handle(&Event::ReviewWorktree { project: "api".into(), path: "/home/me/api-wt".into() }, &mut w, &mut out);
+        assert!(c.reviewing("api") && w.changes_open);
+        assert!(matches!(review_cmds(&out).as_slice(), [AgentCmd::Review { key, worktree, base: None, .. }] if key == "api" && worktree == "/home/me/api-wt"));
+        let first = summary_id(&out);
+
+        // Asked again (another base) before the first answer: the first answer is stale.
+        let mut out = vec![];
+        c.act("api", review::Act::Base(Some("develop".into())), &mut out);
+        let second = summary_id(&out);
+        let answer = |id, head: &str| Event::Agent(AgentEvent::Review { id, key: "api".into(), summary: Some(Box::new(review_summary(head))), bases: vec!["main".into()], problem: None });
+        let mut out = vec![];
+        c.handle(&answer(first, "1"), &mut w, &mut out);
+        assert!(c.review("api").unwrap().summary.is_none() && out.is_empty(), "stale answer ignored");
+        c.handle(&answer(second, "1"), &mut w, &mut out);
+        let diffs = review_cmds(&out);
+        assert!(matches!(diffs.as_slice(), [AgentCmd::ReviewDiff { path: Some(p), scope: protocol::ReviewScope::Branch { .. }, .. }] if p == "a.rs"), "the first file's diff: {diffs:?}");
+
+        // The same list again: nothing; a new head on the branch: asked again, with the same base.
+        let mut out = vec![];
+        c.handle(&worktrees("1"), &mut w, &mut out);
+        let after_first_list = review_cmds(&out).len();
+        let mut out = vec![];
+        c.handle(&worktrees("1"), &mut w, &mut out);
+        assert!(review_cmds(&out).is_empty(), "nothing moved ({after_first_list} at first sight)");
+        c.handle(&worktrees("2"), &mut w, &mut out);
+        assert!(matches!(review_cmds(&out).as_slice(), [AgentCmd::Review { base: Some(b), .. }] if b == "develop"));
+
+        // A commit narrows the files (asked once), back to all commits.
+        let mut out = vec![];
+        c.act("api", review::Act::Commit("c".repeat(40)), &mut out);
+        let cmds = review_cmds(&out);
+        assert!(matches!(&cmds[..], [AgentCmd::ReviewFiles { .. }, AgentCmd::ReviewDiff { path: None, scope: protocol::ReviewScope::Commit { .. }, .. }]), "{cmds:?}");
+
+        // Back to the working changes: the review is kept for the switch, and not refreshed.
+        c.act("api", review::Act::Working, &mut vec![]);
+        assert!(!c.reviewing("api") && c.review("api").is_some());
+        let mut out = vec![];
+        c.handle(&worktrees("3"), &mut w, &mut out);
+        assert!(review_cmds(&out).is_empty());
+        c.switch_to_review("api", &mut out);
+        assert!(c.reviewing("api") && review_cmds(&out).len() == 1);
+
+        // The agent restarted: asked again once the folders are watched again.
+        c.handle(
+            &Event::Agent(AgentEvent::Hello {
+                version: "x".into(),
+                hooks: protocol::Hooks::Installed,
+                send_text: true,
+                tasks: true,
+                task_hooks: None,
+                task_links: true,
+                worktree_refresh: true,
+                review: true,
+                shell: None,
+            }),
+            &mut w,
+            &mut vec![],
+        );
+        let mut out = vec![];
+        c.poll(&w, &mut out);
+        assert!(matches!(out.first(), Some(Event::ToAgent(AgentCmd::Watch { .. }))), "{out:?}");
+        let cmds = review_cmds(&out);
+        assert!(matches!(&cmds[..], [AgentCmd::Review { .. }, AgentCmd::ReviewFiles { .. }, AgentCmd::ReviewDiff { .. }]), "the summary, and what the selected commit was waiting for: {cmds:?}");
+
+        // Another folder: the review goes.
+        c.handle(&Event::SetProjectCwd("api".into(), Some("~/other".into())), &mut w, &mut vec![]);
+        assert!(c.review("api").is_none() && !c.reviewing("api"));
+    }
+
+    #[test]
+    fn a_review_from_another_group_opens_that_group() {
+        let mut c = Changes::default();
+        let mut w = world();
+        w.projects.push(project("web", Some("~/web")));
+        let mut out = vec![];
+        c.handle(&Event::ReviewWorktree { project: "web".into(), path: "/home/me/web".into() }, &mut w, &mut out);
+        assert!(out.iter().any(|e| matches!(e, Event::EnterSpace(Some(p)) if p == "web")));
+        // In the "All" view, the panel shows that group.
+        w.space = None;
+        c.handle(&Event::ReviewWorktree { project: "web".into(), path: "/home/me/web".into() }, &mut w, &mut vec![]);
+        assert_eq!(c.panel_project(&w).map(|p| p.id.as_str()), Some("web"));
+        // A group without a folder: nothing.
+        w.projects.push(project("bare", None));
+        c.handle(&Event::ReviewWorktree { project: "bare".into(), path: "/x".into() }, &mut w, &mut vec![]);
+        assert!(!c.reviewing("bare"));
     }
 
     #[test]

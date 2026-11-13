@@ -308,6 +308,28 @@ pub enum Problem {
     /// Task list: a link (worktree, branch, session) is empty, longer than `MAX_TASK_LINK` bytes,
     /// or holds control characters.
     TaskLinkRefused,
+    /// Review: the base is not a name a branch could have (empty, starting with `-`, holding
+    /// spaces or revision syntax such as `..` or `^`): never passed to git.
+    ReviewBaseRefused {
+        base: String,
+    },
+    /// Review: the base names no commit.
+    ReviewBaseNotFound {
+        base: String,
+    },
+    /// Review: no base was asked and the repository has no default branch to compare with.
+    ReviewNoBase,
+    /// Review: the worktree's branch has no commit yet.
+    ReviewNoCommits,
+    /// Not shown: the path is not a regular file (a symbolic link, a pipe, a device...), which is
+    /// never read.
+    NotARegularFile {
+        path: String,
+    },
+    /// Review: git did not answer within `secs` seconds: it was stopped.
+    ReviewTimedOut {
+        secs: u64,
+    },
 }
 
 /// Which text of a task a limit is about.
@@ -938,6 +960,109 @@ pub struct CommitInfo {
     pub time: u64,
 }
 
+/// Which part of a branch under review a request is about.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "kind")]
+pub enum ReviewScope {
+    /// The whole branch: from its merge base with the base to its head (the commits the
+    /// `ReviewSummary` named).
+    Branch { merge_base: String, head: String },
+    /// One commit of the branch, against its first parent.
+    Commit { sha: String },
+    /// What is not committed in the worktree, against its HEAD (never part of the branch's files).
+    Uncommitted,
+}
+
+/// How a branch stands against its base.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ReviewState {
+    /// It has commits the base does not have: something to review.
+    Ahead,
+    /// Every commit of it is in the base (identical, or only behind): nothing to review.
+    UpToDate,
+    /// No common history with the base (no merge base).
+    Unrelated,
+}
+
+/// Files changed in a review scope (paths relative to the worktree's top; `FileChange::mtime` is
+/// 0), at most `files.len()` of them listed, in path order.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
+pub struct ReviewFiles {
+    pub files: Vec<FileChange>,
+    /// Changed files not listed (beyond the bound).
+    pub more: u32,
+    /// Lines added and removed in every changed file, listed or not (binary files count none).
+    pub added: u64,
+    pub removed: u64,
+}
+
+impl ReviewFiles {
+    /// Every changed file, listed or not.
+    pub fn count(&self) -> u64 {
+        self.files.len() as u64 + u64::from(self.more)
+    }
+}
+
+/// What the base of a review names.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum BaseKind {
+    /// A local branch (`refs/heads/<base>`).
+    #[default]
+    Branch,
+    /// A remote-tracking branch (`refs/remotes/<base>`).
+    Remote,
+    /// Anything else git resolves the name to (a tag, a commit).
+    Other,
+}
+
+/// A worktree's branch against its base, like a merge request: answer to `AgentCmd::Review`.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct ReviewSummary {
+    /// The worktree's folder, as git lists it.
+    pub worktree: String,
+    /// `None`: detached HEAD.
+    pub branch: Option<String>,
+    pub head: String,
+    /// The base as asked, or the default branch (`origin/main`, `main`...).
+    pub base: String,
+    pub base_sha: String,
+    /// `git merge-base <base> HEAD` (`None`: unrelated histories).
+    pub merge_base: Option<String>,
+    pub state: ReviewState,
+    /// Commits of the branch the base does not have, and the reverse.
+    pub ahead: u32,
+    pub behind: u32,
+    /// The branch's commits since the merge base, newest first, at most a bound.
+    pub commits: Vec<CommitInfo>,
+    /// Commits of the branch not listed.
+    pub more_commits: u32,
+    /// Files changed from the merge base to the head (empty unless `state` is `Ahead`).
+    pub files: ReviewFiles,
+    /// What is not committed in the worktree, reported apart from the branch's files.
+    pub uncommitted: ReviewFiles,
+    /// What `base` named: a local branch first, then a remote-tracking one, then anything else.
+    #[serde(default)]
+    pub base_kind: BaseKind,
+    /// The histories cross (`git merge-base --all` gives several): the files may include changes
+    /// the base already has.
+    #[serde(default)]
+    pub several_merge_bases: bool,
+    /// The listed commits that are merges (more than one parent).
+    #[serde(default)]
+    pub merges: Vec<String>,
+}
+
+impl ReviewSummary {
+    /// The base moved on since the branch started from it: the branch is behind.
+    pub fn base_moved(&self) -> bool {
+        self.behind > 0
+    }
+
+    pub fn dirty(&self) -> bool {
+        self.uncommitted.count() > 0
+    }
+}
+
 /// A subfolder, for the folder picker.
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct DirEntry {
@@ -1005,6 +1130,10 @@ pub struct Worktree {
     /// when that could not be checked.
     #[serde(default)]
     pub reflog_commits: bool,
+    /// Changes when what is not committed in it changes (a fingerprint of its status and of the
+    /// listed files' times; `None`: not known).
+    #[serde(default)]
+    pub status_mark: Option<u64>,
 }
 
 /// The worktrees of the repository holding a watched folder, sent when they change.
@@ -1318,6 +1447,14 @@ pub struct TaskList {
     pub extra: Extra,
 }
 
+impl Task {
+    /// The worktree a task in review offers to review: its own (`None` for another status, a
+    /// removed task, or a task without a worktree).
+    pub fn review_worktree(&self) -> Option<&str> {
+        self.worktree.as_deref().filter(|_| self.status == TaskStatus::Review && self.removed.is_none())
+    }
+}
+
 impl TaskList {
     pub fn empty(key: &str) -> Self {
         TaskList { format: TASKS_FORMAT, key: key.into(), revision: 0, repo_id: None, tasks: Vec::new(), retired: Vec::new(), extra: Extra::new() }
@@ -1525,6 +1662,10 @@ pub enum AgentEvent {
         /// The agent answers `AgentCmd::RefreshWorktrees` (missing from older agents).
         #[serde(default)]
         worktree_refresh: bool,
+        /// The agent answers `AgentCmd::Review`, `ReviewFiles` and `ReviewDiff` (missing from
+        /// older agents).
+        #[serde(default)]
+        review: bool,
     },
     /// A subscribed task list, on subscribing and whenever it changes.
     Tasks(Box<TaskBoard>),
@@ -1635,6 +1776,38 @@ pub enum AgentEvent {
         key: String,
         path: String,
         report: Box<RecipeReport>,
+    },
+    /// Answer to `AgentCmd::Review` with its `id`: the summary, or the problem preventing it.
+    /// `bases`: the bases it may be compared with instead (the default branch first, then the
+    /// local branches), listed whenever the worktree is valid.
+    Review {
+        id: u64,
+        key: String,
+        #[serde(default)]
+        summary: Option<Box<ReviewSummary>>,
+        #[serde(default)]
+        bases: Vec<String>,
+        #[serde(default)]
+        problem: Option<Problem>,
+    },
+    /// Answer to `AgentCmd::ReviewFiles` with its `id`.
+    ReviewFiles {
+        id: u64,
+        key: String,
+        #[serde(default)]
+        files: ReviewFiles,
+        #[serde(default)]
+        problem: Option<Problem>,
+    },
+    /// Answer to `AgentCmd::ReviewDiff` with its `id`: `text` is empty when `problem` explains
+    /// why there is none; `truncated` like `Diff`'s.
+    ReviewDiff {
+        id: u64,
+        key: String,
+        text: String,
+        truncated: bool,
+        #[serde(default)]
+        problem: Option<Problem>,
     },
 }
 
@@ -1770,6 +1943,37 @@ pub enum AgentCmd {
         merge: bool,
         #[serde(default)]
         list: Option<String>,
+    },
+    /// Reviews the branch of `worktree`, one of the worktrees of the watched folder `key`'s
+    /// repository (any other path is refused), against `base` (`None`: the default branch).
+    /// Read only. Response: `AgentEvent::Review` with the same `id`.
+    Review {
+        id: u64,
+        key: String,
+        worktree: String,
+        #[serde(default)]
+        base: Option<String>,
+    },
+    /// The files changed in `scope` of that worktree (one commit's, mostly: the branch's come
+    /// with the summary). Response: `AgentEvent::ReviewFiles` with the same `id`.
+    ReviewFiles {
+        id: u64,
+        key: String,
+        worktree: String,
+        scope: ReviewScope,
+    },
+    /// The diff of `path` (relative to the worktree's top; `old_path`: where a renamed file came
+    /// from) in `scope`, or of the whole scope without `path`. Response: `AgentEvent::ReviewDiff`
+    /// with the same `id`.
+    ReviewDiff {
+        id: u64,
+        key: String,
+        worktree: String,
+        scope: ReviewScope,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        old_path: Option<String>,
     },
 }
 
@@ -1922,6 +2126,7 @@ mod tests {
             merged: None,
             last_commit: Some(1_700_000_000),
             reflog_commits: false,
+            status_mark: None,
             branch_deletable: false,
         }
     }
@@ -2046,7 +2251,7 @@ mod tests {
             (Worktree { merged: Some(false), ..safe.clone() }, KeepReason::NotMerged),
             (Worktree { merged: None, ..safe.clone() }, KeepReason::NotMerged),
             (Worktree { dirty: Some(true), ..safe.clone() }, KeepReason::Dirty),
-            (Worktree { reflog_commits: true, ..safe.clone() }, KeepReason::ReflogCommits),
+            (Worktree { reflog_commits: true, status_mark: None, ..safe.clone() }, KeepReason::ReflogCommits),
             (Worktree { dirty: None, ..safe.clone() }, KeepReason::NotChecked),
         ];
         for (wt, reason) in cases {
@@ -2365,7 +2570,17 @@ mod tests {
     #[test]
     fn roundtrip_hooks() {
         for hooks in [Hooks::Installed, Hooks::Missing, Hooks::Unsupported] {
-            let ev = AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true, task_hooks: Some(TaskHooks::Missing), task_links: true, worktree_refresh: true, shell: None };
+            let ev = AgentEvent::Hello {
+                version: "1".into(),
+                hooks,
+                send_text: true,
+                tasks: true,
+                task_hooks: Some(TaskHooks::Missing),
+                task_links: true,
+                worktree_refresh: true,
+                review: true,
+                shell: None,
+            };
             assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
             let ev = AgentEvent::HooksChanged { hooks };
             assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
@@ -2592,5 +2807,76 @@ mod tests {
         assert!(!task_cycle(&looped, "z", "x"));
         assert_eq!(TaskOp::Remove { task: "a".into() }.task(), Some("a"));
         assert!(TaskStatus::Canceled.finished() && !TaskStatus::Review.finished());
+    }
+
+    #[test]
+    fn roundtrip_review() {
+        let file = |path: &str, kind| FileChange { path: path.into(), kind, added: Some(2), removed: Some(1), mtime: 0, binary: false };
+        let summary = ReviewSummary {
+            worktree: "/home/me/shop/.claude/worktrees/invoices".into(),
+            branch: Some("feat/invoices".into()),
+            head: "b".repeat(40),
+            base: "origin/main".into(),
+            base_sha: "c".repeat(40),
+            merge_base: Some("a".repeat(40)),
+            state: ReviewState::Ahead,
+            ahead: 3,
+            behind: 1,
+            commits: vec![CommitInfo { sha: "b".repeat(40), summary: "feat: totals \u{e9}".into(), author: "Me".into(), time: 1_700_000_000 }],
+            more_commits: 2,
+            files: ReviewFiles { files: vec![file("src/pdf.rs", ChangeKind::Modified), file("docs/new name.md", ChangeKind::Renamed("docs/old.md".into()))], more: 4, added: 120, removed: 7 },
+            uncommitted: ReviewFiles { files: vec![file("notes.txt", ChangeKind::Untracked)], more: 0, added: 2, removed: 0 },
+            base_kind: BaseKind::Remote,
+            several_merge_bases: true,
+            merges: vec!["b".repeat(40)],
+        };
+        assert!(summary.base_moved() && summary.dirty());
+        assert_eq!(summary.files.count(), 6);
+        let events = [
+            AgentEvent::Review { id: 7, key: "p".into(), summary: Some(Box::new(summary.clone())), bases: vec!["origin/main".into(), "develop".into()], problem: None },
+            AgentEvent::Review { id: 8, key: "p".into(), summary: None, bases: vec![], problem: Some(Problem::ReviewBaseNotFound { base: "gone".into() }) },
+            AgentEvent::ReviewFiles { id: 9, key: "p".into(), files: summary.files.clone(), problem: None },
+            AgentEvent::ReviewDiff { id: 10, key: "p".into(), text: "+a\n".into(), truncated: true, problem: None },
+            AgentEvent::Review { id: 11, key: "p".into(), summary: None, bases: vec![], problem: Some(Problem::ReviewBaseRefused { base: "-x".into() }) },
+        ];
+        for ev in events {
+            assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        }
+        for problem in [Problem::ReviewNoBase, Problem::ReviewNoCommits, Problem::NotARegularFile { path: "\"caf\\351\"".into() }, Problem::ReviewTimedOut { secs: 20 }] {
+            assert_eq!(decode::<Problem>(&encode(&problem)).unwrap(), problem);
+        }
+        let unrelated = ReviewSummary { state: ReviewState::Unrelated, merge_base: None, ..summary };
+        assert_eq!(decode::<ReviewSummary>(&encode(&unrelated)).unwrap(), unrelated);
+        let cmds = [
+            AgentCmd::Review { id: 1, key: "p".into(), worktree: "/w".into(), base: None },
+            AgentCmd::Review { id: 2, key: "p".into(), worktree: "/w".into(), base: Some("develop".into()) },
+            AgentCmd::ReviewFiles { id: 3, key: "p".into(), worktree: "/w".into(), scope: ReviewScope::Commit { sha: "b".repeat(40) } },
+            AgentCmd::ReviewDiff {
+                id: 4,
+                key: "p".into(),
+                worktree: "/w".into(),
+                scope: ReviewScope::Branch { merge_base: "a".repeat(40), head: "b".repeat(40) },
+                path: Some("docs/new name.md".into()),
+                old_path: Some("docs/old.md".into()),
+            },
+            AgentCmd::ReviewDiff { id: 5, key: "p".into(), worktree: "/w".into(), scope: ReviewScope::Uncommitted, path: None, old_path: None },
+        ];
+        for cmd in cmds {
+            assert_eq!(decode::<AgentCmd>(&encode(&cmd)).unwrap(), cmd);
+        }
+        // What older agents send: no review capability, no new summary fields.
+        let old = r#"{"type":"Hello","version":"0.1.7","hooks":"Installed","send_text":true}"#;
+        assert!(matches!(decode::<AgentEvent>(old).unwrap(), AgentEvent::Hello { review: false, .. }));
+        let old = r#"{"worktree":"/w","head":"a","base":"main","base_sha":"b","merge_base":null,"state":"UpToDate","ahead":0,"behind":0,"commits":[],"more_commits":0,"files":{"files":[],"more":0,"added":0,"removed":0},"uncommitted":{"files":[],"more":0,"added":0,"removed":0},"branch":null}"#;
+        let old: ReviewSummary = decode(old).unwrap();
+        assert_eq!((old.base_kind, old.several_merge_bases, old.merges.len()), (BaseKind::Branch, false, 0));
+        // Only a live task in review offers its worktree.
+        let mut task: Task = serde_json::from_value(serde_json::json!({"id": "t", "reference": "r", "title": "T", "status": "review", "created": 0, "updated": 0, "worktree": "/w"})).unwrap();
+        assert_eq!(task.review_worktree(), Some("/w"));
+        task.status = TaskStatus::Active;
+        assert_eq!(task.review_worktree(), None);
+        // Optional fields may be left out.
+        let short = r#"{"type":"ReviewDiff","id":1,"key":"p","worktree":"/w","scope":{"kind":"Uncommitted"}}"#;
+        assert!(matches!(decode::<AgentCmd>(short).unwrap(), AgentCmd::ReviewDiff { path: None, old_path: None, .. }));
     }
 }

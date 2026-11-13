@@ -52,6 +52,7 @@ pub fn run() -> io::Result<()> {
         task_hooks: Some(hooks::task_state()),
         task_links: true,
         worktree_refresh: true,
+        review: true,
         shell: hooks::user_shell_path().map(|p| protocol::ShellKind::from_path(&p)),
     })?;
 
@@ -93,7 +94,10 @@ pub fn run() -> io::Result<()> {
                 | AgentCmd::WatchTasks { .. }
                 | AgentCmd::UnwatchTasks { .. }
                 | AgentCmd::EditTasks { .. }
-                | AgentCmd::AdoptTasks { .. } => {}
+                | AgentCmd::AdoptTasks { .. }
+                | AgentCmd::Review { .. }
+                | AgentCmd::ReviewFiles { .. }
+                | AgentCmd::ReviewDiff { .. } => {}
             }
         }
 
@@ -235,6 +239,11 @@ fn spawn_stdin_reader(watcher: Sender<changes::Cmd>, sender: Sender<send_text::R
                 }
                 Ok(AgentCmd::RefreshWorktrees { key, seq }) => {
                     let _ = watcher.send(changes::Cmd::Refresh { key, seq });
+                }
+                Ok(cmd @ (AgentCmd::Review { .. } | AgentCmd::ReviewFiles { .. } | AgentCmd::ReviewDiff { .. })) => {
+                    if let Some(request) = changes::Cmd::review(cmd) {
+                        let _ = watcher.send(request);
+                    }
                 }
                 Ok(AgentCmd::SendText { id, session, text, enter, limit_ms }) => {
                     // Measured from now, on this machine's monotonic clock.

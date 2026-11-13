@@ -155,6 +155,8 @@ enum Action {
         ask: bool,
     },
     GoTo(CardId),
+    /// Review the task's worktree (its folder) in the Changes panel.
+    Review(String),
 }
 
 /// Why a task cannot be started now, translated.
@@ -393,6 +395,7 @@ impl Tasks {
         match action {
             Action::Start { task, ask } => self.begin(world, key, &task, ask),
             Action::GoTo(card) => out.push(Event::FlyTo(card)),
+            Action::Review(path) => out.push(Event::ReviewWorktree { project: key.to_string(), path }),
             Action::Open(task) => self.open_editor(key, &task),
             Action::Op(op, mut pending) => {
                 if let Pending::Remove { key: k, .. } = &mut pending {
@@ -1267,6 +1270,12 @@ fn row(ui: &mut Ui, task: &Task, tasks: &[Task], writable: bool, start_ctx: &Sta
             if let Some(a) = start_button(ui, task, start_ctx) {
                 pick = Some(a);
             }
+            if let Some(path) = task.review_worktree() {
+                let button = ui.add_enabled(!start_ctx.world.review_unsupported, Button::new(t().review_button).small());
+                if button.on_hover_text(t().review_button_hint).on_disabled_hover_text(t().review_agent_too_old).clicked() {
+                    pick = Some(Action::Review(path.to_string()));
+                }
+            }
             if let Some(branch) = &task.branch {
                 let hover = task.worktree.as_deref().map_or_else(|| branch.clone(), |w| format!("{branch}\n{w}"));
                 ui.label(RichText::new(format!("⎇ {}", crate::shell::widgets::elide_middle(branch, 16))).small().color(theme::TEXT_DIM)).on_hover_text(hover);
@@ -1358,7 +1367,17 @@ mod tests {
     }
 
     fn hello(tasks: bool) -> Event {
-        Event::Agent(AgentEvent::Hello { version: "x".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks, task_hooks: None, task_links: true, worktree_refresh: true, shell: None })
+        Event::Agent(AgentEvent::Hello {
+            version: "x".into(),
+            hooks: protocol::Hooks::Installed,
+            send_text: true,
+            tasks,
+            task_hooks: None,
+            task_links: true,
+            worktree_refresh: true,
+            review: true,
+            shell: None,
+        })
     }
 
     fn task(id: &str) -> Task {

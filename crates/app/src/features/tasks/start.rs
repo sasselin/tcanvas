@@ -739,6 +739,7 @@ mod tests {
             last_commit: None,
             branch_deletable: false,
             reflog_commits: false,
+            status_mark: None,
         }
     }
 

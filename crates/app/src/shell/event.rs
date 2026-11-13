@@ -296,6 +296,13 @@ pub enum Event {
     },
     /// Opens the "Changes" panel on this group.
     ShowChanges(ProjectId),
+    /// Opens the "Changes" panel of a group in review mode on one of its repository's worktrees
+    /// (`path`: its folder, which may differ from the group's), against the default branch
+    /// (`changes` slice).
+    ReviewWorktree {
+        project: ProjectId,
+        path: String,
+    },
     /// Command to forward to the agent.
     ToAgent(AgentCmd),
     /// The link to the agent closed: whatever it was asked and has not answered never will be.
