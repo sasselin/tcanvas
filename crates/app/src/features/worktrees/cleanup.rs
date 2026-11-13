@@ -298,7 +298,11 @@ impl CleanupWindow {
         let offered = self.offered(list, world);
         self.ask_sizes(&offered, events);
         let mut open = true;
-        Window::new(t().cleanup_title).id(Id::unique("worktree-cleanup")).collapsible(false).resizable(false).default_width(560.0).open(&mut open).show(ctx, |ui| {
+        // Opens centered near the top, like the "Go to" palette and the "Your turn" list (egui's
+        // default spot is flush against the left edge); it can still be moved.
+        let at = ctx.content_rect().center_top() + egui::vec2(0.0, 80.0);
+        let window = Window::new(t().cleanup_title).id(Id::unique("worktree-cleanup")).pivot(egui::Align2::CENTER_TOP).default_pos(at);
+        window.collapsible(false).resizable(false).default_width(560.0).open(&mut open).show(ctx, |ui| {
             let max = ctx.content_rect().height() * 0.6;
             ScrollArea::vertical().max_height(max).show(ui, |ui| self.body(ui, list, world, &offered));
         });

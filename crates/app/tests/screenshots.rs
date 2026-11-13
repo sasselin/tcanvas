@@ -752,8 +752,26 @@ fn task_start() {
         reflog_commits: false,
         status_mark: None,
     };
-    let list =
-        protocol::WorktreeList { key: "p-shop-api".into(), repo: Some("/home/me/code/shop-api".into()), default_branch: Some("origin/main".into()), worktrees: vec![main], merged_branches: vec![] };
+    // The rate limit's card works in the task's own worktree, on the task's branch.
+    let task_worktree = "/home/me/code/shop-api/.claude/worktrees/task-rate-limit-the-login-route-q7m";
+    h.state_mut().world.card_mut("t0").expect("demo card").cwd = Some(task_worktree.into());
+    let task = protocol::Worktree {
+        path: task_worktree.into(),
+        head: Some("c".repeat(40)),
+        branch: Some("task/rate-limit-the-login-route-q7m".into()),
+        main: false,
+        dirty: Some(true),
+        ahead: Some(2),
+        last_commit: Some(unix_now() - 300),
+        ..main.clone()
+    };
+    let list = protocol::WorktreeList {
+        key: "p-shop-api".into(),
+        repo: Some("/home/me/code/shop-api".into()),
+        default_branch: Some("origin/main".into()),
+        worktrees: vec![main, task],
+        merged_branches: vec![],
+    };
     h.state_mut().dispatch(vec![Event::Agent(hello), Event::Agent(AgentEvent::Worktrees(list)), Event::Agent(AgentEvent::Tasks(Box::new(board)))]);
     ctrl_shift(&h, Key::T);
     steps(&mut h, 3);

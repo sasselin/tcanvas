@@ -551,7 +551,11 @@ fn where_ui(ui: &mut Ui, s: &mut Starter, project: &Project, p: &Prepared) {
             }
             let Some(plan) = &p.plan else { return };
             if let Some(path) = &plan.path {
-                ui.label(RichText::new((t().start_folder)(path)).monospace().color(theme::TEXT_DIM));
+                // The caption in the label font, the path in monospace.
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(t().start_folder).color(theme::TEXT_DIM));
+                    ui.label(RichText::new(path.as_str()).monospace().color(theme::TEXT_DIM));
+                });
             }
             for problem in &plan.problems {
                 ui.label(RichText::new(t().problem(problem)).color(ERROR));

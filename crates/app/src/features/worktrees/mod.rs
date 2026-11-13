@@ -361,7 +361,10 @@ impl Worktrees {
         let Some((path, report)) = &self.report else { return };
         let interrupted = self.interrupted.as_ref().filter(|i| &i.path == path);
         let mut open = true;
-        egui::Window::new(t().recipe_report_title).id(egui::Id::unique("recipe-report")).collapsible(false).resizable(false).show(ctx, |ui| {
+        // Centered near the top, like the cleanup window.
+        let at = ctx.content_rect().center_top() + egui::vec2(0.0, 80.0);
+        let window = egui::Window::new(t().recipe_report_title).id(egui::Id::unique("recipe-report")).pivot(egui::Align2::CENTER_TOP).default_pos(at);
+        window.collapsible(false).resizable(false).show(ctx, |ui| {
             ui.set_max_width(520.0);
             ui.label((t().recipe_report_intro)(path));
             match report {
