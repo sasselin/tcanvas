@@ -233,6 +233,7 @@ mod tests {
             messages: Vec::new(),
             worktree_location: None,
             task_settings: Default::default(),
+            merge_strategy: None,
         });
         for (id, z) in [("recent", 9), ("asks", 1), ("alert", 2)] {
             let mut c = Card::with_id(id.into(), egui::Rect::NOTHING, None);

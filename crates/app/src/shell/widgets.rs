@@ -57,8 +57,26 @@ pub fn confirm_by_click(ctx: &egui::Context, id: &str, title: &str, body: &str, 
     confirm_dialog(ctx, id, title, body, ok_label, 460.0, Some(max), ready)
 }
 
+/// Like `confirm_by_click`, with a body drawn by `body` (choices, a text field...). Enter is
+/// swallowed unless `typing` (a multi-line field of the body has the keyboard: Enter is a new line
+/// there, never a confirmation).
+pub fn confirm_by_click_with(ctx: &egui::Context, id: &str, title: &str, ok_label: &str, ready: bool, typing: bool, mut body: impl FnMut(&mut egui::Ui)) -> Option<bool> {
+    if !typing {
+        ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+    }
+    let max = (ctx.content_rect().height() * 0.6).max(160.0);
+    modal_dialog(ctx, id, title, ok_label, 520.0, Some(max), ready, &mut body)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn confirm_dialog(ctx: &egui::Context, id: &str, title: &str, body: &str, ok_label: &str, width: f32, max_body: Option<f32>, ready: bool) -> Option<bool> {
+    modal_dialog(ctx, id, title, ok_label, width, max_body, ready, &mut |ui: &mut egui::Ui| {
+        ui.label(body);
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn modal_dialog(ctx: &egui::Context, id: &str, title: &str, ok_label: &str, width: f32, max_body: Option<f32>, ready: bool, body: &mut dyn FnMut(&mut egui::Ui)) -> Option<bool> {
     let mut result = None;
     let modal = Modal::new(Id::unique(("confirm", id))).show(ctx, |ui| {
         ui.set_width(width);
@@ -66,15 +84,16 @@ fn confirm_dialog(ctx: &egui::Context, id: &str, title: &str, body: &str, ok_lab
         ui.add_space(4.0);
         match max_body {
             Some(max) => {
-                egui::ScrollArea::vertical().max_height(max).show(ui, |ui| ui.label(body));
+                egui::ScrollArea::vertical().max_height(max).show(ui, |ui| body(ui));
             }
-            None => {
-                ui.label(body);
-            }
+            None => body(ui),
         }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            let danger = egui::Button::new(RichText::new(ok_label).color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(190, 60, 60));
+            let danger = egui::Button::new(RichText::new(ok_label).color(egui::Color32::WHITE))
+                .fill(egui::Color32::from_rgb(190, 60, 60))
+                // Clicked only: never focused (Tab then Space must not confirm a deletion).
+                .sense(egui::Sense::CLICK);
             if ui.add_enabled(ready, danger).clicked() {
                 result = Some(true);
             }

@@ -191,6 +191,7 @@ fn real_terminals_end_to_end() {
         messages: Vec::new(),
         worktree_location: None,
         task_settings: Default::default(),
+        merge_strategy: None,
     };
     h.state_mut().world.projects.push(group.clone());
     let new_card = |h: &mut Harness<'_, App>, at: egui::Pos2, project: Option<String>| {

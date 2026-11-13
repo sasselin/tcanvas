@@ -229,13 +229,13 @@ fn main_dir(repo: &Repo, dir: &Path) -> PathBuf {
 /// A full status: modified, staged and untracked files (each untracked file, not just its
 /// folder, whatever `status.showUntrackedFiles` says). Ignored files do not count. `None` when
 /// git fails.
-fn dirty_now(path: &Path) -> Option<bool> {
+pub fn dirty_now(path: &Path) -> Option<bool> {
     git_ok(path, &["status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none"]).map(|out| !out.is_empty())
 }
 
 /// Tracked files flagged `assume-unchanged` or `skip-worktree`: `git status` does not look at
 /// them, so their local edits are invisible. `None` when git fails.
-fn hidden_changes(path: &Path) -> Option<bool> {
+pub fn hidden_changes(path: &Path) -> Option<bool> {
     git_ok(path, &["ls-files", "-v", "-z"]).map(|out| has_hidden_flags(&out))
 }
 

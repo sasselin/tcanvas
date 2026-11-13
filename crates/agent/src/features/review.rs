@@ -175,7 +175,7 @@ fn capture(dir: &Path, args: &[OsString]) -> Result<Option<Vec<u8>>, Problem> {
     Ok(ok.then_some(out))
 }
 
-fn text(dir: &Path, args: &[&str]) -> Result<Option<String>, Problem> {
+pub fn text(dir: &Path, args: &[&str]) -> Result<Option<String>, Problem> {
     Ok(capture(dir, &os(args))?.map(|o| String::from_utf8_lossy(&o).into_owned()))
 }
 
@@ -221,15 +221,15 @@ fn read_bounded(dir: &Path, args: &[OsString], max: usize) -> Result<(String, bo
 type Refusal = (Problem, Vec<String>);
 
 /// The reviewed worktree, checked.
-struct Checked {
-    path: PathBuf,
+pub struct Checked {
+    pub path: PathBuf,
     /// Its repository's worktrees, main checkout first.
-    list: Vec<protocol::Worktree>,
+    pub list: Vec<protocol::Worktree>,
 }
 
 /// `requested` must be one of the worktrees of the repository holding `dir` (not bare, not
 /// missing), compared after resolving both.
-fn worktree_of(dir: &Path, requested: &str) -> Result<Checked, Problem> {
+pub fn worktree_of(dir: &Path, requested: &str) -> Result<Checked, Problem> {
     let refused = || Problem::NotAWorktree { path: requested.to_string() };
     let out = text(dir, &["worktree", "list", "--porcelain"])?.ok_or(Problem::NotAGitRepo)?;
     let list = worktrees::parse_porcelain(&out);
@@ -241,7 +241,7 @@ fn worktree_of(dir: &Path, requested: &str) -> Result<Checked, Problem> {
     Ok(Checked { path: wanted, list })
 }
 
-fn is_hex_sha(s: &str) -> bool {
+pub fn is_hex_sha(s: &str) -> bool {
     (7..=64).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
@@ -252,14 +252,14 @@ pub fn base_name_ok(base: &str) -> bool {
 }
 
 /// The commit `rev` names (`rev` checked by the caller: never an option).
-fn commit_of(dir: &Path, rev: &str) -> Result<Option<String>, Problem> {
+pub fn commit_of(dir: &Path, rev: &str) -> Result<Option<String>, Problem> {
     let out = text(dir, &["rev-parse", "--verify", "-q", &format!("{rev}^{{commit}}")])?;
     Ok(out.map(|o| o.trim().to_string()).filter(|s| is_hex_sha(s)))
 }
 
 /// What a base name stands for: a local branch first, then a remote-tracking one, then whatever
 /// git finds (a tag named like a branch never hides the branch).
-fn resolve_base(dir: &Path, base: &str) -> Result<Option<(String, BaseKind)>, Problem> {
+pub fn resolve_base(dir: &Path, base: &str) -> Result<Option<(String, BaseKind)>, Problem> {
     for (prefix, kind) in [("refs/heads/", BaseKind::Branch), ("refs/remotes/", BaseKind::Remote), ("", BaseKind::Other)] {
         if let Some(sha) = commit_of(dir, &format!("{prefix}{base}"))? {
             return Ok(Some((sha, kind)));

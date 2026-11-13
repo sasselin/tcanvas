@@ -919,6 +919,7 @@ mod tests {
             messages: Vec::new(),
             worktree_location: None,
             task_settings: Default::default(),
+            merge_strategy: None,
         });
         world
     }

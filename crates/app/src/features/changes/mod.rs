@@ -3,6 +3,7 @@
 //! up to date, shows the side panel and requests diffs. The panel has a second mode, the review
 //! of a worktree's whole branch against its base (`review`).
 
+pub mod merge;
 pub mod review;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -167,6 +168,10 @@ pub struct Changes {
     resend_reviews: bool,
     /// The connected agent cannot review (an older one).
     review_unsupported: bool,
+    /// The connected agent cannot merge (an older one).
+    merge_unsupported: bool,
+    /// Merges the previous agent was running when it stopped, per group: what to tell, until closed.
+    interrupted: HashMap<ProjectId, Vec<String>>,
 }
 
 impl Default for Changes {
@@ -185,6 +190,8 @@ impl Default for Changes {
             next_id: 0,
             resend_reviews: false,
             review_unsupported: false,
+            merge_unsupported: false,
+            interrupted: HashMap::new(),
         }
     }
 }
@@ -200,6 +207,11 @@ impl Changes {
             Some(Target::File(f)) => Some(f),
             _ => None,
         }
+    }
+
+    /// What the panel says about a merge the previous agent did not finish, until closed.
+    pub fn interrupted(&self, project: &str) -> Option<&Vec<String>> {
+        self.interrupted.get(project)
     }
 
     pub fn selected_target(&self, project: &str) -> Option<&Target> {
@@ -284,11 +296,12 @@ impl Changes {
     pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
         match ev {
             // Agent (re)started: it watches nothing anymore, so resend everything next frame.
-            Event::Agent(AgentEvent::Hello { review, .. }) => {
+            Event::Agent(AgentEvent::Hello { review, merge, .. }) => {
                 self.watched.clear();
                 self.lose_review_requests();
                 self.resend_reviews = true;
                 self.review_unsupported = !review;
+                self.merge_unsupported = !merge;
                 if world.review_unsupported != !review {
                     world.review_unsupported = !review;
                 }
@@ -310,6 +323,17 @@ impl Changes {
                 }
             }
             Event::Agent(ev @ (AgentEvent::Review { .. } | AgentEvent::ReviewFiles { .. } | AgentEvent::ReviewDiff { .. })) => self.on_review_event(ev, out),
+            Event::Agent(AgentEvent::Merged { id, key, outcome }) => self.on_merged(*id, key, outcome),
+            Event::Agent(AgentEvent::MergeInterrupted { record, previous_alive, applied, base_tip, base_checkout, base_dirty }) => {
+                if world.project(&record.key).is_some() {
+                    let lines = merge::interrupted_lines(record, *previous_alive, *applied, base_tip.as_deref(), base_checkout.as_deref(), *base_dirty);
+                    out.push(Event::Inform { title: t().merge_interrupted_title.into(), body: lines.join("\n") });
+                    self.interrupted.insert(record.key.clone(), lines);
+                }
+            }
+            Event::Agent(AgentEvent::MergeRecordCorrupt { path, detail }) => {
+                out.push(Event::Inform { title: t().merge_interrupted_title.into(), body: (t().merge_record_corrupt)(path, detail) });
+            }
             Event::Agent(AgentEvent::Worktrees(list)) => {
                 if world.project(&list.key).is_some_and(|p| p.cwd.is_some()) {
                     self.on_worktrees(list, out);
@@ -397,8 +421,13 @@ impl Changes {
                 });
             });
             self.mode_ui(ui, &project.id, events);
+            if let Some(lines) = self.interrupted.get(&project.id)
+                && merge::interrupted_ui(ui, lines)
+            {
+                self.interrupted.remove(&project.id);
+            }
             if self.reviewing(&project.id) {
-                self.review_ui(ui, &project.id, events);
+                self.review_ui(ui, world, &project.id, events);
                 return;
             }
             let Some(set) = self.sets.get(&project.id).cloned() else {
@@ -614,6 +643,7 @@ mod tests {
             messages: Vec::new(),
             worktree_location: None,
             task_settings: Default::default(),
+            merge_strategy: None,
         }
     }
 
@@ -680,6 +710,7 @@ mod tests {
                 task_links: true,
                 worktree_refresh: true,
                 review: true,
+                merge: true,
                 shell: None,
             }),
             &mut world(),
@@ -901,6 +932,7 @@ mod tests {
             task_links: true,
             worktree_refresh: true,
             review,
+            merge: review,
             shell: None,
         })
     }
@@ -1122,6 +1154,7 @@ mod tests {
                 task_links: true,
                 worktree_refresh: true,
                 review: true,
+                merge: true,
                 shell: None,
             }),
             &mut w,

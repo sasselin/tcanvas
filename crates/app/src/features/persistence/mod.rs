@@ -199,6 +199,7 @@ mod tests {
             messages: sample_messages(),
             worktree_location: Some("../{repo}-{name}".into()),
             task_settings: crate::shell::world::TaskSettings { prompt: Some("Do {task_title}".into()), branch_prefix: Some("work/".into()), skip_confirm: true },
+            merge_strategy: Some(protocol::MergeStrategy::Rebase),
         });
         w.projects.push(Project {
             id: "p2".into(),
@@ -210,6 +211,7 @@ mod tests {
             messages: Vec::new(),
             worktree_location: None,
             task_settings: Default::default(),
+            merge_strategy: None,
         });
         w.wires.push(Wire { from: "p1".into(), to: "p2".into() });
         w.add_card(a);

@@ -149,11 +149,18 @@ impl App {
             || self.projects.has_dialog()
             || self.worktrees.has_dialog()
             || self.tasks.has_dialog()
+            || self.changes.has_dialog()
     }
 
     /// A window other than the queue is open.
     fn other_dialog(&self) -> bool {
-        self.jump.is_open() || self.shortcuts_help.is_open() || self.cards.has_dialog() || self.projects.has_dialog() || self.worktrees.has_dialog() || self.tasks.has_dialog()
+        self.jump.is_open()
+            || self.shortcuts_help.is_open()
+            || self.cards.has_dialog()
+            || self.projects.has_dialog()
+            || self.worktrees.has_dialog()
+            || self.tasks.has_dialog()
+            || self.changes.has_dialog()
     }
 
     /// Removes global shortcuts, then gives the rest of the keyboard input to the focused terminal.
@@ -289,6 +296,7 @@ impl App {
         self.projects.dialogs(&ctx, &self.world, &mut events);
         self.worktrees.dialogs(&ctx, &self.world, &mut events);
         self.tasks.dialogs(&ctx, &self.world, &mut events);
+        self.changes.dialogs(&ctx, &self.world, &mut events);
         self.notifications.ui(&ctx, &self.world, &mut events);
         self.updates.dialogs(&ctx);
         self.shortcuts_help.ui(&ctx);

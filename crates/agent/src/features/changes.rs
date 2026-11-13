@@ -7,6 +7,7 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -14,7 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protocol::{AgentEvent, ChangeKind, ChangeSet, CommitInfo, DirEntry, DirListing, FileChange, Problem, WorktreeList};
 
-use super::{cleanup, create, recipe, review, tmux, worktrees};
+use super::{cleanup, create, merge, recipe, review, tmux, worktrees};
 
 const SCAN_EVERY: Duration = Duration::from_secs(2);
 const MAX_FILES: usize = 500;
@@ -79,6 +80,8 @@ pub enum Cmd {
     /// A review request (`AgentCmd::Review`, `ReviewFiles`, `ReviewDiff`), answered on the review
     /// thread.
     Review(review::Request),
+    /// A merge (`AgentCmd::Merge`), run on the cleanup thread with the other writes.
+    Merge(merge::Request),
 }
 
 impl Cmd {
@@ -86,12 +89,18 @@ impl Cmd {
     pub fn review(cmd: protocol::AgentCmd) -> Option<Cmd> {
         review::Request::of(cmd).map(Cmd::Review)
     }
+
+    /// The merge `cmd` is, if it is one.
+    pub fn merge(cmd: protocol::AgentCmd) -> Option<Cmd> {
+        merge::Request::of(cmd).map(Cmd::Merge)
+    }
 }
 
 /// A command that writes, run on the cleanup thread (one at a time).
 enum Job {
     Cleanup { key: String, dir: PathBuf, action: protocol::Cleanup },
     Create { id: u64, key: String, dir: PathBuf, request: protocol::CreateWorktree },
+    Merge { dir: PathBuf, request: merge::Request },
 }
 
 /// A recipe to apply to a new worktree, on the recipe thread.
@@ -134,14 +143,16 @@ struct Watched {
 }
 
 /// Starts the watcher thread. Produced events go through `send`.
-pub fn spawn(send: impl Fn(&AgentEvent) + Send + Sync + 'static) -> Sender<Cmd> {
+/// `sessions`: the canvas sessions as the main loop last saw them (a merge refuses to change files
+/// under a coding agent at work).
+pub fn spawn(send: impl Fn(&AgentEvent) + Send + Sync + 'static, sessions: merge::Sessions) -> Sender<Cmd> {
     let (tx, rx) = mpsc::channel();
     let send: Sink = Arc::new(send);
     let paths: WatchedPaths = Arc::default();
     let measuring: Measuring = Arc::default();
     let recipes = spawn_recipes(send.clone(), tx.clone());
     let workers = Workers {
-        jobs: spawn_cleaner(send.clone(), tx.clone(), paths.clone(), recipes),
+        jobs: spawn_cleaner(send.clone(), tx.clone(), paths.clone(), recipes, sessions),
         sizes: spawn_measurer(send.clone(), measuring.clone()),
         plans: spawn_planner(send.clone()),
         reviews: spawn_reviewer(send.clone()),
@@ -244,8 +255,9 @@ fn spawn_recipes(send: Sink, rescan: Sender<Cmd>) -> Sender<RecipeJob> {
 /// or checking out a big one, takes a while; diffs and scans go on meanwhile), then ask for a scan
 /// so the lists follow right away. What uses the folders (panes, processes, watched folders) is
 /// read by `cleanup::run` right before it writes, after its slow checks.
-fn spawn_cleaner(send: Sink, rescan: Sender<Cmd>, paths: WatchedPaths, recipes: Sender<RecipeJob>) -> Sender<Job> {
+fn spawn_cleaner(send: Sink, rescan: Sender<Cmd>, paths: WatchedPaths, recipes: Sender<RecipeJob>, sessions: merge::Sessions) -> Sender<Job> {
     let (tx, rx) = mpsc::channel::<Job>();
+    let merging = Arc::new(AtomicBool::new(false));
     thread::spawn(move || {
         for job in rx {
             match job {
@@ -271,11 +283,56 @@ fn spawn_cleaner(send: Sink, rescan: Sender<Cmd>, paths: WatchedPaths, recipes: 
                     };
                     answer_created(&send, &recipes, id, key.clone(), create::run(&dir, &request, late));
                 }
+                Job::Merge { dir, request } => run_merge(&send, &rescan, &sessions, &merging, dir, request),
             }
             let _ = rescan.send(Cmd::Rescan);
         }
     });
     tx
+}
+
+/// A merge, waited for `cleanup::write_limit()` at most: past that, git is not stopped half-way,
+/// `StillRunning` is answered, and the final outcome follows with the same id when it ends (the
+/// next jobs do not wait; another merge is refused meanwhile, `merging`).
+fn run_merge(send: &Sink, rescan: &Sender<Cmd>, sessions: &merge::Sessions, merging: &Arc<AtomicBool>, dir: PathBuf, request: merge::Request) {
+    let (id, key) = (request.id, request.key.clone());
+    let answer = move |send: &Sink, outcome| send(&AgentEvent::Merged { id, key: key.clone(), outcome });
+    if merging.swap(true, Ordering::SeqCst) {
+        answer(send, protocol::MergeOutcome::Refused { reason: protocol::MergeRefusal::Busy });
+        return;
+    }
+    let (tx, rx) = mpsc::channel();
+    let shared = sessions.clone();
+    thread::spawn(move || {
+        let now = || shared.lock().map(|s| s.clone()).unwrap_or_default();
+        let _ = tx.send(merge::run(&dir, &request, &now));
+    });
+    let limit = cleanup::write_limit();
+    match rx.recv_timeout(limit) {
+        Ok(outcome) => {
+            merging.store(false, Ordering::SeqCst);
+            answer(send, outcome);
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            answer(send, protocol::MergeOutcome::StillRunning { secs: limit.as_secs() });
+            let (send, rescan, merging) = (send.clone(), rescan.clone(), merging.clone());
+            thread::spawn(move || {
+                let outcome = rx.recv().unwrap_or_else(|_| stopped());
+                merging.store(false, Ordering::SeqCst);
+                answer(&send, outcome);
+                let _ = rescan.send(Cmd::Rescan);
+            });
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            merging.store(false, Ordering::SeqCst);
+            answer(send, stopped());
+        }
+    }
+}
+
+/// The merge's thread ended without an outcome (it panicked): nothing was applied by it after that.
+fn stopped() -> protocol::MergeOutcome {
+    protocol::MergeOutcome::Failed { problem: Problem::GitFailed { detail: "the merge stopped unexpectedly".into() } }
 }
 
 /// Answers a creation as soon as git is done; its recipe, if any, then goes to the recipe thread
@@ -372,6 +429,12 @@ fn run(rx: Receiver<Cmd>, send: Sink, workers: Workers) {
                 }
                 Some(Err(problem)) => send(&AgentEvent::WorktreeCreated { id, key, path: None, problem: Some(problem), excluded: false, recipe_pending: false }),
                 None => send(&AgentEvent::WorktreeCreated { id, key, path: None, problem: Some(Problem::NotAGitRepo), excluded: false, recipe_pending: false }),
+            },
+            Ok(Cmd::Merge(request)) => match watched.get(&request.key).map(|w| resolve(&w.path)).unwrap_or(Err(Problem::NotAGitRepo)) {
+                Ok(dir) => {
+                    let _ = workers.jobs.send(Job::Merge { dir, request });
+                }
+                Err(problem) => send(&AgentEvent::Merged { id: request.id, key: request.key, outcome: protocol::MergeOutcome::Failed { problem } }),
             },
             Ok(Cmd::Review(request)) => {
                 let dir = watched.get(&request.key).map(|w| resolve(&w.path)).unwrap_or(Err(Problem::NotAGitRepo));

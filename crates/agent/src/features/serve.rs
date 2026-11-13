@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protocol::{AgentCmd, AgentEvent, DEFAULT_STALL_SECS, Problem, SessionInfo, TermStatus};
 
-use super::{agent_hooks, changes, hooks, kill, send as send_text, status, tasks, timing, tmux};
+use super::{agent_hooks, changes, hooks, kill, merge, send as send_text, status, tasks, timing, tmux};
 
 const POLL: Duration = Duration::from_secs(1);
 const TAIL_LINES: usize = 3;
@@ -32,20 +32,34 @@ struct Tracked {
 }
 
 pub fn run() -> io::Result<()> {
+    stop_on_signals();
+    let result = serve();
+    // The main loop ended (its output closed): a merge preparing aside is dropped, one applying ends first.
+    merge::shutdown(Duration::from_secs(60));
+    result
+}
+
+fn serve() -> io::Result<()> {
+    // What the sessions are doing, for the merges (which never change files under a coding agent
+    // at work): updated after each observation below.
+    let sessions = merge::Sessions::default();
     // The changes thread also writes to stdout: one lock per message keeps lines whole.
-    let watcher = changes::spawn(|ev| {
-        if send(ev).is_err() {
-            std::process::exit(0);
-        }
-    });
+    let watcher = changes::spawn(
+        |ev| {
+            if send(ev).is_err() {
+                stop();
+            }
+        },
+        sessions.clone(),
+    );
     let sender = send_text::spawn(|ev| {
         if send(ev).is_err() {
-            std::process::exit(0);
+            stop();
         }
     });
     let lists = tasks::spawn(|ev| {
         if send(ev).is_err() {
-            std::process::exit(0);
+            stop();
         }
     });
     let cmds = spawn_stdin_reader(watcher, sender, lists);
@@ -58,8 +72,13 @@ pub fn run() -> io::Result<()> {
         task_links: true,
         worktree_refresh: true,
         review: true,
+        merge: true,
         shell: hooks::user_shell_path().map(|p| protocol::ShellKind::from_path(&p)),
     })?;
+    // Merges the previous agent was running when it stopped: said, never undone here.
+    for ev in merge::interrupted() {
+        send(&ev)?;
+    }
 
     let mut tracked: HashMap<String, Tracked> = HashMap::new();
     let mut clock = timing::ClockLog::default();
@@ -103,7 +122,8 @@ pub fn run() -> io::Result<()> {
                 | AgentCmd::AdoptTasks { .. }
                 | AgentCmd::Review { .. }
                 | AgentCmd::ReviewFiles { .. }
-                | AgentCmd::ReviewDiff { .. } => {}
+                | AgentCmd::ReviewDiff { .. }
+                | AgentCmd::Merge { .. } => {}
             }
         }
 
@@ -132,6 +152,9 @@ pub fn run() -> io::Result<()> {
         for session in gone {
             tracked.remove(&session);
             send(&AgentEvent::Gone { session })?;
+        }
+        if let Ok(mut shared) = sessions.lock() {
+            *shared = Some(tracked.values().filter_map(|t| t.last_sent.clone()).collect());
         }
 
         thread::sleep(POLL);
@@ -208,6 +231,35 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64, mono: Instant, clock:
     }
 }
 
+/// The agent stops (its input or output closed, or a termination signal): a merge still preparing
+/// its result aside is dropped (nothing of the user's was touched); one applying it ends first.
+fn stop() -> ! {
+    merge::shutdown(Duration::from_secs(60));
+    std::process::exit(0)
+}
+
+static SIGNALED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_signal(_: libc::c_int) {
+    SIGNALED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// SIGTERM and SIGHUP (the app closing, its terminal gone) stop the agent through `stop`.
+fn stop_on_signals() {
+    let handler = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    // SAFETY: the handler only stores into an atomic, which is async-signal-safe.
+    unsafe {
+        libc::signal(libc::SIGTERM, handler);
+        libc::signal(libc::SIGHUP, handler);
+    }
+    thread::spawn(|| {
+        while !SIGNALED.load(std::sync::atomic::Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(100));
+        }
+        stop();
+    });
+}
+
 fn send(ev: &AgentEvent) -> io::Result<()> {
     let mut out = io::stdout().lock();
     out.write_all(protocol::encode(ev).as_bytes())?;
@@ -261,6 +313,11 @@ fn spawn_stdin_reader(watcher: Sender<changes::Cmd>, sender: Sender<send_text::R
                         let _ = watcher.send(request);
                     }
                 }
+                Ok(cmd @ AgentCmd::Merge { .. }) => {
+                    if let Some(request) = changes::Cmd::merge(cmd) {
+                        let _ = watcher.send(request);
+                    }
+                }
                 Ok(AgentCmd::SendText { id, session, text, enter, limit_ms }) => {
                     // Measured from now, on this machine's monotonic clock.
                     let deadline = limit_ms.map(|ms| std::time::Instant::now() + Duration::from_millis(ms));
@@ -291,7 +348,7 @@ fn spawn_stdin_reader(watcher: Sender<changes::Cmd>, sender: Sender<send_text::R
                 Err(e) => eprintln!("ignored command ({e}): type {}", command_type(&line)),
             }
         }
-        std::process::exit(0);
+        stop();
     });
     rx
 }
@@ -305,7 +362,7 @@ fn command_type(line: &str) -> String {
 fn tasks_gone(id: u64, key: String) {
     let problem = Problem::TasksFailed { detail: "the task list thread stopped".into() };
     if send(&AgentEvent::TasksEdited { id, key, task: None, problem: Some(problem), content_rev: None }).is_err() {
-        std::process::exit(0);
+        stop();
     }
 }
 

@@ -24,6 +24,7 @@ mod features {
     pub mod create;
     pub mod hooks;
     pub mod kill;
+    pub mod merge;
     pub mod recipe;
     pub mod review;
     pub mod send;

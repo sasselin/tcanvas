@@ -217,6 +217,7 @@ fn scenario(dir: &Path, folder: &str, home: &str, socket: &str, strict: bool) {
         messages: Vec::new(),
         worktree_location: None,
         task_settings: Default::default(),
+        merge_strategy: None,
     };
     h.state_mut().world.projects.push(group);
     wait(&mut h, "agent connected", 30, |app| matches!(app.agent_state(), tcanvas::features::agent_link::LinkState::Connected { .. }));

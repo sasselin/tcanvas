@@ -311,6 +311,7 @@ fn add_project(h: &mut Harness<'_, App>, name: &str, color: [u8; 3], at: Pos2) -
         messages: Vec::new(),
         worktree_location: None,
         task_settings: Default::default(),
+        merge_strategy: None,
     });
     id
 }
@@ -418,6 +419,7 @@ fn demo_canvas(h: &mut Harness<'_, App>) {
         messages: Vec::new(),
         worktree_location: None,
         task_settings: Default::default(),
+        merge_strategy: None,
     });
     h.state_mut().dispatch(vec![Event::AddWire(api.clone(), web), Event::AddWire(api, infra), Event::Agent(AgentEvent::Changes(api_changes()))]);
     steps(h, 5);
@@ -585,6 +587,7 @@ fn review() {
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::ReviewDiff { id, key: "p-shop-api".into(), text: diff.into(), truncated: false, problem: None })]);
     steps(&mut h, 3);
     assert!(h.query_by_label("All commits (3)").is_some() && h.query_by_label("5 files changed").is_some(), "the branch's commits and files");
+    assert!(h.query_by_label("Merge…").is_some(), "the branch can be merged from its review");
     h.event(egui::Event::PointerGone);
     save(&mut h, "review");
 }
@@ -652,6 +655,7 @@ fn tasks() {
         task_links: true,
         worktree_refresh: true,
         review: true,
+        merge: true,
         shell: None,
     };
     h.state_mut().dispatch(vec![Event::Agent(hello), Event::Agent(AgentEvent::Tasks(Box::new(board)))]);
@@ -684,6 +688,7 @@ fn queue() {
         task_links: true,
         worktree_refresh: true,
         review: true,
+        merge: true,
         shell: None,
     };
     h.state_mut().dispatch(vec![Event::Agent(hello), Event::Agent(AgentEvent::Tasks(Box::new(board)))]);
@@ -725,6 +730,7 @@ fn task_start() {
         task_links: true,
         worktree_refresh: true,
         review: true,
+        merge: true,
         shell: None,
     };
     let main = protocol::Worktree {
