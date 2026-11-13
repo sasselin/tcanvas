@@ -32,6 +32,7 @@ mod features {
     pub mod task_cli;
     pub mod task_skill;
     pub mod tasks;
+    pub mod timing;
     pub mod tmux;
     pub mod worktrees;
 }

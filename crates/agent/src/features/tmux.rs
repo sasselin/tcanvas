@@ -117,6 +117,22 @@ pub fn capture_tail(session: &str, n: usize) -> Vec<String> {
     lines
 }
 
+/// A screen capture: `window_activity` and the clock (s) when it was taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Capture {
+    pub activity: u64,
+    pub at: u64,
+}
+
+/// Whether `last` still shows the screen of a pane whose `window_activity` is `activity`,
+/// `now` being the current time. `window_activity` counts whole seconds: output later in the
+/// second of a capture leaves it unchanged. So a capture is only trusted once taken in a later
+/// second than the output, by a clock that has not gone back since (the wall clock steps back
+/// on WSL), which makes an output burst cost one extra capture.
+pub fn capture_is_current(last: Option<Capture>, activity: u64, now: u64) -> bool {
+    last.is_some_and(|c| c.activity == activity && c.at > activity && now >= c.at)
+}
+
 pub fn kill(session: &str) {
     let _ = tmux(&["kill-session", "-t", session]);
 }
@@ -154,5 +170,27 @@ mod tests {
         assert!(no_server(true, "error connecting to /tmp/tmux-1000/tcanvas (Connection refused)"));
         assert!(!no_server(true, "protocol version mismatch"), "a server may be up: unknown");
         assert!(!no_server(true, ""));
+    }
+
+    #[test]
+    fn a_capture_is_trusted_once_taken_after_the_output_second() {
+        assert!(!capture_is_current(None, 1000, 1000), "never captured");
+        let during = Capture { activity: 1000, at: 1000 };
+        assert!(!capture_is_current(Some(during), 1000, 1000), "more output may follow in the same second");
+        assert!(!capture_is_current(Some(during), 1000, 1001), "until a capture in a later second");
+        let after = Capture { activity: 1000, at: 1001 };
+        assert!(capture_is_current(Some(after), 1000, 1001));
+        assert!(capture_is_current(Some(after), 1000, 5000));
+        assert!(!capture_is_current(Some(after), 1003, 1004), "new output");
+    }
+
+    #[test]
+    fn a_capture_is_not_trusted_after_the_clock_went_back() {
+        // Taken at 1001, then the clock steps back: output at 1000 again keeps the same
+        // `window_activity` but may postdate the capture.
+        let after = Capture { activity: 1000, at: 1001 };
+        assert!(!capture_is_current(Some(after), 1000, 1000));
+        // An activity in the future of the capture (stepped clock) is new output.
+        assert!(!capture_is_current(Some(Capture { activity: 1000, at: 999 }), 1000, 999));
     }
 }
