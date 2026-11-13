@@ -2,10 +2,13 @@
 //! Skipped cleanly if tmux (or the shell under test) is not installed.
 
 use std::io::{BufRead, BufReader, Write};
+use std::ops::RangeInclusive;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protocol::{AgentCmd, AgentEvent, Hooks, SessionInfo, TermStatus};
 
@@ -97,6 +100,73 @@ impl Drop for Agent {
     }
 }
 
+/// Records the steps of the wall clock against the monotonic one while a command runs (a
+/// sample every 10 ms). The shell hooks stamp commands with the wall clock, which WSL steps
+/// back to follow Windows (about 1.8 s every 30 s on some machines); the agent must report
+/// durations that such a step does not shorten.
+struct ClockWatch {
+    start: Instant,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<Vec<(Duration, f64)>>>,
+}
+
+impl ClockWatch {
+    fn start() -> Self {
+        let start = Instant::now();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let offset = move || SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64() - start.elapsed().as_secs_f64();
+        let thread = thread::spawn(move || {
+            let mut steps = Vec::new();
+            let mut last = offset();
+            while !stopped.load(Ordering::Relaxed) {
+                thread::sleep(Duration::from_millis(10));
+                let now = offset();
+                if (now - last).abs() >= 0.3 {
+                    steps.push((start.elapsed(), now - last));
+                }
+                last = now;
+            }
+            steps
+        });
+        ClockWatch { start, stop, thread: Some(thread) }
+    }
+
+    /// Stops watching. Returns the time since `start`, and the steps seen: (when, by how many
+    /// seconds, negative when back).
+    fn stop(mut self) -> (Duration, Vec<(Duration, f64)>) {
+        let elapsed = self.start.elapsed();
+        self.stop.store(true, Ordering::Relaxed);
+        (elapsed, self.thread.take().unwrap().join().unwrap())
+    }
+}
+
+impl Drop for ClockWatch {
+    /// A failed assertion before `stop` still ends the sampling thread.
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Whole seconds the agent may report for a `secs`-long bash command started when the watch
+/// started and seen ended `ended` later, the wall clock having stepped by `steps`. bash
+/// publishes a command's start only at its end, so the agent takes the hooks' marks (whole
+/// seconds: +-1) and corrects them only by the steps certain to fall inside the command. Steps
+/// before it are never counted, nor are those in its first poll (before the agent sees it
+/// running) or its last one (recorded at the poll that sees the end): a step back there may
+/// shorten the result, a jump ahead lengthen it, so those widen the range. A step in the middle
+/// must be corrected and does not widen it.
+fn bash_duration(secs: u64, ended: Duration, steps: &[(Duration, f64)]) -> RangeInclusive<u64> {
+    const DOUBT: Duration = Duration::from_millis(1500);
+    let doubtful = steps.iter().filter(|(at, _)| *at < DOUBT || *at + DOUBT > ended).map(|(_, step)| step);
+    let back: f64 = doubtful.clone().filter(|s| **s < 0.0).map(|s| -s).sum();
+    let ahead: f64 = doubtful.filter(|s| **s > 0.0).sum();
+    secs.saturating_sub(1 + back.ceil() as u64)..=secs + 1 + ahead.ceil() as u64
+}
+
 fn has(bin: &str) -> bool {
     Command::new(bin).arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok()
 }
@@ -125,12 +195,18 @@ fn reports_running_stalled_failed_question_and_gone() {
     agent.send(&AgentCmd::SetStall { session: session.into(), secs: 2 });
     agent.wait_status(session, "Idle", |i| i.status == TermStatus::Idle);
 
-    server.type_line(session, "sleep 4");
+    // Stalled needs a poll (about every second) seeing 2 s of silence on the wall clock,
+    // which a step back (up to 2 s, see `ClockWatch`) can cut from the sleep: 6 s leaves room.
+    let clock = ClockWatch::start();
+    server.type_line(session, "sleep 6");
     let running = agent.wait_status(session, "Running", |i| i.status == TermStatus::Running);
-    assert_eq!(running.command.as_deref(), Some("sleep 4"));
+    assert_eq!(running.command.as_deref(), Some("sleep 6"));
     agent.wait_status(session, "Stalled", |i| i.status == TermStatus::Stalled);
     let done = agent.wait_status(session, "Idle after sleep", |i| i.status == TermStatus::Idle && i.last_exit == Some(0));
-    assert!(matches!(done.last_duration_secs, Some(3..=5)), "duration {:?}", done.last_duration_secs);
+    // zsh publishes the start: the agent times the command poll to poll on its monotonic
+    // clock, within a poll whatever the wall clock did.
+    let (_, steps) = clock.stop();
+    assert!(matches!(done.last_duration_secs, Some(5..=7)), "duration {:?}, wall clock steps {steps:?}", done.last_duration_secs);
 
     server.type_line(session, "false");
     let failed = agent.wait_status(session, "Exited(1)", |i| i.status == TermStatus::Exited(1));
@@ -163,7 +239,8 @@ fn kill_stops_every_process_even_stubborn_ones() {
     let server = Server { socket: format!("tcanvas-kill-{}", std::process::id()) };
     let session = "tc_stubborn";
     // Unique durations so we only target our own processes.
-    let base = 700_000 + std::process::id() % 100_000;
+    // `pgrep` looks system-wide: the pid makes them unique to this test process.
+    let base = u64::from(std::process::id()) * 100;
     let cmds: Vec<String> = (0..4).map(|k| format!("sleep {}", base + k)).collect();
 
     server.tmux(&["new-session", "-d", "-s", session, "-x", "120", "-y", "30", "zsh -f -i"]);
@@ -216,10 +293,14 @@ fn bash_hooks_report_exit_code_and_duration() {
     agent.wait_for("Hello", |ev| matches!(ev, AgentEvent::Hello { .. }));
     agent.wait_status(session, "Idle", |i| i.status == TermStatus::Idle);
 
-    server.type_line(session, "sleep 2; false");
+    // Long enough for a step in the middle, which the agent must add back (see `bash_duration`).
+    let clock = ClockWatch::start();
+    server.type_line(session, "sleep 5; false");
     let failed = agent.wait_status(session, "Exited(1)", |i| i.status == TermStatus::Exited(1));
+    let (ended, steps) = clock.stop();
     assert_eq!(failed.last_exit, Some(1));
-    assert!(matches!(failed.last_duration_secs, Some(1..=3)), "duration {:?}", failed.last_duration_secs);
+    let expected = bash_duration(5, ended, &steps);
+    assert!(failed.last_duration_secs.is_some_and(|d| expected.contains(&d)), "duration {:?}, expected {expected:?}, wall clock steps {steps:?}", failed.last_duration_secs);
 
     // The user's $? is untouched by the hooks.
     server.type_line(session, "(exit 7); echo \"code=$?\"");
@@ -229,6 +310,55 @@ fn bash_hooks_report_exit_code_and_duration() {
 
     let _ = std::fs::remove_file(format!("{}.pc", hooks.display()));
     let _ = std::fs::remove_file(hooks);
+}
+
+#[test]
+fn an_end_stamped_before_its_start_keeps_the_exit_code() {
+    if !has("tmux") {
+        eprintln!("tmux missing: test skipped");
+        return;
+    }
+    // A shell without hooks (neither bash nor zsh: the agent applies the general rules): the
+    // test writes the marks itself, as the hooks would after a wall clock step back, in the
+    // order each shell writes them (see `hooks.rs`).
+    let server = Server { socket: format!("tcanvas-marks-{}", std::process::id()) };
+    let session = "tc_marks";
+    server.tmux(&["new-session", "-d", "-s", session, "sh"]);
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let mark = |name: &str, value: u64| ["set", "-p", "-t", session, name, &value.to_string()].map(String::from);
+    let set = |cmds: &[[String; 6]]| {
+        let args: Vec<&str> = cmds.iter().enumerate().flat_map(|(i, c)| (i > 0).then_some(";").into_iter().chain(c.iter().map(String::as_str))).collect();
+        server.tmux(&args);
+    };
+
+    let agent = Agent::spawn(&server.socket);
+    agent.wait_for("Hello", |ev| matches!(ev, AgentEvent::Hello { .. }));
+    set(&[mark("@tc_started", now - 20), mark("@tc_exit", 0), mark("@tc_ended", now - 19)]);
+    agent.wait_status(session, "first command", |i| i.status == TermStatus::Idle && i.last_exit == Some(0));
+
+    // zsh: the start alone (a command running), then the exit code and an end 2 s before it.
+    set(&[mark("@tc_started", now + 2)]);
+    let started = Instant::now();
+    agent.wait_status(session, "running", |i| i.status == TermStatus::Idle && i.last_exit.is_none());
+    thread::sleep(Duration::from_secs(3).saturating_sub(started.elapsed()));
+    set(&[mark("@tc_exit", 3), mark("@tc_ended", now)]);
+    let lasted = started.elapsed().as_secs_f64();
+    let failed = agent.wait_status(session, "Exited(3)", |i| i.status == TermStatus::Exited(3));
+    // Timed by the agent from the poll that saw the start to the one that saw the end: each
+    // comes up to a poll after its mark (1 s of sleep plus the poll's own work, under 0.5 s
+    // even under load), plus 0.5 s of rounding.
+    const POLL_MAX_SECS: f64 = 1.5;
+    let d = failed.last_duration_secs.expect("timed on the agent's clock") as f64;
+    assert!((d - lasted).abs() <= POLL_MAX_SECS + 0.5, "duration {d}, lasted {lasted:.1} s");
+
+    // bash: the three marks at once. Nothing tells how long it ran: no duration.
+    set(&[mark("@tc_started", now + 10), mark("@tc_exit", 4), mark("@tc_ended", now + 8)]);
+    let failed = agent.wait_status(session, "Exited(4)", |i| i.status == TermStatus::Exited(4));
+    assert_eq!(failed.last_duration_secs, None);
+
+    // zsh again: a new start after that end is a command running, not a failure.
+    set(&[mark("@tc_started", now + 9)]);
+    agent.wait_status(session, "running again", |i| i.status == TermStatus::Idle && i.last_exit.is_none());
 }
 
 #[test]
