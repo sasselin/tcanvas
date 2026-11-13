@@ -441,6 +441,7 @@ mod tests {
             last_commit: None,
             branch_deletable: true,
             reflog_commits: false,
+            new_branch: false,
         }
     }
 
