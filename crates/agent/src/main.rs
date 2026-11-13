@@ -25,6 +25,7 @@ mod features {
     pub mod hooks;
     pub mod kill;
     pub mod recipe;
+    pub mod review;
     pub mod send;
     pub mod serve;
     pub mod status;

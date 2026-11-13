@@ -9,7 +9,10 @@ use std::path::PathBuf;
 use egui::{Key, Modifiers, Pos2, Rect, Vec2, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use protocol::{AgentEvent, Author, ChangeKind, ChangeSet, CommitInfo, Extra, FileChange, Priority, SessionInfo, Task, TaskBoard, TaskList, TaskNote, TaskStatus, TermStatus};
+use protocol::{
+    AgentCmd, AgentEvent, Author, ChangeKind, ChangeSet, CommitInfo, Extra, FileChange, Priority, ReviewFiles, ReviewState, ReviewSummary, SessionInfo, Task, TaskBoard, TaskList, TaskNote,
+    TaskStatus, TermStatus, Worktree, WorktreeList,
+};
 use tcanvas::features::agent_link::AgentMode;
 use tcanvas::features::terminal_card::Launcher;
 use tcanvas::shell::event::Event;
@@ -473,6 +476,119 @@ fn changes() {
     save(&mut h, "changes");
 }
 
+/// The shop API's repository: its main checkout, and the worktree where Claude Code rate-limited
+/// the login route (three commits, `main` moved on by one meanwhile).
+fn api_worktrees() -> WorktreeList {
+    let worktree = |path: &str, main: bool, branch: &str, head: &str, ahead, behind| Worktree {
+        path: path.into(),
+        head: Some(format!("{head:0<40}")),
+        branch: Some(branch.into()),
+        detached: false,
+        main,
+        bare: false,
+        locked: false,
+        lock_reason: None,
+        prunable: false,
+        dirty: Some(false),
+        ahead: Some(ahead),
+        behind: Some(behind),
+        merged: None,
+        last_commit: Some(unix_now() - 600),
+        branch_deletable: false,
+        reflog_commits: false,
+        status_mark: None,
+    };
+    WorktreeList {
+        key: "p-shop-api".into(),
+        repo: Some("/home/me/code/shop-api".into()),
+        default_branch: Some("main".into()),
+        worktrees: vec![
+            worktree("/home/me/code/shop-api", true, "main", "3f9c2a1", 0, 0),
+            worktree("/home/me/code/shop-api/.claude/worktrees/rate-limit", false, "task/rate-limit-q7m", "c41d8e2", 3, 1),
+        ],
+        merged_branches: vec![],
+    }
+}
+
+/// The rate limit branch against `main`, as the agent would sum it up.
+fn api_review() -> ReviewSummary {
+    let now = unix_now();
+    let file = |path: &str, kind: ChangeKind, added, removed| FileChange { path: path.into(), kind, added: Some(added), removed: Some(removed), mtime: 0, binary: false };
+    let commit = |sha: &str, summary: &str, age| CommitInfo { sha: format!("{sha:0<40}"), summary: summary.into(), author: "Claude".into(), time: now - age };
+    ReviewSummary {
+        worktree: "/home/me/code/shop-api/.claude/worktrees/rate-limit".into(),
+        branch: Some("task/rate-limit-q7m".into()),
+        head: format!("{:0<40}", "c41d8e2"),
+        base: "main".into(),
+        base_sha: format!("{:0<40}", "3f9c2a1"),
+        merge_base: Some(format!("{:0<40}", "8b17d0e")),
+        state: ReviewState::Ahead,
+        ahead: 3,
+        behind: 1,
+        commits: vec![
+            commit("c41d8e2", "test: login is limited to 10 per minute", 420),
+            commit("9e07b3f", "routes: rate limit the login route", 1_500),
+            commit("a2f61c9", "middleware: token bucket per client IP", 2_700),
+        ],
+        more_commits: 0,
+        files: ReviewFiles {
+            files: vec![
+                file("Cargo.toml", ChangeKind::Modified, 1, 0),
+                file("src/middleware/mod.rs", ChangeKind::Modified, 2, 0),
+                file("src/middleware/rate_limit.rs", ChangeKind::Added, 64, 0),
+                file("src/routes/auth.rs", ChangeKind::Modified, 6, 2),
+                file("tests/login_limit.rs", ChangeKind::Added, 38, 0),
+            ],
+            more: 0,
+            added: 111,
+            removed: 2,
+        },
+        uncommitted: ReviewFiles::default(),
+        base_kind: protocol::BaseKind::Branch,
+        several_merge_bases: false,
+        merges: vec![],
+    }
+}
+
+/// The review of a task's branch: the whole branch against `main`, file by file.
+#[test]
+#[ignore = "renders README screenshots; run ./scripts/screenshots.sh"]
+fn review() {
+    let mut h = harness("review");
+    demo_canvas(&mut h);
+    ctrl_shift(&h, Key::Num1);
+    steps(&mut h, 45);
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Worktrees(api_worktrees()))]);
+    steps(&mut h, 3);
+    h.get_by_label("Review").click();
+    steps(&mut h, 3);
+    let asked = |h: &Harness<'_, App>, review: bool| {
+        h.state()
+            .agent_sent()
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                AgentCmd::Review { id, .. } if review => Some(*id),
+                AgentCmd::ReviewDiff { id, .. } if !review => Some(*id),
+                _ => None,
+            })
+            .expect("asked")
+    };
+    let id = asked(&h, true);
+    let bases = vec!["main".to_string(), "task/refresh-tokens-h4c".into()];
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Review { id, key: "p-shop-api".into(), summary: Some(Box::new(api_review())), bases, problem: None })]);
+    steps(&mut h, 3);
+    h.get_by_label("Modified file src/routes/auth.rs").click();
+    steps(&mut h, 3);
+    let id = asked(&h, false);
+    let diff = "diff --git a/src/routes/auth.rs b/src/routes/auth.rs\nindex 51aa9c4..9e07b3f 100644\n--- a/src/routes/auth.rs\n+++ b/src/routes/auth.rs\n@@ -12,9 +12,13 @@ use crate::middleware::RateLimit;\n pub fn router(state: AppState) -> Router {\n+    let limit = RateLimit::per_minute(10);\n     Router::new()\n         .route(\"/health\", get(health))\n-        .route(\"/login\", post(login))\n+        .route(\"/login\", post(login).layer(limit))\n         .route(\"/logout\", post(logout))\n-        .with_state(state)\n+        .with_state(state.clone())\n+        .layer(TraceLayer::new_for_http())\n }\n";
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::ReviewDiff { id, key: "p-shop-api".into(), text: diff.into(), truncated: false, problem: None })]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("All commits (3)").is_some() && h.query_by_label("5 files changed").is_some(), "the branch's commits and files");
+    h.event(egui::Event::PointerGone);
+    save(&mut h, "review");
+}
+
 /// The shop API's task list: something to review, one in progress, a few to do (one waiting for
 /// another), ideas in the inbox, and what is already done.
 fn api_tasks() -> TaskList {
@@ -527,7 +643,17 @@ fn tasks() {
     ctrl_shift(&h, Key::Num1);
     steps(&mut h, 45);
     let board = TaskBoard { key: "p-shop-api".into(), list: Some(api_tasks()), read_only: false, problem: None, found: vec![] };
-    let hello = AgentEvent::Hello { version: "X.X.X".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, worktree_refresh: true, shell: None };
+    let hello = AgentEvent::Hello {
+        version: "X.X.X".into(),
+        hooks: protocol::Hooks::Installed,
+        send_text: true,
+        tasks: true,
+        task_hooks: None,
+        task_links: true,
+        worktree_refresh: true,
+        review: true,
+        shell: None,
+    };
     h.state_mut().dispatch(vec![Event::Agent(hello), Event::Agent(AgentEvent::Tasks(Box::new(board)))]);
     ctrl_shift(&h, Key::T);
     steps(&mut h, 3);
@@ -549,7 +675,17 @@ fn queue() {
     ctrl_shift(&h, Key::Num0);
     steps(&mut h, 45);
     let board = TaskBoard { key: "p-shop-api".into(), list: Some(api_tasks()), read_only: false, problem: None, found: vec![] };
-    let hello = AgentEvent::Hello { version: "X.X.X".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, worktree_refresh: true, shell: None };
+    let hello = AgentEvent::Hello {
+        version: "X.X.X".into(),
+        hooks: protocol::Hooks::Installed,
+        send_text: true,
+        tasks: true,
+        task_hooks: None,
+        task_links: true,
+        worktree_refresh: true,
+        review: true,
+        shell: None,
+    };
     h.state_mut().dispatch(vec![Event::Agent(hello), Event::Agent(AgentEvent::Tasks(Box::new(board)))]);
     // Alerts raised while the user was away (a status seen first raises none).
     for id in ["t5", "t12"] {
@@ -588,6 +724,7 @@ fn task_start() {
         task_hooks: Some(protocol::TaskHooks::Installed),
         task_links: true,
         worktree_refresh: true,
+        review: true,
         shell: None,
     };
     let main = protocol::Worktree {
@@ -607,6 +744,7 @@ fn task_start() {
         last_commit: Some(unix_now() - 3_600),
         branch_deletable: false,
         reflog_commits: false,
+        status_mark: None,
     };
     let list =
         protocol::WorktreeList { key: "p-shop-api".into(), repo: Some("/home/me/code/shop-api".into()), default_branch: Some("origin/main".into()), worktrees: vec![main], merged_branches: vec![] };
@@ -842,6 +980,7 @@ fn worktrees_canvas(h: &mut Harness<'_, App>, cleanup: bool) {
         last_commit: Some(now - age),
         branch_deletable: true,
         reflog_commits: false,
+        status_mark: None,
     };
     let mut list = protocol::WorktreeList {
         key: "p-shop-api".into(),

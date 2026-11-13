@@ -456,6 +456,13 @@ fn worktree_ui(ui: &mut Ui, world: &World, list: &WorktreeList, wt: &Worktree, e
     {
         ui.label(RichText::new(format!("↑{ahead} ↓{behind}")).color(theme::TEXT_DIM)).on_hover_text((t().ahead_behind_hint)(base));
     }
+    // Commits of its own: the Changes panel reviews them (that slice handles the event).
+    if wt.ahead.is_some_and(|a| a > 0) && !wt.prunable {
+        let button = ui.add_enabled(!world.review_unsupported, egui::Button::new(t().review_button).small());
+        if button.on_hover_text(t().review_button_hint).on_disabled_hover_text(t().review_agent_too_old).clicked() {
+            events.push(Event::ReviewWorktree { project: list.key.clone(), path: wt.path.clone() });
+        }
+    }
     if wt.merged == Some(true) {
         ui.label(RichText::new(t().merged).color(MERGED)).on_hover_text((t().merged_hint)(base));
     }
@@ -505,6 +512,7 @@ mod tests {
             last_commit: Some(1),
             branch_deletable: false,
             reflog_commits: false,
+            status_mark: None,
         }
     }
 
@@ -769,7 +777,17 @@ mod tests {
         assert!(out.is_empty() && s.create.is_some(), "{out:?}");
         // A new agent's hello does the same.
         let id = send_creation(&mut s, &w, "r2", std::time::Instant::now());
-        let hello = AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, worktree_refresh: true, shell: None };
+        let hello = AgentEvent::Hello {
+            version: "1".into(),
+            hooks: protocol::Hooks::Installed,
+            send_text: true,
+            tasks: true,
+            task_hooks: None,
+            task_links: true,
+            worktree_refresh: true,
+            review: true,
+            shell: None,
+        };
         s.handle(&Event::Agent(hello), &mut w, &mut vec![]);
         assert!(s.create.as_ref().unwrap().lost() && s.creations_waiting() == 0);
         let mut out = vec![];

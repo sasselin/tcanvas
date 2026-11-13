@@ -35,6 +35,15 @@ pub fn go_to(entry: &QueueEntry) -> Option<Event> {
     }
 }
 
+/// A review row's "Review" action: its task's worktree, in the Changes panel (`None` for other
+/// rows, or a task without a worktree).
+pub fn review_of(world: &World, entry: &QueueEntry) -> Option<Event> {
+    let task = entry.task.as_ref().filter(|_| entry.kind == QueueKind::Review)?;
+    let found = world.task_lists.get(&task.project)?.tasks.iter().find(|t| t.id == task.id)?;
+    let path = found.review_worktree()?;
+    Some(Event::ReviewWorktree { project: task.project.clone(), path: path.to_string() })
+}
+
 /// The row's one line: the card's title (and the task it works on), or the task's reference,
 /// priority mark and title; long titles elided.
 pub fn label(world: &World, entry: &QueueEntry) -> String {
@@ -223,6 +232,12 @@ impl Queue {
                         {
                             chosen = Some(Event::FlyTo(card.clone()));
                         }
+                        if let Some(review) = review_of(world, row) {
+                            let button = ui.add_enabled(!world.review_unsupported, Button::new(t().review_button).small());
+                            if button.on_hover_text(t().review_button_hint).on_disabled_hover_text(t().review_agent_too_old).clicked() {
+                                chosen = Some(review);
+                            }
+                        }
                         if let Some(detail) = &row.detail {
                             ui.label(RichText::new(elide_middle(detail, 60)).small().color(theme::TEXT_DIM)).on_hover_text(detail);
                         }
@@ -278,6 +293,24 @@ mod tests {
             detail: None,
             since: 0,
         }
+    }
+
+    #[test]
+    fn a_task_in_review_offers_to_review_its_worktree() {
+        let mut w = world();
+        let mut t: protocol::Task = serde_json::from_value(serde_json::json!({
+            "id": "t1", "reference": "k3f", "title": "Invoice PDF", "status": "review", "created": 0, "updated": 0,
+            "worktree": "/home/me/shop/.claude/worktrees/invoice"
+        }))
+        .unwrap();
+        w.task_lists.insert("p".into(), protocol::TaskList { tasks: vec![t.clone()], ..protocol::TaskList::empty("/home/me/shop") });
+        let review = review_of(&w, &task_row(QueueKind::Review, None));
+        assert!(matches!(review, Some(Event::ReviewWorktree { project, path }) if project == "p" && path == "/home/me/shop/.claude/worktrees/invoice"));
+        assert!(review_of(&w, &task_row(QueueKind::Ready, None)).is_none(), "only review rows");
+        assert!(review_of(&w, &card_row("a")).is_none());
+        t.worktree = None;
+        w.task_lists.insert("p".into(), protocol::TaskList { tasks: vec![t], ..protocol::TaskList::empty("/home/me/shop") });
+        assert!(review_of(&w, &task_row(QueueKind::Review, None)).is_none(), "no worktree, nothing to review");
     }
 
     #[test]

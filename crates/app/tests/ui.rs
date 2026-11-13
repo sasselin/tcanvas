@@ -481,7 +481,8 @@ fn missing_tmux_is_shown_in_the_status_bar() {
 
 #[test]
 fn missing_shell_hooks_can_be_installed_from_the_status_bar() {
-    let hello = |hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true, task_hooks: None, task_links: true, worktree_refresh: true, shell: None });
+    let hello =
+        |hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true, task_hooks: None, task_links: true, worktree_refresh: true, review: true, shell: None });
     let installs = |h: &Harness<'_, App>| h.state().agent_sent().iter().filter(|c| **c == protocol::AgentCmd::InstallHooks).count();
     for (lang, label, button) in [(Lang::Fr, "⚠ hooks", "Installer"), (Lang::En, "⚠ hooks", "Install")] {
         let dir = temp_dir("hooks");
@@ -2179,6 +2180,7 @@ fn worktree(path: &str, main: bool, branch: &str) -> protocol::Worktree {
         last_commit: Some(tcanvas::shell::world::unix_now() - 3600),
         branch_deletable: false,
         reflog_commits: false,
+        status_mark: None,
     }
 }
 
@@ -2819,6 +2821,7 @@ fn group_with_messages(h: &mut Harness<'_, App>, messages: &[(&str, &str, bool)]
             task_hooks: None,
             task_links: true,
             worktree_refresh: true,
+            review: true,
             shell: None,
         }),
         Event::Agent(AgentEvent::Session(SessionInfo {
@@ -3740,6 +3743,7 @@ fn agent_hello(h: &mut Harness<'_, App>) {
         task_hooks: None,
         task_links: true,
         worktree_refresh: true,
+        review: true,
         shell: None,
     });
     h.state_mut().dispatch(vec![hello]);
@@ -4140,6 +4144,7 @@ fn the_tasks_panel_in_english() {
         task_hooks: None,
         task_links: true,
         worktree_refresh: true,
+        review: true,
         shell: None,
     });
     h.state_mut().dispatch(vec![hello]);
@@ -4151,7 +4156,17 @@ fn the_tasks_panel_in_english() {
 fn coding_agents_get_the_tasks_only_once_enabled_from_the_panel() {
     let sets = |h: &Harness<'_, App>| h.state().agent_sent().iter().filter_map(|c| if let protocol::AgentCmd::SetTaskHooks { enabled } = c { Some(*enabled) } else { None }).collect::<Vec<_>>();
     let hello = |task_hooks| {
-        Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks, task_links: true, worktree_refresh: true, shell: None })
+        Event::Agent(AgentEvent::Hello {
+            version: "1".into(),
+            hooks: protocol::Hooks::Installed,
+            send_text: true,
+            tasks: true,
+            task_hooks,
+            task_links: true,
+            worktree_refresh: true,
+            review: true,
+            shell: None,
+        })
     };
     for (lang, missing, on, enable, disable) in [
         (Lang::Fr, "Les agents de code ne voient pas encore ces tâches.", "Les agents de code voient ces tâches.", "Activer", "Désactiver"),
@@ -4554,6 +4569,7 @@ fn starting_tasks_needs_bash_or_zsh_and_a_safe_command() {
         task_hooks: Some(protocol::TaskHooks::Installed),
         task_links: true,
         worktree_refresh: true,
+        review: true,
         shell: Some(protocol::ShellKind::Fish),
     });
     h.state_mut().dispatch(vec![fish, task_board("p-shop", shop_tasks())]);
@@ -4978,6 +4994,367 @@ fn an_interrupted_recipe_in_english() {
     for label in [
         "Recipe interrupted",
         "The agent stopped before it was done: which copies and links were made is not known, and nothing ran in the new terminal (it is a plain shell; a task's card was not opened, Resume starts it).",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+}
+
+// --- Review mode of the Changes panel --------------------------------------------------------
+
+const INVOICES: &str = "/home/me/shop/.claude/worktrees/invoices";
+
+/// `feat/invoices` two commits ahead of `main`, which moved on by one: three files, one renamed,
+/// one binary.
+fn review_summary(state: protocol::ReviewState) -> protocol::ReviewSummary {
+    use protocol::{ChangeKind, CommitInfo, FileChange, ReviewFiles, ReviewState};
+    let file = |path: &str, kind, added, removed| FileChange { path: path.into(), kind, added, removed, mtime: 0, binary: added.is_none() };
+    let now = tcanvas::shell::world::unix_now();
+    let ahead = state == ReviewState::Ahead;
+    protocol::ReviewSummary {
+        worktree: INVOICES.into(),
+        branch: Some("feat/invoices".into()),
+        head: "2".repeat(40),
+        base: "main".into(),
+        base_sha: "b".repeat(40),
+        merge_base: (state != ReviewState::Unrelated).then(|| "0".repeat(40)),
+        state,
+        ahead: if ahead { 2 } else { 0 },
+        behind: 1,
+        commits: if ahead {
+            vec![
+                CommitInfo { sha: "2".repeat(40), summary: "fix: rounding".into(), author: "Claude".into(), time: now - 120 },
+                CommitInfo { sha: "1".repeat(40), summary: "feat: totals with taxes".into(), author: "Claude".into(), time: now - 900 },
+            ]
+        } else {
+            vec![]
+        },
+        more_commits: 0,
+        files: if ahead {
+            ReviewFiles {
+                files: vec![
+                    file("src/pdf.rs", ChangeKind::Modified, Some(12), Some(3)),
+                    file("docs/new name.md", ChangeKind::Renamed("docs/old.md".into()), Some(2), Some(0)),
+                    file("assets/logo.png", ChangeKind::Added, None, None),
+                ],
+                more: 0,
+                added: 14,
+                removed: 3,
+            }
+        } else {
+            ReviewFiles::default()
+        },
+        uncommitted: ReviewFiles::default(),
+        base_kind: protocol::BaseKind::Branch,
+        several_merge_bases: false,
+        merges: vec![],
+    }
+}
+
+fn review_cmds(h: &Harness<'_, App>) -> Vec<protocol::AgentCmd> {
+    use protocol::AgentCmd;
+    h.state().agent_sent().iter().filter(|c| matches!(c, AgentCmd::Review { .. } | AgentCmd::ReviewFiles { .. } | AgentCmd::ReviewDiff { .. })).cloned().collect()
+}
+
+/// The last summary asked: (id, worktree, base).
+fn last_review(h: &Harness<'_, App>) -> (u64, String, Option<String>) {
+    review_cmds(h)
+        .into_iter()
+        .rev()
+        .find_map(|c| match c {
+            protocol::AgentCmd::Review { id, worktree, base, .. } => Some((id, worktree, base)),
+            _ => None,
+        })
+        .expect("a review asked")
+}
+
+fn last_review_diff(h: &Harness<'_, App>) -> (u64, protocol::ReviewScope, Option<String>, Option<String>) {
+    review_cmds(h)
+        .into_iter()
+        .rev()
+        .find_map(|c| match c {
+            protocol::AgentCmd::ReviewDiff { id, scope, path, old_path, .. } => Some((id, scope, path, old_path)),
+            _ => None,
+        })
+        .expect("a diff asked")
+}
+
+fn answer_review(h: &mut Harness<'_, App>, key: &str, summary: Option<protocol::ReviewSummary>, problem: Option<protocol::Problem>) {
+    let (id, ..) = last_review(h);
+    let ev = AgentEvent::Review { id, key: key.into(), summary: summary.map(Box::new), bases: vec!["main".into(), "develop".into()], problem };
+    h.state_mut().dispatch(vec![Event::Agent(ev)]);
+    steps(h, 3);
+}
+
+/// The group's own folder, as the agent reports it.
+fn folder_changes(key: &str, root: &str, branch: &str) -> Event {
+    Event::Agent(AgentEvent::Changes(protocol::ChangeSet {
+        key: key.into(),
+        root: Some(root.into()),
+        git: true,
+        branch: Some(branch.into()),
+        detached: false,
+        error: None,
+        files: vec![],
+        truncated: false,
+        commits: vec![],
+    }))
+}
+
+#[test]
+fn a_worktree_from_the_strip_is_reviewed_whole_or_commit_by_commit() {
+    use protocol::ReviewScope;
+    let dir = temp_dir("review-strip");
+    let mut h = harness(&dir);
+    shop_group(&mut h);
+    h.state_mut().dispatch(vec![shop_worktrees("p-shop"), folder_changes("p-shop", "/home/me/shop", "main")]);
+    steps(&mut h, 3);
+    // Only the worktree with commits of its own offers a review.
+    assert_eq!(h.query_all_by_label("Relire").count(), 1);
+    h.get_by_label("Relire").click();
+    steps(&mut h, 3);
+    assert!(h.state().world.changes_open, "the panel opens");
+    assert_eq!(last_review(&h), (last_review(&h).0, INVOICES.to_string(), None));
+    assert!(h.query_by_label("Chargement de la revue…").is_some());
+    assert!(h.query_by_label("📁 worktree invoices").is_some(), "the reviewed worktree, not the group's folder");
+
+    answer_review(&mut h, "p-shop", Some(review_summary(protocol::ReviewState::Ahead)), None);
+    for label in ["par rapport à main ▾", "↑2 ↓1", "⚠ main a avancé d'un commit depuis le départ de cette branche", "Tous les commits (2)", "3 fichiers modifiés", "+14", "−3"] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    for file in ["src/pdf.rs", "docs/new name.md", "assets/logo.png"] {
+        assert!(h.query_by_label(&format!("Fichier modifié {file}")).is_some(), "{file} missing");
+    }
+    assert!(h.query_by_label("Suivre").is_none(), "Follow belongs to the working changes");
+    // The first file's diff over the whole branch.
+    let branch = ReviewScope::Branch { merge_base: "0".repeat(40), head: "2".repeat(40) };
+    let (id, scope, path, _) = last_review_diff(&h);
+    assert_eq!((scope, path.as_deref()), (branch.clone(), Some("src/pdf.rs")));
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::ReviewDiff { id, key: "p-shop".into(), text: "@@ -1 +1 @@\n-old total\n+new total\n".into(), truncated: false, problem: None })]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("+new total").is_some() && h.query_by_label("-old total").is_some());
+
+    // A renamed file: its diff follows the rename.
+    h.get_by_label("Fichier modifié docs/new name.md").click();
+    steps(&mut h, 3);
+    let (_, scope, path, old) = last_review_diff(&h);
+    assert_eq!((scope, path.as_deref(), old.as_deref()), (branch.clone(), Some("docs/new name.md"), Some("docs/old.md")));
+
+    // One commit: its files are asked, the whole commit shows meanwhile.
+    h.get_by_label("Commit fix: rounding").click();
+    steps(&mut h, 3);
+    let commit = ReviewScope::Commit { sha: "2".repeat(40) };
+    let files_id = review_cmds(&h)
+        .into_iter()
+        .rev()
+        .find_map(|c| match c {
+            protocol::AgentCmd::ReviewFiles { id, scope, .. } if scope == commit => Some(id),
+            _ => None,
+        })
+        .expect("the commit's files asked");
+    let (_, scope, path, _) = last_review_diff(&h);
+    assert_eq!((scope, path), (commit.clone(), None));
+    let one = protocol::ReviewFiles {
+        files: vec![protocol::FileChange { path: "src/pdf.rs".into(), kind: protocol::ChangeKind::Modified, added: Some(1), removed: Some(1), mtime: 0, binary: false }],
+        more: 0,
+        added: 1,
+        removed: 1,
+    };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::ReviewFiles { id: files_id, key: "p-shop".into(), files: one, problem: None })]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("2222222 : 1 fichier modifié").is_some());
+    assert!(h.query_by_label("Fichier modifié docs/new name.md").is_none(), "narrowed to the commit");
+    h.get_by_label("Fichier modifié src/pdf.rs").click();
+    steps(&mut h, 3);
+    assert_eq!(last_review_diff(&h).1, commit);
+    assert_eq!(last_review_diff(&h).2.as_deref(), Some("src/pdf.rs"));
+    // Back to every commit.
+    h.get_by_label("Tous les commits (2)").click();
+    steps(&mut h, 3);
+    assert_eq!(last_review_diff(&h).1, branch);
+    assert!(h.query_by_label("3 fichiers modifiés").is_some());
+
+    // Another base.
+    h.get_by_label("par rapport à main ▾").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("main (par défaut)").is_some());
+    h.get_by_label("develop").click();
+    steps(&mut h, 3);
+    assert_eq!(last_review(&h).2.as_deref(), Some("develop"));
+    answer_review(&mut h, "p-shop", None, Some(protocol::Problem::ReviewBaseNotFound { base: "develop".into() }));
+    assert!(h.query_by_label("⚠ base introuvable : develop").is_some());
+
+    // Back to the group's working changes, then to the review again (asked afresh).
+    h.get_by_label("Changements en cours").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Suivre").is_some() && h.query_by_label("📁 worktree invoices").is_none());
+    let asked = review_cmds(&h).len();
+    h.get_by_label("Revue de branche").click();
+    steps(&mut h, 3);
+    assert_eq!(last_review(&h).1, INVOICES, "the same worktree");
+    assert!(review_cmds(&h).len() > asked);
+}
+
+#[test]
+fn the_mode_switch_reviews_the_group_folder_and_says_when_there_is_nothing_to_review() {
+    let dir = temp_dir("review-switch");
+    let mut h = harness(&dir);
+    let id = add_project(&mut h, "api", Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 500.0)));
+    h.state_mut().world.projects[0].cwd = Some("/home/me/api".into());
+    h.state_mut().world.changes_open = true;
+    let list = protocol::WorktreeList {
+        key: id.clone(),
+        repo: Some("/home/me/api".into()),
+        default_branch: Some("main".into()),
+        worktrees: vec![worktree("/home/me/api", true, "main")],
+        merged_branches: vec![],
+    };
+    h.state_mut().dispatch(vec![Event::EnterSpace(Some(id.clone())), Event::Agent(AgentEvent::Worktrees(list)), folder_changes(&id, "/home/me/api", "main")]);
+    steps(&mut h, 3);
+    // On the base branch: nothing to review there.
+    h.get_by_label("Revue de branche").click();
+    steps(&mut h, 3);
+    assert!(review_cmds(&h).is_empty(), "disabled on the base branch");
+
+    // Another branch checked out in the folder: the switch reviews it.
+    h.state_mut().dispatch(vec![folder_changes(&id, "/home/me/api", "feat")]);
+    steps(&mut h, 3);
+    h.get_by_label("Revue de branche").click();
+    steps(&mut h, 3);
+    assert_eq!(last_review(&h).1, "/home/me/api");
+    assert!(h.query_by_label("📁 /home/me/api").is_some(), "the group's own folder");
+    let mut s = review_summary(protocol::ReviewState::UpToDate);
+    s.branch = Some("feat".into());
+    s.uncommitted = protocol::ReviewFiles {
+        files: vec![protocol::FileChange { path: "notes.txt".into(), kind: protocol::ChangeKind::Untracked, added: Some(2), removed: Some(0), mtime: 0, binary: false }],
+        more: 0,
+        added: 2,
+        removed: 0,
+    };
+    answer_review(&mut h, &id, Some(s), None);
+    assert!(h.query_by_label("Rien à relire : feat n'a aucun commit que main n'a pas.").is_some());
+    // What is not committed: apart, collapsed until opened.
+    assert!(h.query_by_label("Fichier modifié notes.txt").is_none());
+    h.get_by_label("Changements non commités (1)").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Fichier modifié notes.txt").is_some());
+    let (_, scope, path, _) = last_review_diff(&h);
+    assert_eq!((scope, path.as_deref()), (protocol::ReviewScope::Uncommitted, Some("notes.txt")));
+    // Its own folder: the working changes are one click away.
+    h.get_by_label("Ouvrir dans Changements en cours").click();
+    steps(&mut h, 3);
+    assert!(!h.state().changes.reviewing(&id) && h.query_by_label("Suivre").is_some());
+
+    // Unrelated histories.
+    h.get_by_label("Revue de branche").click();
+    steps(&mut h, 3);
+    answer_review(&mut h, &id, Some(review_summary(protocol::ReviewState::Unrelated)), None);
+    assert!(h.query_by_label("Aucun historique commun avec main : choisissez une autre base.").is_some());
+    // A problem from the agent, translated.
+    h.state_mut().dispatch(vec![folder_changes(&id, "/home/me/api", "feat")]);
+    h.get_by_label("par rapport à main ▾").click();
+    steps(&mut h, 2);
+    h.get_by_label("develop").click();
+    steps(&mut h, 3);
+    answer_review(&mut h, &id, None, Some(protocol::Problem::ReviewNoCommits));
+    assert!(h.query_by_label("⚠ Cette branche n'a encore aucun commit.").is_some());
+}
+
+#[test]
+fn a_task_in_review_opens_its_review_from_the_tasks_panel_and_the_queue() {
+    let dir = temp_dir("review-task");
+    let mut h = harness(&dir);
+    let shop = tasks_group(&mut h);
+    let mut review = agent_task("rl", "q7m", "Rate limit", protocol::TaskStatus::Review);
+    review.worktree = Some(INVOICES.into());
+    review.branch = Some("task/rate-limit-q7m".into());
+    let mut todo = agent_task("pdf", "k3f", "Invoice PDF", protocol::TaskStatus::Todo);
+    todo.worktree = Some("/home/me/shop/.claude/worktrees/pdf".into());
+    h.state_mut().dispatch(vec![task_board(&shop, vec![review, todo]), Event::ToggleTasks]);
+    steps(&mut h, 3);
+    assert_eq!(h.query_all_by_label("Relire").count(), 1, "only the task in review");
+    h.get_by_label("Relire").click();
+    steps(&mut h, 3);
+    assert!(h.state().world.changes_open && h.state().changes.reviewing(&shop));
+    assert_eq!(last_review(&h).1, INVOICES);
+
+    // From the queue, in the "All" view, the panel closed.
+    h.state_mut().dispatch(vec![Event::ToggleChanges, Event::ToggleTasks, Event::EnterSpace(None)]);
+    steps(&mut h, 3);
+    let asked = review_cmds(&h).len();
+    ctrl_shift(&h, Key::Q);
+    steps(&mut h, 2);
+    queue_item(&h, "Relire").click();
+    steps(&mut h, 3);
+    assert!(!h.state().queue_open());
+    assert!(h.state().world.changes_open && review_cmds(&h).len() > asked);
+    assert_eq!(last_review(&h).1, INVOICES);
+    assert!(h.query_by_label("📁 worktree invoices").is_some(), "the panel shows the task's group");
+}
+
+#[test]
+fn the_review_in_english() {
+    let dir = temp_dir("review-en");
+    let mut h = harness_in(&dir, Lang::En);
+    shop_group(&mut h);
+    h.state_mut().dispatch(vec![shop_worktrees("p-shop"), folder_changes("p-shop", "/home/me/shop", "main")]);
+    steps(&mut h, 3);
+    h.get_by_label("Review").click();
+    steps(&mut h, 3);
+    answer_review(&mut h, "p-shop", Some(review_summary(protocol::ReviewState::Ahead)), None);
+    for label in [
+        "Working changes",
+        "Review branch",
+        "📁 worktree invoices",
+        "against main ▾",
+        "⚠ main moved ahead by 1 commit since this branch started",
+        "All commits (2)",
+        "3 files changed",
+        "Modified file src/pdf.rs",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    answer_review(&mut h, "p-shop", Some(review_summary(protocol::ReviewState::UpToDate)), None);
+    assert!(h.query_by_label("Nothing to review: feat/invoices has no commit that main does not have.").is_some());
+}
+
+#[test]
+fn an_older_agent_disables_review_and_merges_tags_and_crossed_histories_are_said() {
+    let dir = temp_dir("review-older");
+    let mut h = harness(&dir);
+    shop_group(&mut h);
+    let hello = |review| {
+        Event::Agent(AgentEvent::Hello {
+            version: "1".into(),
+            hooks: protocol::Hooks::Installed,
+            send_text: true,
+            tasks: true,
+            task_hooks: None,
+            task_links: true,
+            worktree_refresh: true,
+            review,
+            shell: None,
+        })
+    };
+    h.state_mut().dispatch(vec![hello(false), shop_worktrees("p-shop"), folder_changes("p-shop", "/home/me/shop", "main")]);
+    steps(&mut h, 3);
+    h.get_by_label("Relire").click();
+    steps(&mut h, 3);
+    assert!(review_cmds(&h).is_empty() && !h.state().world.changes_open, "an older agent cannot review: disabled");
+
+    h.state_mut().dispatch(vec![hello(true), shop_worktrees("p-shop")]);
+    steps(&mut h, 3);
+    h.get_by_label("Relire").click();
+    steps(&mut h, 3);
+    let mut s = review_summary(protocol::ReviewState::Ahead);
+    s.merges = vec!["2".repeat(40)];
+    s.several_merge_bases = true;
+    s.base_kind = protocol::BaseKind::Other;
+    answer_review(&mut h, "p-shop", Some(s), None);
+    for label in [
+        "Commit [fusion] fix: rounding",
+        "Commit feat: totals with taxes",
+        "(pas une branche : une étiquette ou un commit)",
+        "⚠ Cette branche et main se sont fusionnées l'une l'autre : les fichiers peuvent inclure des changements que main a déjà.",
     ] {
         assert!(h.query_by_label(label).is_some(), "{label} missing");
     }

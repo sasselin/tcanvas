@@ -85,6 +85,11 @@ pub fn parse_porcelain(out: &str) -> Vec<Worktree> {
 /// returned as is.
 pub fn unquote_c(s: &str) -> String {
     let Some(inner) = s.strip_prefix('"').and_then(|s| s.strip_suffix('"')) else { return s.to_string() };
+    String::from_utf8_lossy(&unquote_bytes(inner)).into_owned()
+}
+
+/// The bytes a C-quoted text stands for (its quotes already removed): `caf\351` -> `caf` 0xE9.
+pub fn unquote_bytes(inner: &str) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(inner.len());
     let mut it = inner.bytes().peekable();
     while let Some(b) = it.next() {
@@ -117,7 +122,7 @@ pub fn unquote_c(s: &str) -> String {
             None => bytes.push(b'\\'),
         }
     }
-    String::from_utf8_lossy(&bytes).into_owned()
+    bytes
 }
 
 fn entry(path: &str, main: bool) -> Worktree {
@@ -138,6 +143,7 @@ fn entry(path: &str, main: bool) -> Worktree {
         last_commit: None,
         branch_deletable: false,
         reflog_commits: false,
+        status_mark: None,
     }
 }
 
@@ -183,8 +189,11 @@ pub fn parse_default_branch(out: &str, main_checkout: Option<(&str, &str)>) -> O
     named.or_else(|| main_checkout.filter(|(_, sha)| is_sha(sha)).map(|(branch, sha)| Base { name: branch.to_string(), sha: sha.to_string() }))
 }
 
+/// The `git` arguments whose output `parse_default_branch` reads.
+pub const DEFAULT_BRANCH_ARGS: [&str; 7] = ["for-each-ref", "--format=%(refname)%09%(objectname)%09%(symref)", ORIGIN_HEAD, ORIGIN_MAIN, ORIGIN_MASTER, MAIN, MASTER];
+
 pub fn default_branch(dir: &Path, main_checkout: Option<(&str, &str)>) -> Option<Base> {
-    let out = git_ok(dir, &["for-each-ref", "--format=%(refname)%09%(objectname)%09%(symref)", ORIGIN_HEAD, ORIGIN_MAIN, ORIGIN_MASTER, MAIN, MASTER]).unwrap_or_default();
+    let out = git_ok(dir, &DEFAULT_BRANCH_ARGS).unwrap_or_default();
     parse_default_branch(&out, main_checkout)
 }
 
@@ -235,6 +244,8 @@ struct Dirty {
     at: Instant,
     head: Option<String>,
     dirty: Option<bool>,
+    /// A fingerprint of what is not committed (`Worktree::status_mark`).
+    mark: Option<u64>,
 }
 
 /// One generation of cached results.
@@ -390,8 +401,8 @@ impl Cache {
         Some(clean)
     }
 
-    fn record_dirty(&mut self, path: &str, head: Option<String>, dirty: Option<bool>) {
-        self.current.dirty.insert(path.to_string(), Dirty { at: Instant::now(), head, dirty });
+    fn record_dirty(&mut self, path: &str, head: Option<String>, dirty: Option<bool>, mark: Option<u64>) {
+        self.current.dirty.insert(path.to_string(), Dirty { at: Instant::now(), head, dirty, mark });
     }
 
     fn check_of(&mut self, wt: &Worktree) -> Check {
@@ -401,8 +412,8 @@ impl Cache {
         }
     }
 
-    fn dirty_of(&mut self, path: &str) -> Option<bool> {
-        lookup(&mut self.current.dirty, &mut self.previous.dirty, &path.to_string()).and_then(|d| d.dirty)
+    fn dirty_of(&mut self, path: &str) -> (Option<bool>, Option<u64>) {
+        lookup(&mut self.current.dirty, &mut self.previous.dirty, &path.to_string()).map_or((None, None), |d| (d.dirty, d.mark))
     }
 }
 
@@ -420,6 +431,8 @@ pub struct Input {
     pub top: Option<String>,
     /// The change scan's status covered that whole worktree: it has changes, or not.
     pub dirty: Option<bool>,
+    /// With `dirty`: a fingerprint of those changes (`Worktree::status_mark`).
+    pub mark: Option<u64>,
 }
 
 /// One repository, scanned once per pass.
@@ -481,8 +494,11 @@ pub fn parse_refs(out: &str) -> Refs {
     refs
 }
 
+/// The `git` arguments whose output `parse_refs` reads.
+pub const REFS_ARGS: [&str; 4] = ["for-each-ref", "--format=%(refname)%09%(objectname)%09%(upstream)", "refs/heads/", "refs/remotes/"];
+
 pub fn read_refs(top: &Path) -> Refs {
-    parse_refs(&git_ok(top, &["for-each-ref", "--format=%(refname)%09%(objectname)%09%(upstream)", "refs/heads/", "refs/remotes/"]).unwrap_or_default())
+    parse_refs(&git_ok(top, &REFS_ARGS).unwrap_or_default())
 }
 
 /// What `git branch -d` checks a branch against: its upstream when that one exists, else the
@@ -626,7 +642,7 @@ pub fn scan_all(inputs: &[Input], cache: &mut Cache) -> Vec<WorktreeList> {
         if let (Some(top), Some(dirty), Some(r)) = (&input.top, input.dirty, repo)
             && let Some(wt) = repos[*r].worktrees.iter().find(|w| &w.path == top)
         {
-            cache.record_dirty(top, wt.head.clone(), Some(dirty));
+            cache.record_dirty(top, wt.head.clone(), Some(dirty), input.mark);
         }
     }
     let mut candidates: Vec<(String, Option<String>)> = Vec::new();
@@ -638,11 +654,12 @@ pub fn scan_all(inputs: &[Input], cache: &mut Cache) -> Vec<WorktreeList> {
     let checks: Vec<Check> = candidates.iter().map(|(path, head)| cache.check_of(&entry_with(path, head))).collect();
     for i in due(&checks, DIRTY_PER_PASS) {
         let (path, head) = &candidates[i];
-        let dirty = git_ok(Path::new(path), &["status", "--porcelain", "-z", "--untracked-files=normal"]).map(|out| !out.is_empty());
-        cache.record_dirty(path, head.clone(), dirty);
+        let status = git_ok(Path::new(path), &["status", "--porcelain", "-z", "--untracked-files=normal"]);
+        let mark = status.as_deref().map(|out| status_mark(Path::new(path), out));
+        cache.record_dirty(path, head.clone(), status.map(|out| !out.is_empty()), mark);
     }
     for wt in repos.iter_mut().flat_map(|r| &mut r.worktrees) {
-        wt.dirty = if checkable(wt) { cache.dirty_of(&wt.path) } else { None };
+        (wt.dirty, wt.status_mark) = if checkable(wt) { cache.dirty_of(&wt.path) } else { (None, None) };
     }
 
     inputs
@@ -659,6 +676,22 @@ pub fn scan_all(inputs: &[Input], cache: &mut Cache) -> Vec<WorktreeList> {
             list
         })
         .collect()
+}
+
+/// Files whose times count in a status mark, at most.
+const MARK_FILES: usize = 500;
+
+/// A fingerprint of `git status --porcelain -z` in `top` and of the listed files' modification
+/// times (a file modified again keeps its status line): no git call of its own.
+pub fn status_mark(top: &Path, status: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    h.write(status.as_bytes());
+    for entry in status.split('\0').filter(|e| e.len() > 3).take(MARK_FILES) {
+        let modified = std::fs::symlink_metadata(top.join(&entry[3..])).and_then(|m| m.modified()).ok();
+        h.write_u128(modified.and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos()));
+    }
+    h.finish()
 }
 
 fn entry_with(path: &str, head: &Option<String>) -> Worktree {
@@ -804,7 +837,7 @@ mod tests {
 
     #[test]
     fn folders_outside_git_have_no_worktrees() {
-        let lists = scan_all(&[Input { key: "k".into(), top: None, dirty: None }], &mut Cache::default());
+        let lists = scan_all(&[Input { key: "k".into(), top: None, dirty: None, mark: None }], &mut Cache::default());
         assert_eq!((lists[0].key.as_str(), lists[0].repo.as_deref(), lists[0].worktrees.len()), ("k", None, 0));
     }
 
