@@ -246,6 +246,8 @@ mod tests {
             last_prompt: None,
             agent_prompt_mark: None,
             agent_turn_mark: None,
+            agent_prompt_head: None,
+            agent_turn_head: None,
         });
         a.name = Some("server".into());
         a.project = Some("api".into());

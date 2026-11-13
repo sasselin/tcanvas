@@ -34,7 +34,9 @@
 //!
 //! The subscriptions run on their own thread. Every `SCAN_EVERY` each one costs one `stat` and a
 //! read of the file's first bytes (its `revision`); the file is parsed only when that changed. The
-//! key is resolved again (git) every `RESOLVE_EVERY`, and before every change. When a folder's key
+//! key is resolved again (one `git worktree list`) every `RESOLVE_EVERY`, at most
+//! `RESOLVES_PER_SCAN` subscriptions per scan, and before every change. The repository's id
+//! (which walks its history) is computed once per list key and shared by every folder of it. When a folder's key
 //! changes, or on subscribing, the lists that may have been its own are looked for (its previous
 //! key, the folder's own key, a list of the same repository whose folder is gone) and named in the
 //! board (`TaskBoard::found`), so the app can bring their tasks over (`AgentCmd::AdoptTasks`).
@@ -62,6 +64,10 @@ pub const TASKS_DIR: &str = ".local/share/tcanvas/tasks";
 const SCAN_EVERY: Duration = Duration::from_secs(2);
 /// How often a subscription's key is resolved again (a git call) between changes.
 const RESOLVE_EVERY: Duration = Duration::from_secs(30);
+/// Subscriptions resolved again per scan at most (the most overdue first): with many groups the
+/// git calls spread over several scans, and the commands (saves, automatic status changes) are
+/// served in between instead of waiting for all of them.
+const RESOLVES_PER_SCAN: usize = 2;
 /// A removed task stays restorable this long (a week), then the next write purges it.
 pub const TRASH_SECS: u64 = 7 * 86_400;
 /// References of purged tasks remembered, so they are not given again: past that many, the
@@ -137,13 +143,6 @@ fn repo_id(key: &Path) -> Option<String> {
     let mut roots: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(str::to_string).filter(|l| !l.is_empty()).collect();
     roots.sort();
     roots.into_iter().next()
-}
-
-/// Resolves a watched folder: its list's key, and the repository's id.
-pub fn resolve_folder(path: &str) -> Result<Resolved, Problem> {
-    let mut r = resolve_key(path)?;
-    r.repo_id = repo_id_of(&r);
-    Ok(r)
 }
 
 /// Resolves a watched folder's key only (`repo_id` left `None`): what a read needs. The
@@ -993,6 +992,30 @@ pub enum Cmd {
     Adopt { id: u64, key: String, from: String, merge: bool, list: Option<String> },
 }
 
+/// Repository ids by list key: one history walk per repository, not one per folder or per
+/// resolution.
+#[derive(Default)]
+struct RepoIds(HashMap<String, String>);
+
+impl RepoIds {
+    /// The folder's key, resolved now, with its repository's id (walked the first time only; a
+    /// repository without a commit yet is asked again, which costs no walk).
+    fn resolve(&mut self, path: &str) -> Result<Resolved, Problem> {
+        let mut r = resolve_key(path)?;
+        r.repo_id = match self.0.get(&r.key) {
+            Some(id) => Some(id.clone()),
+            None => {
+                let id = repo_id_of(&r);
+                if let Some(id) = &id {
+                    self.0.insert(r.key.clone(), id.clone());
+                }
+                id
+            }
+        };
+        Ok(r)
+    }
+}
+
 struct Sub {
     path: String,
     resolved: Result<Resolved, Problem>,
@@ -1009,8 +1032,8 @@ struct Sub {
 }
 
 impl Sub {
-    fn new(store: &Store, path: String) -> Self {
-        let resolved = resolve_folder(&path);
+    fn new(store: &Store, ids: &mut RepoIds, path: String) -> Self {
+        let resolved = ids.resolve(&path);
         let last_ok = resolved.as_ref().ok().map(|r| r.key.clone());
         let mut sub = Sub { resolved, path, resolved_at: Instant::now(), previous: None, last_ok, files: None, stamp: None, found: Vec::new(), last: None };
         sub.settle(store);
@@ -1031,8 +1054,8 @@ impl Sub {
     }
 
     /// Resolves the folder again; `true` when its key (or its problem) changed.
-    fn refresh(&mut self, store: &Store) -> bool {
-        let resolved = resolve_folder(&self.path);
+    fn refresh(&mut self, store: &Store, ids: &mut RepoIds) -> bool {
+        let resolved = ids.resolve(&self.path);
         self.resolved_at = Instant::now();
         if resolved == self.resolved {
             return false;
@@ -1061,6 +1084,7 @@ pub fn spawn(send: impl Fn(&AgentEvent) + Send + 'static) -> Sender<Cmd> {
 
 fn run(rx: Receiver<Cmd>, store: Store, send: impl Fn(&AgentEvent)) {
     let mut subs: HashMap<String, Sub> = HashMap::new();
+    let mut ids = RepoIds::default();
     let mut next_scan = Instant::now() + SCAN_EVERY;
     loop {
         match rx.recv_timeout(next_scan.saturating_duration_since(Instant::now())) {
@@ -1069,10 +1093,10 @@ fn run(rx: Receiver<Cmd>, store: Store, send: impl Fn(&AgentEvent)) {
                     // Asked again (an agent the app reconnected to, a panel opened again): resolved
                     // afresh, the previous key kept.
                     Some(sub) if sub.path == path => {
-                        sub.refresh(&store);
+                        sub.refresh(&store, &mut ids);
                     }
                     _ => {
-                        subs.insert(key.clone(), Sub::new(&store, path));
+                        subs.insert(key.clone(), Sub::new(&store, &mut ids, path));
                     }
                 }
                 let Some(sub) = subs.get_mut(&key) else { continue };
@@ -1087,7 +1111,7 @@ fn run(rx: Receiver<Cmd>, store: Store, send: impl Fn(&AgentEvent)) {
                     None => (Outcome::failed(Problem::TasksNotWatched), None),
                     Some(sub) => {
                         // Fresh: the folder may belong to another list since the last scan.
-                        sub.refresh(&store);
+                        sub.refresh(&store, &mut ids);
                         match (&sub.resolved, list) {
                             (Err(p), _) => (Outcome::failed(p.clone()), None),
                             (Ok(r), Some(shown)) if shown != r.key => (Outcome::failed(Problem::TasksListChanged { shown, now: r.key.clone() }), Some(r.key.clone())),
@@ -1102,7 +1126,7 @@ fn run(rx: Receiver<Cmd>, store: Store, send: impl Fn(&AgentEvent)) {
                 let (outcome, list_key) = match subs.get_mut(&key) {
                     None => (Outcome::failed(Problem::TasksNotWatched), None),
                     Some(sub) => {
-                        sub.refresh(&store);
+                        sub.refresh(&store, &mut ids);
                         match (&sub.resolved, list) {
                             (Err(p), _) => (Outcome::failed(p.clone()), None),
                             (Ok(r), Some(shown)) if shown != r.key => (Outcome::failed(Problem::TasksListChanged { shown, now: r.key.clone() }), Some(r.key.clone())),
@@ -1118,11 +1142,13 @@ fn run(rx: Receiver<Cmd>, store: Store, send: impl Fn(&AgentEvent)) {
                 republish(&store, &mut subs, list_key.as_deref(), &key, &send);
             }
             Err(RecvTimeoutError::Timeout) => {
+                // Resolved again now and then, a few per scan; the lists found are looked for again
+                // too.
+                let due = due_keys(subs.iter().map(|(k, s)| (k.as_str(), s.resolved_at)), Instant::now());
                 for (key, sub) in subs.iter_mut() {
-                    // Resolved again now and then; the lists found are looked for again too.
-                    let due = sub.resolved_at.elapsed() >= RESOLVE_EVERY;
+                    let due = due.contains(key);
                     if due {
-                        sub.refresh(&store);
+                        sub.refresh(&store, &mut ids);
                     }
                     let now = sub.files.as_ref().and_then(|f| stamp(&f.path));
                     if due || now != sub.stamp {
@@ -1134,6 +1160,14 @@ fn run(rx: Receiver<Cmd>, store: Store, send: impl Fn(&AgentEvent)) {
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }
+}
+
+/// The subscriptions to resolve again in this scan: those resolved `RESOLVE_EVERY` ago or more,
+/// the most overdue first, `RESOLVES_PER_SCAN` at most.
+fn due_keys<'a>(resolved: impl Iterator<Item = (&'a str, Instant)>, now: Instant) -> Vec<String> {
+    let mut due: Vec<(Instant, &str)> = resolved.filter(|(_, at)| now.saturating_duration_since(*at) >= RESOLVE_EVERY).map(|(k, at)| (at, k)).collect();
+    due.sort();
+    due.into_iter().take(RESOLVES_PER_SCAN).map(|(_, k)| k.to_string()).collect()
 }
 
 /// Answers a change; a file set aside on the way is reported whatever the result.
@@ -1199,6 +1233,16 @@ mod tests {
     use super::*;
     use protocol::{Author, Priority, TaskStatus};
     use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn a_few_overdue_subscriptions_are_resolved_per_scan_the_oldest_first() {
+        let now = Instant::now() + RESOLVE_EVERY * 3;
+        let at = |ago: u64| now - Duration::from_secs(ago);
+        let subs: Vec<(String, Instant)> = (0..60).map(|n| (format!("g{n}"), at(31 + n))).chain([("fresh".to_string(), at(1))]).collect();
+        let due = due_keys(subs.iter().map(|(k, at)| (k.as_str(), *at)), now);
+        assert_eq!(due, ["g59", "g58"], "60 groups due at once: two per scan, the most overdue first");
+        assert!(due_keys([("fresh", at(1))].into_iter(), now).is_empty());
+    }
 
     /// The statuses as written in a file.
     fn status_names() -> Vec<String> {

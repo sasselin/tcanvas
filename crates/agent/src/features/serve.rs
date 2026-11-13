@@ -56,6 +56,7 @@ pub fn run() -> io::Result<()> {
         tasks: true,
         task_hooks: Some(hooks::task_state()),
         task_links: true,
+        worktree_refresh: true,
         shell: hooks::user_shell_path().map(|p| protocol::ShellKind::from_path(&p)),
     })?;
 
@@ -93,6 +94,7 @@ pub fn run() -> io::Result<()> {
                 | AgentCmd::WorktreeSizes { .. }
                 | AgentCmd::PlanWorktree { .. }
                 | AgentCmd::CreateWorktree { .. }
+                | AgentCmd::RefreshWorktrees { .. }
                 | AgentCmd::SendText { .. }
                 | AgentCmd::WatchTasks { .. }
                 | AgentCmd::UnwatchTasks { .. }
@@ -182,6 +184,8 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64, mono: Instant, clock:
     };
     let status = status::classify(&obs);
 
+    let (prompt_mark, prompt_head) = agent_hooks::split_mark(row.prompts.as_deref());
+    let (turn_mark, turn_head) = agent_hooks::split_mark(row.turns.as_deref());
     SessionInfo {
         session: row.session.clone(),
         status,
@@ -193,8 +197,10 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64, mono: Instant, clock:
         agent_session_id: agent_hooks::trusted(row.agent_session.as_ref(), agent_pid),
         agent_transcript: agent_hooks::trusted(row.transcript.as_ref(), agent_pid),
         last_prompt: agent_hooks::trusted(row.prompt.as_ref(), agent_pid),
-        agent_prompt_mark: row.prompts.clone(),
-        agent_turn_mark: row.turns.clone(),
+        agent_prompt_mark: prompt_mark,
+        agent_turn_mark: turn_mark,
+        agent_prompt_head: prompt_head,
+        agent_turn_head: turn_head,
     }
 }
 
@@ -242,6 +248,9 @@ fn spawn_stdin_reader(watcher: Sender<changes::Cmd>, sender: Sender<send_text::R
                 }
                 Ok(AgentCmd::CreateWorktree { id, key, request }) => {
                     let _ = watcher.send(changes::Cmd::CreateWorktree { id, key, request });
+                }
+                Ok(AgentCmd::RefreshWorktrees { key, seq }) => {
+                    let _ = watcher.send(changes::Cmd::Refresh { key, seq });
                 }
                 Ok(AgentCmd::SendText { id, session, text, enter, limit_ms }) => {
                     // Measured from now, on this machine's monotonic clock.

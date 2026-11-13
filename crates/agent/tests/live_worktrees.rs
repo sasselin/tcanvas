@@ -203,3 +203,43 @@ fn lists_worktrees_with_their_state_and_follows_changes_on_disk() {
     let none = agent.wait_worktrees("plain", "nothing outside git", |_| true);
     assert_eq!((none.repo, none.default_branch, none.worktrees.len()), (None, None, 0));
 }
+
+/// Events until the refresh `seq` of `key` is answered: the worktree lists of `key` sent before it.
+fn until_refreshed(agent: &Agent, key: &str, seq: u64) -> Vec<WorktreeList> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut lists = Vec::new();
+    while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+        match agent.events.recv_timeout(left) {
+            Ok(AgentEvent::WorktreesRefreshed { key: k, seq: s }) if k == key && s == seq => return lists,
+            Ok(AgentEvent::Worktrees(l)) if l.key == key => lists.push(l),
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    panic!("refresh {seq} of {key} not answered; lists meanwhile: {lists:#?}");
+}
+
+#[test]
+fn a_refresh_is_answered_after_a_new_scan_even_when_nothing_changed() {
+    if !has_git() {
+        eprintln!("git missing: test skipped");
+        return;
+    }
+    let tmp = TempDir::new("worktrees-refresh");
+    let repo = tmp.0.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    commit(&repo, "a", "first");
+    let mut agent = Agent::spawn();
+    agent.send(&AgentCmd::Watch { key: "r".into(), path: repo.display().to_string() });
+    let first = agent.wait_worktrees("r", "the first list", |l| l.worktrees.len() == 1);
+    // Nothing changed: no list, but an answer.
+    agent.send(&AgentCmd::RefreshWorktrees { key: "r".into(), seq: 7 });
+    assert!(until_refreshed(&agent, "r", 7).is_empty(), "nothing new to send");
+    // A commit: the list showing it comes before the answer, whatever the scan period.
+    commit(&repo, "b", "second");
+    agent.send(&AgentCmd::RefreshWorktrees { key: "r".into(), seq: 8 });
+    let lists = until_refreshed(&agent, "r", 8);
+    let head = lists.last().and_then(|l| l.worktrees[0].head.clone());
+    assert!(head.is_some() && head != first.worktrees[0].head, "{lists:#?}");
+}

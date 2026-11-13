@@ -9,6 +9,8 @@
 
 use protocol::{LocalBranch, SessionInfo, Task, TaskStatus, Worktree, WorktreeList, branch_name_valid};
 
+#[cfg(test)]
+use crate::shell::widgets::visible_text;
 use crate::shell::world::{Card, Project, World};
 
 pub use protocol::task_command::{Spot, TaskCommand, expand_task_command};
@@ -364,17 +366,26 @@ pub fn blocked(r: Readiness) -> Option<Blocked> {
 // --- Status follows the agent -----------------------------------------------------------------
 
 /// A session's marks, as its coding agents' hooks write them (`SessionInfo::agent_prompt_mark`,
-/// `agent_turn_mark`): a mark that changed is a new prompt, a new turn end.
+/// `agent_turn_mark`): a mark that changed is a new prompt, a new turn end. Each comes with the
+/// commit the hook found checked out when it wrote it (`agent_prompt_head`, `agent_turn_head`),
+/// when it could.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Obs {
     pub prompt: Option<String>,
     pub turn: Option<String>,
+    pub prompt_head: Option<String>,
+    pub turn_head: Option<String>,
 }
 
 /// The marks a report carries; `None` when it carries none (no hook ever wrote one in that pane,
 /// or an older agent): the last ones known stay.
 pub fn observe(info: &SessionInfo) -> Option<Obs> {
-    (info.agent_prompt_mark.is_some() || info.agent_turn_mark.is_some()).then(|| Obs { prompt: info.agent_prompt_mark.clone(), turn: info.agent_turn_mark.clone() })
+    (info.agent_prompt_mark.is_some() || info.agent_turn_mark.is_some()).then(|| Obs {
+        prompt: info.agent_prompt_mark.clone(),
+        turn: info.agent_turn_mark.clone(),
+        prompt_head: info.agent_prompt_head.clone(),
+        turn_head: info.agent_turn_head.clone(),
+    })
 }
 
 /// What happened in a session between two reports.
@@ -388,15 +399,16 @@ pub enum Signal {
 }
 
 /// The signals between two reports, in order (a prompt and the end of its turn can both fall
-/// between two reports). Marks are only told apart, never ordered: whatever they hold (an agent
-/// restarted, a value of an older writer), a change is one signal and no change is none.
-pub fn signals(prev: &Obs, now: &Obs) -> Vec<Signal> {
+/// between two reports), each with the head its hook recorded. Marks are only told apart, never
+/// ordered: whatever they hold (an agent restarted, a value of an older writer), a change is one
+/// signal and no change is none.
+pub fn signals(prev: &Obs, now: &Obs) -> Vec<(Signal, Option<String>)> {
     let mut out = Vec::new();
     if now.prompt.is_some() && now.prompt != prev.prompt {
-        out.push(Signal::Prompt);
+        out.push((Signal::Prompt, now.prompt_head.clone()));
     }
     if now.turn.is_some() && now.turn != prev.turn {
-        out.push(Signal::TurnEnd);
+        out.push((Signal::TurnEnd, now.turn_head.clone()));
     }
     out
 }
@@ -416,43 +428,62 @@ pub fn branch_state(list: Option<&WorktreeList>, path: Option<&str>) -> BranchSt
     found.map(|w| BranchState { head: w.head.clone(), ahead: w.ahead }).unwrap_or_default()
 }
 
-/// How long after a turn end its commit may still show up in a worktree list (the agent scans
-/// every 2 s): past that, a commit is not that turn's.
-pub const RECHECK: std::time::Duration = std::time::Duration::from_secs(6);
-
 /// A status change to send: (the status it expects, the new one).
 pub type Move = (TaskStatus, TaskStatus);
+
+/// A turn end that committed, waiting for a worktree list to confirm it (the branch is ahead of
+/// its base).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Awaiting {
+    /// The head its hook recorded (`None`: not recorded).
+    head: Option<String>,
+    /// The refresh asked of the agent (`RefreshWorktrees`), once asked: its answer comes after a
+    /// list scanned after the turn end.
+    refresh: Option<u64>,
+}
 
 /// How the app follows one task's status.
 ///
 /// The rules: a new prompt moves an inbox, todo or review task to active; the end of a turn
-/// moves an active task to review when its branch gained a commit since that prompt (its head
-/// moved from the one known at the report before the prompt, and it is ahead of its base), or
-/// when the prompt had taken it out of review (a question answered, nothing new to review: it is
-/// still reviewable); otherwise it stays active (the agent waits for the user). Nothing moves to
-/// done or canceled, and done or canceled tasks are never moved. Tool calls, permission requests
-/// and status flips of the card are not signals.
+/// moves an active task to review when that turn committed (the head at its end differs from
+/// the head at its prompt) and the branch is ahead of its base, or when the prompt had taken it
+/// out of review (a question answered, nothing new to review: it is still reviewable);
+/// otherwise it stays active (the agent waits for the user). Nothing moves to done or canceled,
+/// and done or canceled tasks are never moved. Tool calls, permission requests and status flips
+/// of the card are not signals.
+///
+/// The heads are the ones the hooks recorded with their marks: causal, whatever the time the
+/// worktree lists take. Without them (an older agent, git too slow for the hook, a folder outside
+/// git), the head at the prompt is the one the list showed at the report before it (never one
+/// shown after it), and the head at the turn end is read from the first list scanned after it:
+/// the answer to a refresh the app asks for (`wants_refresh`), or, from an agent that cannot
+/// refresh, the first list whose head moved. "Ahead" always comes from a list that shows that
+/// head or was scanned after the turn end. No time limit: a slow repository only delays the
+/// decision.
 ///
 /// "Manual wins": a status the app did not set itself, seen after its last automatic change, is
-/// never overridden by anything but a new signal: the only automatic move that is not a signal (a
-/// commit the worktree list shows within `RECHECK` after its turn's end) is dropped by any such
-/// change, and every automatic change names the status it expects (`TaskOp::SetStatus::from`), so
-/// the store refuses it when the task changed meanwhile. A user who moves a working task back to
-/// todo keeps it there until the next prompt.
+/// never overridden by anything but a new signal: a turn end still waiting for its list is
+/// dropped by any such change (and by a new prompt), and every automatic change names the status
+/// it expects (`TaskOp::SetStatus::from`), so the store refuses it when the task changed
+/// meanwhile. A user who moves a working task back to todo keeps it there until the next prompt.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Follow {
     /// The status last seen or set by the app.
     expected: Option<TaskStatus>,
     /// An automatic change sent and not seen yet.
     pending: Option<Move>,
-    /// The branch's head before the last prompt (`None`: no prompt seen this run).
+    /// The status before an earlier automatic change it follows, not seen yet either (a review
+    /// sent right after the move to active): the board may still show it.
+    before: Option<TaskStatus>,
+    /// The branch's head at the last prompt (`None`: no prompt seen this run; `Some(None)`: not
+    /// known).
     head_at_prompt: Option<Option<String>>,
-    /// The branch's head as known at the session's previous report.
+    /// The branch's head as the list showed it at the session's previous report.
     reported_head: Option<Option<String>>,
     /// The last prompt took the task out of review.
     from_review: bool,
-    /// A turn end's commit is looked for in the worktree lists until then.
-    recheck_until: Option<std::time::Instant>,
+    /// A turn end that committed, its list not seen yet.
+    awaiting: Option<Awaiting>,
 }
 
 impl Follow {
@@ -460,100 +491,129 @@ impl Follow {
     pub fn seen(&mut self, current: TaskStatus) {
         if let Some((from, to)) = self.pending {
             if current == to {
-                self.pending = None;
+                (self.pending, self.before) = (None, None);
                 self.expected = Some(to);
                 return;
             }
-            if current == from {
+            if current == from || Some(current) == self.before {
                 // Not applied yet.
                 return;
             }
-            self.pending = None;
+            (self.pending, self.before) = (None, None);
         }
         if self.expected.is_some_and(|e| e != current) {
             // Changed by someone else: what was pending goes.
-            self.recheck_until = None;
+            self.awaiting = None;
             self.from_review = false;
         }
         self.expected = Some(current);
     }
 
-    /// The branch gained a commit since the last prompt.
-    fn gained(&self, branch: &BranchState) -> bool {
-        matches!(&self.head_at_prompt, Some(at) if branch.head.is_some() && branch.head != *at) && branch.ahead.unwrap_or(0) > 0
-    }
-
-    /// A signal of one report, with the task's status in the list and its branch's state now.
-    pub fn signal(&mut self, current: TaskStatus, signal: Signal, branch: &BranchState, now: std::time::Instant) -> Option<Move> {
+    /// A signal of one report, with the task's status in the list, its branch's state in the
+    /// last list, and the head the signal's hook recorded.
+    pub fn signal(&mut self, current: TaskStatus, signal: Signal, branch: &BranchState, head: Option<&str>) -> Option<Move> {
         self.seen(current);
         let state = self.pending.map_or(current, |(_, to)| to);
-        self.recheck_until = None;
+        self.awaiting = None;
         let to = match signal {
             Signal::Prompt => {
-                // The head before this report: the list may already show the turn's commit.
-                self.head_at_prompt = Some(self.reported_head.clone().unwrap_or_else(|| branch.head.clone()));
+                // Never the list's head now: it may already show this turn's commit.
+                self.head_at_prompt = Some(head.map(String::from).or_else(|| self.reported_head.clone().flatten()));
                 self.from_review = state == TaskStatus::Review;
                 matches!(state, TaskStatus::Inbox | TaskStatus::Todo | TaskStatus::Review).then_some(TaskStatus::Active)
             }
-            Signal::TurnEnd if state == TaskStatus::Active && (self.gained(branch) || self.from_review) => {
+            Signal::TurnEnd if state == TaskStatus::Active && self.from_review => {
                 self.from_review = false;
                 Some(TaskStatus::Review)
             }
             Signal::TurnEnd => {
-                if state == TaskStatus::Active && self.head_at_prompt.is_some() {
-                    self.recheck_until = Some(now + RECHECK);
+                let Some(Some(at)) = &self.head_at_prompt else { return None };
+                if state != TaskStatus::Active || head == Some(at.as_str()) {
+                    // Not working, or nothing committed during the turn.
+                    return None;
                 }
-                None
+                self.awaiting = Some(Awaiting { head: head.map(String::from), refresh: None });
+                return self.settle(current, branch, None);
             }
         }?;
-        self.pending = Some((state, to));
-        Some((state, to))
+        Some(self.sent(state, to))
     }
 
-    /// The session reported (after its signals): the branch's head as known now.
+    /// An automatic change to send, after the one not seen yet, if any.
+    fn sent(&mut self, state: TaskStatus, to: TaskStatus) -> Move {
+        if let Some((from, _)) = self.pending {
+            self.before = self.before.or(Some(from));
+        }
+        self.pending = Some((state, to));
+        (state, to)
+    }
+
+    /// The session reported (after its signals): the branch's head as the list shows it now.
     pub fn reported(&mut self, branch: &BranchState) {
         self.reported_head = Some(branch.head.clone());
     }
 
-    /// A new worktree list: within `RECHECK` of a turn end, its commit may show up in it.
-    pub fn branch(&mut self, current: TaskStatus, branch: &BranchState, now: std::time::Instant) -> Option<Move> {
-        self.seen(current);
-        let until = self.recheck_until?;
-        if now > until {
-            self.recheck_until = None;
-            return None;
-        }
-        if self.pending.is_some() || current != TaskStatus::Active || !self.gained(branch) {
-            return None;
-        }
-        self.recheck_until = None;
-        self.pending = Some((current, TaskStatus::Review));
-        self.pending
+    /// A turn end waits for its list, and no refresh was asked for it yet.
+    pub fn wants_refresh(&self) -> bool {
+        self.awaiting.as_ref().is_some_and(|a| a.refresh.is_none())
     }
 
-    /// The store refused an automatic change (the status changed meanwhile).
-    pub fn refused(&mut self) {
-        self.pending = None;
-        self.recheck_until = None;
-        self.from_review = false;
+    /// The refresh `seq` was asked for the turn end waiting.
+    pub fn asked(&mut self, seq: u64) {
+        if let Some(a) = &mut self.awaiting {
+            a.refresh = Some(seq);
+        }
     }
 
     /// A turn end's commit is still looked for.
     pub fn awaits_branch(&self) -> bool {
-        self.recheck_until.is_some()
+        self.awaiting.is_some()
+    }
+
+    /// A new worktree list (or a new board, or the answer to a refresh: `answered` is the last
+    /// refresh answered for the group): the turn end waiting may be decided now.
+    pub fn branch(&mut self, current: TaskStatus, branch: &BranchState, answered: Option<u64>) -> Option<Move> {
+        self.seen(current);
+        self.settle(current, branch, answered)
+    }
+
+    /// Decides the turn end waiting once a list can tell: one showing the head its hook recorded,
+    /// one whose head moved (no head recorded), or the answer to its refresh. An automatic change
+    /// not shown yet counts as done: the next one names its result as the status it expects.
+    fn settle(&mut self, current: TaskStatus, branch: &BranchState, answered: Option<u64>) -> Option<Move> {
+        let a = self.awaiting.as_ref()?;
+        let Some(Some(at)) = &self.head_at_prompt else {
+            self.awaiting = None;
+            return None;
+        };
+        let shows = match &a.head {
+            Some(head) => branch.head.as_ref() == Some(head),
+            None => branch.head.as_ref().is_some_and(|h| h != at),
+        };
+        let answer = a.refresh.is_some_and(|seq| answered.is_some_and(|n| n >= seq));
+        if !(shows || answer) {
+            return None;
+        }
+        let moved = branch.head.as_ref().is_some_and(|h| h != at);
+        self.awaiting = None;
+        let state = self.pending.map_or(current, |(_, to)| to);
+        if state != TaskStatus::Active || !moved || branch.ahead.unwrap_or(0) == 0 {
+            return None;
+        }
+        Some(self.sent(state, TaskStatus::Review))
+    }
+
+    /// The store refused an automatic change (the status changed meanwhile).
+    pub fn refused(&mut self) {
+        (self.pending, self.before) = (None, None);
+        self.awaiting = None;
+        self.from_review = false;
     }
 }
 
 /// The worktrees a list shows with their folder (a link to any other one goes).
 pub fn worktree_paths(list: &WorktreeList) -> Vec<String> {
     usable(list).map(|w| w.path.clone()).collect()
-}
-
-/// Text as a header shows it: control characters and the invisible ones that reorder or hide
-/// what is drawn around them (bidirectional controls, zero-width marks) dropped.
-pub fn visible_text(text: &str) -> String {
-    let hidden = |c: char| c.is_control() || matches!(c, '\u{00ad}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}');
-    text.chars().map(|c| if c.is_control() { ' ' } else { c }).filter(|c| !hidden(*c) || *c == ' ').collect::<String>().trim().to_string()
 }
 
 #[cfg(test)]
@@ -779,6 +839,8 @@ mod tests {
             last_prompt: None,
             agent_prompt_mark: prompt.map(String::from),
             agent_turn_mark: turn.map(String::from),
+            agent_prompt_head: None,
+            agent_turn_head: None,
         }
     }
 
@@ -787,173 +849,225 @@ mod tests {
         use Signal::*;
         assert_eq!(observe(&info(None, None)), None, "nothing written: the last marks stay");
         let at = |p: &str, t: Option<&str>| observe(&info(Some(p), t)).unwrap();
-        assert_eq!(signals(&Obs::default(), &at("1-9", None)), vec![Prompt]);
-        assert_eq!(signals(&at("1-9", None), &at("1-9", Some("2-9"))), vec![TurnEnd]);
-        assert_eq!(signals(&at("1-9", Some("2-9")), &at("3-9", Some("4-9"))), vec![Prompt, TurnEnd], "a prompt and its turn's end between two reports");
+        let kinds = |v: Vec<(Signal, Option<String>)>| v.into_iter().map(|(s, _)| s).collect::<Vec<_>>();
+        assert_eq!(kinds(signals(&Obs::default(), &at("1-9", None))), vec![Prompt]);
+        assert_eq!(kinds(signals(&at("1-9", None), &at("1-9", Some("2-9")))), vec![TurnEnd]);
+        assert_eq!(kinds(signals(&at("1-9", Some("2-9")), &at("3-9", Some("4-9")))), vec![Prompt, TurnEnd], "a prompt and its turn's end between two reports");
         assert!(signals(&at("3-9", Some("4-9")), &at("3-9", Some("4-9"))).is_empty(), "tool calls, permission prompts, status flips: nothing");
         // Marks are only told apart: a restarted agent's, a garbage one, a smaller one are new.
-        assert_eq!(signals(&at("9-9", None), &at("1-1", None)), vec![Prompt]);
-        assert_eq!(signals(&at("x", None), &at("garbage \u{1b}", None)), vec![Prompt]);
+        assert_eq!(kinds(signals(&at("9-9", None), &at("1-1", None))), vec![Prompt]);
+        assert_eq!(kinds(signals(&at("x", None), &at("garbage \u{1b}", None))), vec![Prompt]);
         // A mark that disappears (an older writer) is no signal.
-        assert!(signals(&at("1-9", Some("2-9")), &Obs { prompt: Some("1-9".into()), turn: None }).is_empty());
+        assert!(signals(&at("1-9", Some("2-9")), &Obs { prompt: Some("1-9".into()), ..Obs::default() }).is_empty());
+        // Each signal carries the head its hook recorded.
+        let mut i = info(Some("1-9"), Some("2-9"));
+        (i.agent_prompt_head, i.agent_turn_head) = (Some("a".into()), Some("b".into()));
+        assert_eq!(signals(&Obs::default(), &observe(&i).unwrap()), vec![(Prompt, Some("a".into())), (TurnEnd, Some("b".into()))]);
     }
 
     fn branch(head: &str, ahead: u32) -> BranchState {
         BranchState { head: Some(head.into()), ahead: Some(ahead) }
     }
 
-    fn t0() -> std::time::Instant {
-        std::time::Instant::now()
-    }
-
     #[test]
     fn the_status_follows_prompts_and_turn_ends() {
         use Signal::*;
         use TaskStatus::*;
-        let now = t0();
         for from in [Inbox, Todo, Review] {
-            assert_eq!(Follow::default().signal(from, Prompt, &branch("a", 0), now), Some((from, Active)), "{from:?}");
+            assert_eq!(Follow::default().signal(from, Prompt, &branch("a", 0), Some("a")), Some((from, Active)), "{from:?}");
         }
         for s in [Done, Canceled] {
-            assert_eq!(Follow::default().signal(s, Prompt, &branch("a", 1), now), None, "{s:?}: never touched");
+            assert_eq!(Follow::default().signal(s, Prompt, &branch("a", 1), Some("a")), None, "{s:?}: never touched");
         }
         let mut f = Follow::default();
-        assert_eq!(f.signal(Todo, Prompt, &branch("a", 0), now), Some((Todo, Active)));
+        assert_eq!(f.signal(Todo, Prompt, &branch("a", 0), Some("a")), Some((Todo, Active)));
         f.reported(&branch("a", 0));
-        // The turn ended with a commit on the branch (the board still lags: the change sent counts).
-        assert_eq!(f.signal(Todo, TurnEnd, &branch("b", 1), now), Some((Active, Review)));
+        // The turn committed and the list shows it (the board still lags: the change sent counts).
+        assert_eq!(f.signal(Todo, TurnEnd, &branch("b", 1), Some("b")), Some((Active, Review)));
         f.reported(&branch("b", 1));
         f.seen(Review);
         // No prompt seen this run (the app restarted mid-turn): a turn end cannot tell, nothing moves.
-        assert_eq!(Follow::default().signal(Active, TurnEnd, &branch("z", 9), now), None);
+        assert_eq!(Follow::default().signal(Active, TurnEnd, &branch("z", 9), Some("z")), None);
+    }
+
+    #[test]
+    fn a_turn_end_waits_for_its_list_however_long_it_takes() {
+        use Signal::*;
+        use TaskStatus::*;
+        let mut f = Follow::default();
+        f.seen(Active);
+        f.reported(&branch("a", 0));
+        f.signal(Active, Prompt, &branch("a", 0), Some("a"));
+        // Committed and stopped at once; the slow repository's list still shows the old head.
+        assert_eq!(f.signal(Active, TurnEnd, &branch("a", 0), Some("b")), None);
+        assert!(f.awaits_branch() && f.wants_refresh());
+        f.asked(1);
+        assert!(!f.wants_refresh());
+        // Lists of an earlier scan, whatever their number: still waiting.
+        for _ in 0..50 {
+            assert_eq!(f.branch(Active, &branch("a", 0), None), None);
+        }
+        assert!(f.awaits_branch());
+        // The list that shows the recorded head decides, with its base.
+        assert_eq!(f.branch(Active, &branch("b", 1), None), Some((Active, Review)));
+        // The same with a head that is not ahead of its base (a fast-forward of main): no review.
+        let mut g = Follow::default();
+        g.seen(Active);
+        g.signal(Active, Prompt, &branch("a", 0), Some("a"));
+        g.signal(Active, TurnEnd, &branch("a", 0), Some("m"));
+        assert_eq!(g.branch(Active, &branch("m", 0), None), None);
+        assert!(!g.awaits_branch());
+        // Nothing committed during the turn: decided at once, no list needed.
+        let mut h = Follow::default();
+        h.seen(Active);
+        h.signal(Active, Prompt, &branch("old", 3), Some("old"));
+        assert_eq!(h.signal(Active, TurnEnd, &branch("old", 3), Some("old")), None);
+        assert!(!h.awaits_branch(), "old commits on the branch are not this turn's");
+    }
+
+    #[test]
+    fn without_recorded_heads_the_answer_to_a_refresh_decides() {
+        use Signal::*;
+        use TaskStatus::*;
+        // The hooks could not record heads (older agent, slow git): the head at the prompt is the
+        // list's before it.
+        let mut f = Follow::default();
+        f.seen(Active);
+        f.reported(&branch("a", 0));
+        f.signal(Active, Prompt, &branch("a", 0), None);
+        f.reported(&branch("a", 0));
+        assert_eq!(f.signal(Active, TurnEnd, &branch("a", 0), None), None);
+        assert!(f.wants_refresh());
+        f.asked(4);
+        assert_eq!(f.branch(Active, &branch("a", 0), Some(3)), None, "an earlier refresh's answer");
+        assert!(f.awaits_branch());
+        // Answered, the head moved and is ahead: review.
+        assert_eq!(f.branch(Active, &branch("c", 2), Some(4)), Some((Active, Review)));
+        // Answered and nothing moved: it stays active, and a later commit (the user's) is not the
+        // turn's.
+        let mut g = Follow::default();
+        g.seen(Active);
+        g.reported(&branch("a", 0));
+        g.signal(Active, Prompt, &branch("a", 0), None);
+        g.signal(Active, TurnEnd, &branch("a", 0), None);
+        g.asked(1);
+        assert_eq!(g.branch(Active, &branch("a", 0), Some(1)), None);
+        assert!(!g.awaits_branch());
+        assert_eq!(g.branch(Active, &branch("z", 1), Some(2)), None);
+        // An agent that cannot refresh: the first list whose head moved decides.
+        let mut h = Follow::default();
+        h.seen(Active);
+        h.reported(&branch("a", 0));
+        h.signal(Active, Prompt, &branch("a", 0), None);
+        h.signal(Active, TurnEnd, &branch("a", 0), None);
+        assert_eq!(h.branch(Active, &branch("a", 0), None), None);
+        assert_eq!(h.branch(Active, &branch("b", 1), None), Some((Active, Review)));
+    }
+
+    #[test]
+    fn a_first_report_with_a_prompt_and_its_turn_end_never_takes_the_new_head_for_the_old() {
+        use Signal::*;
+        use TaskStatus::*;
+        // A card started here: its first report carries both marks, and the list already shows
+        // the turn's commit.
+        let mut f = Follow::default();
+        f.seen(Todo);
+        assert_eq!(f.signal(Todo, Prompt, &branch("b", 1), Some("a")), Some((Todo, Active)));
+        assert_eq!(f.signal(Todo, TurnEnd, &branch("b", 1), Some("b")), Some((Active, Review)), "heads recorded: the commit counts");
+        // Without recorded heads and no report before: the head at the prompt is unknown, never
+        // the list's new one; nothing moves rather than a wrong guess either way.
+        let mut g = Follow::default();
+        g.seen(Active);
+        g.signal(Active, Prompt, &branch("b", 1), None);
+        assert_eq!(g.signal(Active, TurnEnd, &branch("b", 1), None), None);
+        assert!(!g.awaits_branch());
     }
 
     #[test]
     fn a_follow_up_prompt_on_a_reviewed_task_goes_back_to_review_at_its_end() {
         use Signal::*;
         use TaskStatus::*;
-        let now = t0();
         let mut f = Follow::default();
         f.seen(Review);
         f.reported(&branch("b", 1));
         // A question about the work: active while the agent answers...
-        assert_eq!(f.signal(Review, Prompt, &branch("b", 1), now), Some((Review, Active)));
+        assert_eq!(f.signal(Review, Prompt, &branch("b", 1), Some("b")), Some((Review, Active)));
         f.seen(Active);
         f.reported(&branch("b", 1));
         // ...and back to review when its turn ends, even without a new commit.
-        assert_eq!(f.signal(Active, TurnEnd, &branch("b", 1), now), Some((Active, Review)));
+        assert_eq!(f.signal(Active, TurnEnd, &branch("b", 1), Some("b")), Some((Active, Review)));
         f.seen(Review);
         // Moved back to todo by hand meanwhile: the follow-up does not put it back to review.
-        f.signal(Review, Prompt, &branch("b", 1), now);
+        f.signal(Review, Prompt, &branch("b", 1), Some("b"));
         f.seen(Active);
         f.seen(Todo);
-        assert_eq!(f.signal(Todo, TurnEnd, &branch("b", 1), now), None);
-    }
-
-    #[test]
-    fn a_resume_on_a_branch_with_commits_goes_to_review_only_after_a_new_commit() {
-        use Signal::*;
-        use TaskStatus::*;
-        let now = t0();
-        let mut f = Follow::default();
-        f.seen(Active);
-        f.reported(&branch("old", 3));
-        assert_eq!(f.signal(Active, Prompt, &branch("old", 3), now), None);
-        f.reported(&branch("old", 3));
-        // The agent asks a question (a permission): no mark changes, no signal at all. Its turn
-        // ends without committing: still active.
-        assert_eq!(f.signal(Active, TurnEnd, &branch("old", 3), now), None);
-        f.reported(&branch("old", 3));
-        assert_eq!(f.signal(Active, Prompt, &branch("old", 3), now), None);
-        f.reported(&branch("old", 3));
-        assert_eq!(f.signal(Active, TurnEnd, &branch("new", 4), now), Some((Active, Review)));
-    }
-
-    #[test]
-    fn a_prompt_and_its_turn_end_in_one_report_compare_with_the_head_before() {
-        use Signal::*;
-        use TaskStatus::*;
-        let now = t0();
-        let mut f = Follow::default();
-        f.seen(Active);
-        f.reported(&branch("a", 0));
-        // The list already shows the turn's commit when the report with both marks comes.
-        assert_eq!(f.signal(Active, Prompt, &branch("b", 1), now), None);
-        assert_eq!(f.signal(Active, TurnEnd, &branch("b", 1), now), Some((Active, Review)));
-    }
-
-    #[test]
-    fn a_commit_seen_after_its_turn_end_is_bounded_in_time() {
-        use Signal::*;
-        use TaskStatus::*;
-        let now = t0();
-        let mut f = Follow::default();
-        f.seen(Active);
-        f.reported(&branch("a", 0));
-        f.signal(Active, Prompt, &branch("a", 0), now);
-        f.reported(&branch("a", 0));
-        // The turn ended before the list showed its commit: a list within `RECHECK` may show it.
-        assert_eq!(f.signal(Active, TurnEnd, &branch("a", 0), now), None);
-        assert!(f.awaits_branch());
-        assert_eq!(f.branch(Active, &branch("a", 0), now), None);
-        assert_eq!(f.branch(Active, &branch("b", 1), now + std::time::Duration::from_secs(2)), Some((Active, Review)));
-        // Past `RECHECK`, a commit (the user's, minutes later) is not that turn's, however few
-        // lists came in between.
-        let mut g = Follow::default();
-        g.seen(Active);
-        g.signal(Active, Prompt, &branch("a", 0), now);
-        g.signal(Active, TurnEnd, &branch("a", 0), now);
-        assert_eq!(g.branch(Active, &branch("c", 1), now + RECHECK + std::time::Duration::from_secs(1)), None);
-        assert!(!g.awaits_branch());
-        // A new prompt also ends the re-check.
-        let mut h = Follow::default();
-        h.seen(Active);
-        h.signal(Active, Prompt, &branch("a", 0), now);
-        h.signal(Active, TurnEnd, &branch("a", 0), now);
-        h.signal(Active, Prompt, &branch("a", 0), now);
-        assert_eq!(h.branch(Active, &branch("b", 1), now), None);
+        assert_eq!(f.signal(Todo, TurnEnd, &branch("c", 2), Some("c")), None);
     }
 
     #[test]
     fn manual_wins_until_the_next_prompt() {
         use Signal::*;
         use TaskStatus::*;
-        let now = t0();
         let mut f = Follow::default();
-        assert_eq!(f.signal(Todo, Prompt, &branch("a", 0), now), Some((Todo, Active)));
+        assert_eq!(f.signal(Todo, Prompt, &branch("a", 0), Some("a")), Some((Todo, Active)));
         f.reported(&branch("a", 0));
         f.seen(Active);
         // The user moves it back to todo while the agent works.
         f.seen(Todo);
-        // Tool calls and permission prompts are no signals; a turn end with a commit does not
-        // override the manual change either (todo is not active).
-        assert_eq!(f.signal(Todo, TurnEnd, &branch("b", 1), now), None);
-        assert_eq!(f.branch(Todo, &branch("b", 1), now), None);
+        // A turn end with a commit does not override the manual change (todo is not active).
+        assert_eq!(f.signal(Todo, TurnEnd, &branch("b", 1), Some("b")), None);
+        assert_eq!(f.branch(Todo, &branch("b", 1), Some(9)), None);
         // The next prompt does.
-        assert_eq!(f.signal(Todo, Prompt, &branch("b", 1), now), Some((Todo, Active)));
-        // A pending re-check goes with any change the app did not make.
+        assert_eq!(f.signal(Todo, Prompt, &branch("b", 1), Some("b")), Some((Todo, Active)));
+        // A turn end waiting for its list goes with any change the app did not make.
         let mut g = Follow::default();
         g.seen(Active);
-        g.signal(Active, Prompt, &branch("a", 0), now);
-        g.signal(Active, TurnEnd, &branch("a", 0), now);
+        g.signal(Active, Prompt, &branch("a", 0), Some("a"));
+        g.signal(Active, TurnEnd, &branch("a", 0), Some("b"));
         g.seen(Todo);
         g.seen(Active);
-        assert_eq!(g.branch(Active, &branch("b", 1), now), None, "moved by hand, even back to active");
+        assert_eq!(g.branch(Active, &branch("b", 1), None), None, "moved by hand, even back to active");
+        // ...and with a new prompt.
+        let mut n = Follow::default();
+        n.seen(Active);
+        n.signal(Active, Prompt, &branch("a", 0), Some("a"));
+        n.signal(Active, TurnEnd, &branch("a", 0), Some("b"));
+        n.signal(Active, Prompt, &branch("a", 0), Some("b"));
+        assert_eq!(n.branch(Active, &branch("b", 1), None), None);
         // An automatic change refused because the status changed meanwhile: nothing more.
         g.reported(&branch("b", 1));
-        g.signal(Active, Prompt, &branch("b", 1), now);
-        assert_eq!(g.signal(Active, TurnEnd, &branch("c", 2), now), Some((Active, Review)));
+        g.signal(Active, Prompt, &branch("b", 1), Some("b"));
+        assert_eq!(g.signal(Active, TurnEnd, &branch("c", 2), Some("c")), Some((Active, Review)));
         g.refused();
         g.seen(Todo);
-        assert_eq!(g.branch(Todo, &branch("d", 3), now), None);
+        assert_eq!(g.branch(Todo, &branch("d", 3), None), None);
         // A board that still shows the status before an automatic change is not a manual change.
         let mut h = Follow::default();
         h.seen(Active);
-        h.signal(Active, Prompt, &branch("a", 0), now);
-        h.signal(Active, TurnEnd, &branch("b", 1), now);
+        h.signal(Active, Prompt, &branch("a", 0), Some("a"));
+        h.signal(Active, TurnEnd, &branch("b", 1), Some("b"));
         h.seen(Active);
         assert_eq!(h.pending, Some((Active, Review)));
         h.seen(Review);
         assert_eq!((h.pending, h.expected), (None, Some(Review)));
+    }
+
+    #[test]
+    fn a_list_seen_while_another_change_is_pending_decides_after_it() {
+        use Signal::*;
+        use TaskStatus::*;
+        // The prompt's move to active is sent, not shown yet, when the turn's list comes.
+        let mut f = Follow::default();
+        f.seen(Todo);
+        assert_eq!(f.signal(Todo, Prompt, &branch("a", 0), Some("a")), Some((Todo, Active)));
+        assert_eq!(f.signal(Todo, TurnEnd, &branch("a", 0), Some("b")), None);
+        assert_eq!(f.branch(Todo, &branch("b", 1), None), Some((Active, Review)), "chained: it expects active");
+        assert!(!f.awaits_branch());
+        // The board still shows todo, then active: not a manual change; then review.
+        f.seen(Todo);
+        f.seen(Active);
+        assert_eq!(f.pending, Some((Active, Review)));
+        f.seen(Review);
+        assert_eq!(f.pending, None);
     }
 }

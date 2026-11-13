@@ -275,6 +275,12 @@ impl Spaces {
                     enter(world, target, vp);
                 }
             }
+            // A task is shown in its group's space.
+            Event::ShowTask { project, .. } => {
+                if world.space.as_ref() != Some(project) {
+                    enter(world, Some(project.clone()), vp);
+                }
+            }
             Event::MoveProject(id, to) => {
                 if move_project(&mut world.projects, id, *to) {
                     world.touch();
@@ -506,6 +512,18 @@ mod tests {
         assert_eq!(w.space, None, "a terminal outside any project only exists in 'All'");
         handle(&mut s, &mut w, Event::FlyTo("api-1".into()));
         assert_eq!(w.space, None, "already visible: stay");
+    }
+
+    #[test]
+    fn showing_a_task_opens_its_group_without_reframing_it_again() {
+        let mut w = world();
+        let mut s = Spaces::default();
+        let show = || Event::ShowTask { project: "web".into(), task: "t".into() };
+        handle(&mut s, &mut w, show());
+        assert_eq!(w.space.as_deref(), Some("web"));
+        assert!(handle(&mut s, &mut w, show()).is_empty(), "already open: the view stays");
+        handle(&mut s, &mut w, Event::ShowTask { project: "gone".into(), task: "t".into() });
+        assert_eq!(w.space.as_deref(), Some("web"), "unknown group: nothing changes");
     }
 
     #[test]

@@ -6,7 +6,9 @@
 //! The group's task command is a fake coding agent: a script that records its arguments and
 //! environment, waits until the task records its session, runs `task prime`, then does what a
 //! coding agent's hooks report (`tcanvas-agent hook UserPromptSubmit` with a payload), waits for
-//! the task to be active, commits, reports its stop (`hook Stop`), and waits for the user.
+//! the task to be active, commits, reports its stop (`hook Stop`) in the same instant, and waits
+//! for the user. The app's agent sees a slow repository (`SLOW_GIT` before every git call): its
+//! worktree lists come long after the turn end, and the task must reach review all the same.
 //!
 //! Checks: Start creates the worktree and the card; the fake agent received exactly the task's
 //! prompt (byte for byte, hostile text included) and nothing in it ran; the task became active,
@@ -137,6 +139,10 @@ impl Drop for Cleanup {
     }
 }
 
+/// Seconds every git call of the app's agent waits (about a dozen per scan pass: a pass then
+/// takes several seconds).
+const SLOW_GIT: &str = "0.6";
+
 /// The fake coding agent. `$1`..`$4`: `{task}`, `{task_ref}`, `{task_title}`, `{task_file}`.
 /// Each run records into its own folder (`run-<n>` in the home); it stays until `release-<n>` is
 /// there, as an agent waiting for the user would.
@@ -210,6 +216,14 @@ fn a_task_started_from_the_panel() {
     sh(init, &[&repo]);
     let script = format!("{home}/fake-agent.sh");
     sh(r#"printf '%s' "$2" > "$1""#, &[&script, &FAKE_AGENT.replace("__AGENT__", &agent)]);
+    // A slow repository: every git call of the app's agent (its scans, its task list resolves,
+    // the worktree creation) waits `SLOW_GIT` first, so a worktree list showing the turn's commit
+    // comes well after the old 6 s window. The cards (the hooks) use the real git.
+    let slow = format!("{home}/slow");
+    let shim = r#"mkdir -p "$1/bin" && real=$(command -v git) && printf '#!/bin/sh\nsleep %s\nexec "%s" "$@"\n' "$2" "$real" > "$1/bin/git" && printf '#!/bin/sh\nPATH="%s/bin:$PATH" exec "%s" "$@"\n' "$1" "$3" > "$1/tcanvas-agent" && chmod +x "$1/bin/git" "$1/tcanvas-agent""#;
+    sh(shim, &[&slow, SLOW_GIT, &agent]);
+    // SAFETY: as above, before the app starts its agent.
+    unsafe { std::env::set_var("TCANVAS_AGENT", format!("{slow}/tcanvas-agent")) };
 
     // A task written to hurt, filed as an agent would (the command line).
     let title = "-x Fix \"quotes\" 'single' $(touch pwned-title) `touch pwned-tick`; rm -rf ~ {task} !! \\ end";
@@ -235,7 +249,7 @@ fn a_task_started_from_the_panel() {
         task_settings: Default::default(),
     });
     h.state_mut().dispatch(vec![Event::EnterSpace(Some("shop".into())), Event::ToggleTasks]);
-    wait(&mut h, "the agent, the repository and the task list", 30, |h| {
+    wait(&mut h, "the agent, the repository and the task list", 90, |h| {
         matches!(h.state().agent_state(), LinkState::Connected { .. }) && h.state().worktrees.list("shop").is_some() && h.query_by_label("Start").is_some_and(|n| !n.accesskit_node().is_disabled())
     });
     let task = h.state().tasks.board("shop").and_then(|b| b.list.as_ref()).and_then(|l| l.tasks.iter().find(|t| t.reference == reference)).expect("the task").clone();
@@ -244,11 +258,11 @@ fn a_task_started_from_the_panel() {
 
     // 1. Start: the confirmation, then the worktree, the card, the agent with the task.
     click(&mut h, "Start");
-    wait(&mut h, "the confirmation, once the agent planned the worktree", 30, |h| h.query_by_label("Start task").is_some_and(|n| !n.accesskit_node().is_disabled()));
+    wait(&mut h, "the confirmation, once the agent planned the worktree", 90, |h| h.query_by_label("Start task").is_some_and(|n| !n.accesskit_node().is_disabled()));
     click(&mut h, "Start task");
     let branch = format!("task/x-fix-quotes-single-touch-pwned-title-{reference}");
     let path = format!("{repo}/.claude/worktrees/{}", protocol::folder_for_branch(&branch));
-    wait(&mut h, "the card in the new worktree", 60, |h| h.state().world.cards.iter().any(|c| c.cwd.as_deref() == Some(path.as_str()) && h.state().cards.is_running(&c.id)));
+    wait(&mut h, "the card in the new worktree", 90, |h| h.state().world.cards.iter().any(|c| c.cwd.as_deref() == Some(path.as_str()) && h.state().cards.is_running(&c.id)));
     let card = h.state().world.cards.iter().find(|c| c.cwd.as_deref() == Some(path.as_str())).unwrap().clone();
     let run = format!("{home}/run-1");
     wait(&mut h, "the fake agent stopped", 60, |_| exists_wsl(&format!("{run}/stopped")));
@@ -268,25 +282,25 @@ fn a_task_started_from_the_panel() {
     // 2. Its status followed the agent: active on the prompt, review once stopped with a commit.
     assert_eq!(read_wsl(&format!("{run}/seen")), b"status: active\n", "active after the prompt");
     let status = |h: &Harness<'_, App>| h.state().tasks.board("shop").and_then(|b| b.list.as_ref()).and_then(|l| l.tasks.iter().find(|t| t.reference == reference)).map(|t| t.status);
-    wait(&mut h, "the task in review", 30, |h| status(h) == Some(protocol::TaskStatus::Review));
+    wait(&mut h, "the task in review", 90, |h| status(h) == Some(protocol::TaskStatus::Review));
     let stored_task = stored(&repo, &home, &agent, &reference);
     assert_eq!(stored_task["status"], "review");
     assert_eq!((stored_task["worktree"].as_str(), stored_task["branch"].as_str(), stored_task["session"].as_str()), (Some(path.as_str()), Some(branch.as_str()), Some(card.session().as_str())));
-    wait(&mut h, "the card's header names the task", 10, |h| h.query_by_label(&format!("Task #{reference}: {}", task.title)).is_some());
+    wait(&mut h, "the card's header names the task", 30, |h| h.query_by_label(&format!("Task #{reference}: {}", task.title)).is_some());
 
     // 3. Closing the card keeps the worktree, the task, its links and its status.
     sh(r#"touch "$1/release-1""#, &[&home]);
     h.state_mut().dispatch(vec![Event::KillCard(card.id.clone())]);
-    wait(&mut h, "the card closed, Resume offered", 30, |h| h.query_by_label("Resume").is_some_and(|n| !n.accesskit_node().is_disabled()) && h.query_by_label("card closed").is_some());
+    wait(&mut h, "the card closed, Resume offered", 90, |h| h.query_by_label("Resume").is_some_and(|n| !n.accesskit_node().is_disabled()) && h.query_by_label("card closed").is_some());
     let kept = stored(&repo, &home, &agent, &reference);
     assert_eq!((kept["status"].as_str(), kept["worktree"].as_str(), kept["session"].as_str()), (Some("review"), Some(path.as_str()), Some(card.session().as_str())));
     assert!(exists_wsl(&path), "the worktree stays");
 
     // 4. Resume: a card in the same worktree, none created; the agent gets the same prompt again.
     click(&mut h, "Resume");
-    wait(&mut h, "the confirmation of the reuse", 10, |h| h.query_by_label(&format!("Reuses its worktree {path} (branch {branch}).")).is_some());
+    wait(&mut h, "the confirmation of the reuse", 30, |h| h.query_by_label(&format!("Reuses its worktree {path} (branch {branch}).")).is_some());
     click(&mut h, "Start task");
-    wait(&mut h, "a new card in the same worktree", 60, |h| h.state().world.cards.iter().any(|c| c.id != card.id && c.cwd.as_deref() == Some(path.as_str()) && h.state().cards.is_running(&c.id)));
+    wait(&mut h, "a new card in the same worktree", 90, |h| h.state().world.cards.iter().any(|c| c.id != card.id && c.cwd.as_deref() == Some(path.as_str()) && h.state().cards.is_running(&c.id)));
     let again = h.state().world.cards.iter().find(|c| c.id != card.id && c.cwd.as_deref() == Some(path.as_str())).unwrap().clone();
     let run = format!("{home}/run-2");
     wait(&mut h, "the fake agent stopped again", 60, |_| exists_wsl(&format!("{run}/stopped")));
@@ -294,8 +308,8 @@ fn a_task_started_from_the_panel() {
     assert_eq!(read_wsl(&format!("{run}/seen")), b"status: active\n", "a new prompt in review: active again");
     let worktrees = sh(r#"cd "$1" && git worktree list --porcelain | grep -c '^worktree '"#, &[&repo]);
     assert_eq!(worktrees, "2", "the main checkout and the task's worktree only");
-    wait(&mut h, "the new session recorded", 30, |_| stored(&repo, &home, &agent, &reference)["session"].as_str() == Some(again.session().as_str()));
-    wait(&mut h, "back in review after the new turn", 30, |h| status(h) == Some(protocol::TaskStatus::Review));
+    wait(&mut h, "the new session recorded", 90, |_| stored(&repo, &home, &agent, &reference)["session"].as_str() == Some(again.session().as_str()));
+    wait(&mut h, "back in review after the new turn", 90, |h| status(h) == Some(protocol::TaskStatus::Review));
     sh(r#"touch "$1/release-2""#, &[&home]);
     drop(h);
     drop(cleanup);

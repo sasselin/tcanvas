@@ -1,7 +1,7 @@
 //! What the Tasks panel shows and asks, as pure functions: grouping by status, the manual order,
 //! what holds a task up, and the changes its buttons send. No UI.
 
-use protocol::{Priority, Task, TaskOp, TaskStatus};
+use protocol::{Task, TaskOp, TaskStatus, blocked_by};
 
 /// The panel's sections, top to bottom: what needs a look first. The last two start collapsed.
 pub const DISPLAY: [TaskStatus; 6] = [TaskStatus::Review, TaskStatus::Active, TaskStatus::Todo, TaskStatus::Inbox, TaskStatus::Done, TaskStatus::Canceled];
@@ -24,11 +24,6 @@ pub fn open_count(tasks: &[Task]) -> usize {
 
 pub fn find<'a>(tasks: &'a [Task], id: &str) -> Option<&'a Task> {
     tasks.iter().find(|t| t.id == id)
-}
-
-/// The live, unfinished tasks `task` waits for, in its own order: what holds it up.
-pub fn blocked_by<'a>(task: &Task, tasks: &'a [Task]) -> Vec<&'a Task> {
-    task.depends_on.iter().filter_map(|id| find(tasks, id)).filter(|d| d.removed.is_none() && !d.status.finished()).collect()
 }
 
 /// An unfinished task that waits for others, all of them done: it can start now.
@@ -59,21 +54,12 @@ pub fn dependency_choices<'a>(tasks: &'a [Task], task: &str) -> Vec<(&'a Task, b
     live(tasks).filter(|t| t.id != task && !current.contains(&t.id)).map(|t| (t, protocol::task_cycle(tasks, task, &t.id))).collect()
 }
 
-/// The mark of a priority in a row (empty for none).
-pub fn priority_mark(p: Priority) -> &'static str {
-    match p {
-        Priority::None => "",
-        Priority::Low => "↓",
-        Priority::Medium => "!",
-        Priority::High => "!!",
-        Priority::Urgent => "!!!",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell::widgets::priority_mark;
     use protocol::Extra;
+    use protocol::Priority;
 
     fn task(id: &str, status: TaskStatus, depends_on: &[&str]) -> Task {
         Task {

@@ -22,6 +22,7 @@ use crate::features::jump::Jump;
 use crate::features::notifications::Notifications;
 use crate::features::persistence::{self, Persistence};
 use crate::features::projects::Projects;
+use crate::features::queue::Queue;
 use crate::features::shortcuts::Shortcuts;
 use crate::features::shortcuts::keymap::{Shortcut, shortcut_of};
 use crate::features::spaces::Spaces;
@@ -61,6 +62,7 @@ pub struct App {
     wires: Wires,
     pub filters: Filters,
     jump: Jump,
+    queue: Queue,
     shortcuts_help: Shortcuts,
     notifications: Notifications,
     agent: AgentLink,
@@ -93,6 +95,7 @@ impl App {
             wires: Wires,
             filters: Filters::default(),
             jump: Jump::default(),
+            queue: Queue::default(),
             shortcuts_help: Shortcuts::default(),
             notifications: Notifications::new(ctx.clone(), config.os_toasts),
             agent: AgentLink::new(ctx.clone(), config.agent),
@@ -120,6 +123,10 @@ impl App {
         self.jump.is_open()
     }
 
+    pub fn queue_open(&self) -> bool {
+        self.queue.is_open()
+    }
+
     pub fn shortcuts_open(&self) -> bool {
         self.shortcuts_help.is_open()
     }
@@ -136,11 +143,17 @@ impl App {
     fn typing_elsewhere(&self, ctx: &egui::Context) -> bool {
         ctx.memory(|m| m.focused().is_some())
             || self.jump.is_open()
+            || self.queue.is_open()
             || self.shortcuts_help.is_open()
             || self.cards.has_dialog()
             || self.projects.has_dialog()
             || self.worktrees.has_dialog()
             || self.tasks.has_dialog()
+    }
+
+    /// A window other than the queue is open.
+    fn other_dialog(&self) -> bool {
+        self.jump.is_open() || self.shortcuts_help.is_open() || self.cards.has_dialog() || self.projects.has_dialog() || self.worktrees.has_dialog() || self.tasks.has_dialog()
     }
 
     /// Removes global shortcuts, then gives the rest of the keyboard input to the focused terminal.
@@ -163,6 +176,11 @@ impl App {
                 Shortcut::Jump => self.jump.open(),
                 Shortcut::Help => self.shortcuts_help.open(),
                 Shortcut::Tasks => events.push(Event::ToggleTasks),
+                // Not over another window the user is in (an editor, a confirmation...): the
+                // queue would open under it, a flight would leave it open.
+                Shortcut::Queue | Shortcut::QueueNext if self.other_dialog() => {}
+                Shortcut::Queue => self.queue.toggle(),
+                Shortcut::QueueNext => events.extend(self.queue.next(&self.world)),
                 Shortcut::NewCard => events.push(Event::NewCard { at: None, project: None, command: None, setup: None, cwd: None }),
                 Shortcut::Search => {
                     events.push(Event::Unfocus);
@@ -207,6 +225,7 @@ impl App {
         self.worktrees.poll(&mut self.world);
         self.notifications.poll(&ctx, &mut events);
         self.notifications.acknowledge_watched(&mut self.world);
+        self.queue.poll(&mut self.world);
         self.updates.poll(&mut events);
 
         // Two fixed rows: actions and projects, then search and filters. No centered
@@ -222,6 +241,7 @@ impl App {
                     self.agent.status_ui(ui);
                     self.changes.toolbar_ui(ui, &self.world, &mut events);
                     self.tasks.toolbar_ui(ui, &self.world, &mut events);
+                    self.queue.toolbar_ui(ui, &self.world);
                     if let Some(err) = &self.persistence.last_error {
                         ui.label(RichText::new(t().layout_warning).color(theme::status_color(Some(protocol::TermStatus::Exited(1))))).on_hover_text(err);
                     }
@@ -264,6 +284,7 @@ impl App {
         });
 
         self.jump.ui(&ctx, &self.world, &mut events);
+        self.queue.ui(&ctx, &self.world, &mut events);
         self.cards.dialogs(&ctx, &self.world, &mut events);
         self.projects.dialogs(&ctx, &self.world, &mut events);
         self.worktrees.dialogs(&ctx, &self.world, &mut events);

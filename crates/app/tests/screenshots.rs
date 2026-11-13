@@ -345,6 +345,8 @@ fn add_card(h: &mut Harness<'_, App>, id: &str, t: Term<'_>) {
         last_prompt: None,
         agent_prompt_mark: None,
         agent_turn_mark: None,
+        agent_prompt_head: None,
+        agent_turn_head: None,
     };
     app.dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
 }
@@ -525,7 +527,7 @@ fn tasks() {
     ctrl_shift(&h, Key::Num1);
     steps(&mut h, 45);
     let board = TaskBoard { key: "p-shop-api".into(), list: Some(api_tasks()), read_only: false, problem: None, found: vec![] };
-    let hello = AgentEvent::Hello { version: "X.X.X".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, shell: None };
+    let hello = AgentEvent::Hello { version: "X.X.X".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, worktree_refresh: true, shell: None };
     h.state_mut().dispatch(vec![Event::Agent(hello), Event::Agent(AgentEvent::Tasks(Box::new(board)))]);
     ctrl_shift(&h, Key::T);
     steps(&mut h, 3);
@@ -535,6 +537,30 @@ fn tasks() {
     assert!(h.query_by_label("waits for #h4c").is_some() && h.query_by_label("ready").is_some(), "blocked and ready marks shown");
     h.event(egui::Event::PointerGone);
     save(&mut h, "tasks");
+}
+
+/// "Your turn": the API's Claude Code asks a question, the rate limit waits for a review, the
+/// type check failed and the deploy stalled unseen, and two tasks are ready to start.
+#[test]
+#[ignore = "renders README screenshots; run ./scripts/screenshots.sh"]
+fn queue() {
+    let mut h = harness("queue");
+    demo_canvas(&mut h);
+    ctrl_shift(&h, Key::Num0);
+    steps(&mut h, 45);
+    let board = TaskBoard { key: "p-shop-api".into(), list: Some(api_tasks()), read_only: false, problem: None, found: vec![] };
+    let hello = AgentEvent::Hello { version: "X.X.X".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, worktree_refresh: true, shell: None };
+    h.state_mut().dispatch(vec![Event::Agent(hello), Event::Agent(AgentEvent::Tasks(Box::new(board)))]);
+    // Alerts raised while the user was away (a status seen first raises none).
+    for id in ["t5", "t12"] {
+        h.state_mut().world.card_mut(id).expect("demo card").attention = true;
+    }
+    steps(&mut h, 3);
+    ctrl_shift(&h, Key::Q);
+    steps(&mut h, 3);
+    assert!(h.state().queue_open() && h.query_by_label("Your turn (4)").is_some() && h.query_by_label("Ready to start (2)").is_some(), "the question, the review, two alerts; two ready tasks listed");
+    h.event(egui::Event::PointerGone);
+    save(&mut h, "queue");
 }
 
 /// Starting a task: the API's Claude Code card works on the rate limit (its header names the
@@ -554,8 +580,16 @@ fn task_start() {
     rate_limit.branch = Some("task/rate-limit-the-login-route-q7m".into());
     rate_limit.worktree = Some("/home/me/code/shop-api/.claude/worktrees/task-rate-limit-the-login-route-q7m".into());
     let board = TaskBoard { key: "p-shop-api".into(), list: Some(tasks), read_only: false, problem: None, found: vec![] };
-    let hello =
-        AgentEvent::Hello { version: "X.X.X".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: Some(protocol::TaskHooks::Installed), task_links: true, shell: None };
+    let hello = AgentEvent::Hello {
+        version: "X.X.X".into(),
+        hooks: protocol::Hooks::Installed,
+        send_text: true,
+        tasks: true,
+        task_hooks: Some(protocol::TaskHooks::Installed),
+        task_links: true,
+        worktree_refresh: true,
+        shell: None,
+    };
     let main = protocol::Worktree {
         path: "/home/me/code/shop-api".into(),
         head: Some("a".repeat(40)),
@@ -940,6 +974,8 @@ fn api_claude(h: &mut Harness<'_, App>, lines: Vec<String>, status: TermStatus) 
         last_prompt: None,
         agent_prompt_mark: None,
         agent_turn_mark: None,
+        agent_prompt_head: None,
+        agent_turn_head: None,
     };
     app.dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
 }

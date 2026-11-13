@@ -69,6 +69,12 @@ pub enum Cmd {
     },
     /// Scan again now (a cleanup just changed the repository).
     Rescan,
+    /// Scan `key` again now, and say when a scan that started after this request is done
+    /// (`AgentEvent::WorktreesRefreshed`), even when nothing changed.
+    Refresh {
+        key: String,
+        seq: u64,
+    },
 }
 
 /// A command that writes, run on the cleanup thread (one at a time).
@@ -262,6 +268,8 @@ fn run(rx: Receiver<Cmd>, send: Sink, workers: Workers) {
     let mut next_scan = Instant::now();
     // Commands taken from the channel early, to look for newer plan requests.
     let mut waiting: VecDeque<Cmd> = VecDeque::new();
+    // Refreshes asked: answered at the end of the next scan pass, which starts after them.
+    let mut refreshes: Vec<(String, u64)> = Vec::new();
     loop {
         let received = match waiting.pop_front() {
             Some(cmd) => Ok(cmd),
@@ -328,7 +336,13 @@ fn run(rx: Receiver<Cmd>, send: Sink, workers: Workers) {
                 None => send(&AgentEvent::WorktreeCreated { id, key, path: None, problem: Some(Problem::NotAGitRepo), excluded: false, recipe_pending: false }),
             },
             Ok(Cmd::Rescan) => next_scan = Instant::now(),
+            Ok(Cmd::Refresh { key, seq }) => {
+                refreshes.push((key, seq));
+                next_scan = Instant::now();
+            }
             Err(RecvTimeoutError::Timeout) => {
+                // Asked before this pass started: its lists answer them.
+                let answering = std::mem::take(&mut refreshes);
                 let mut inputs = Vec::new();
                 for (key, w) in watched.iter_mut() {
                     let set = scan(key, &w.path, w.since);
@@ -351,6 +365,9 @@ fn run(rx: Receiver<Cmd>, send: Sink, workers: Workers) {
                         send(&AgentEvent::Worktrees(list.clone()));
                         w.last_worktrees = Some(list);
                     }
+                }
+                for (key, seq) in answering {
+                    send(&AgentEvent::WorktreesRefreshed { key, seq });
                 }
                 next_scan = Instant::now() + SCAN_EVERY;
             }

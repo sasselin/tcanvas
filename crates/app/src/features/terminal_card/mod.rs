@@ -1551,6 +1551,8 @@ mod tests {
             last_prompt: None,
             agent_prompt_mark: None,
             agent_turn_mark: None,
+            agent_prompt_head: None,
+            agent_turn_head: None,
         }
     }
 
@@ -1566,7 +1568,16 @@ mod tests {
             world.add_card(card);
         }
         cards.handle(
-            &Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, shell: None }),
+            &Event::Agent(AgentEvent::Hello {
+                version: "1".into(),
+                hooks: protocol::Hooks::Installed,
+                send_text: true,
+                tasks: true,
+                task_hooks: None,
+                task_links: true,
+                worktree_refresh: true,
+                shell: None,
+            }),
             &mut world,
             &mut vec![],
         );
@@ -1735,7 +1746,16 @@ mod tests {
         let mut cards = TerminalCards::new(egui::Context::default(), Launcher::Disabled);
         assert_eq!(outcome_of(&send(&mut cards, &mut world, &id, "x", true), &id).0, Some(SendOutcome::Refused(SendRefusal::NoAgent)));
         cards.handle(
-            &Event::Agent(AgentEvent::Hello { version: "0.1".into(), hooks: protocol::Hooks::Installed, send_text: false, tasks: false, task_hooks: None, task_links: true, shell: None }),
+            &Event::Agent(AgentEvent::Hello {
+                version: "0.1".into(),
+                hooks: protocol::Hooks::Installed,
+                send_text: false,
+                tasks: false,
+                task_hooks: None,
+                task_links: true,
+                worktree_refresh: true,
+                shell: None,
+            }),
             &mut world,
             &mut vec![],
         );
@@ -1852,6 +1872,8 @@ mod tests {
             last_prompt: None,
             agent_prompt_mark: None,
             agent_turn_mark: None,
+            agent_prompt_head: None,
+            agent_turn_head: None,
         });
         assert!(close_message(&card).1.starts_with("« cargo run » est en cours"));
     }
@@ -1875,6 +1897,8 @@ mod tests {
             last_prompt: prompt.map(String::from),
             agent_prompt_mark: None,
             agent_turn_mark: None,
+            agent_prompt_head: None,
+            agent_turn_head: None,
         };
         card.info = Some(info(Some("  ajoute le total TTC ")));
         assert_eq!(header_prompt(&card), Some("ajoute le total TTC"));

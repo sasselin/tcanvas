@@ -185,6 +185,8 @@ fn card_with_prompt(h: &mut Harness<'_, App>, prompt: &str) -> String {
         last_prompt: Some(prompt.into()),
         agent_prompt_mark: None,
         agent_turn_mark: None,
+        agent_prompt_head: None,
+        agent_turn_head: None,
     };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
     steps(h, 2);
@@ -235,6 +237,8 @@ fn the_header_shows_the_last_prompt_elided_with_the_full_text_on_hover() {
         last_prompt: None,
         agent_prompt_mark: None,
         agent_turn_mark: None,
+        agent_prompt_head: None,
+        agent_turn_head: None,
     };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
     steps(&mut h, 2);
@@ -445,6 +449,8 @@ fn agent_status_changes_raise_a_clickable_toast() {
         last_prompt: None,
         agent_prompt_mark: None,
         agent_turn_mark: None,
+        agent_prompt_head: None,
+        agent_turn_head: None,
     };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info(TermStatus::Running)))]);
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info(TermStatus::Stalled)))]);
@@ -475,7 +481,7 @@ fn missing_tmux_is_shown_in_the_status_bar() {
 
 #[test]
 fn missing_shell_hooks_can_be_installed_from_the_status_bar() {
-    let hello = |hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true, task_hooks: None, task_links: true, shell: None });
+    let hello = |hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true, task_hooks: None, task_links: true, worktree_refresh: true, shell: None });
     let installs = |h: &Harness<'_, App>| h.state().agent_sent().iter().filter(|c| **c == protocol::AgentCmd::InstallHooks).count();
     for (lang, label, button) in [(Lang::Fr, "⚠ hooks", "Installer"), (Lang::En, "⚠ hooks", "Install")] {
         let dir = temp_dir("hooks");
@@ -525,6 +531,8 @@ fn unknown_canvas_sessions_are_adopted() {
         last_prompt: None,
         agent_prompt_mark: None,
         agent_turn_mark: None,
+        agent_prompt_head: None,
+        agent_turn_head: None,
     };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
     steps(&mut h, 2);
@@ -1364,6 +1372,8 @@ fn set_status(h: &mut Harness<'_, App>, id: &str, status: TermStatus) {
         last_prompt: None,
         agent_prompt_mark: None,
         agent_turn_mark: None,
+        agent_prompt_head: None,
+        agent_turn_head: None,
     };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Session(info))]);
 }
@@ -2801,7 +2811,16 @@ fn group_with_messages(h: &mut Harness<'_, App>, messages: &[(&str, &str, bool)]
     let id = add_card(h, "srv", pos2(40.0, 40.0));
     let session = format!("tc_{id}");
     h.state_mut().dispatch(vec![
-        Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, shell: None }),
+        Event::Agent(AgentEvent::Hello {
+            version: "1".into(),
+            hooks: protocol::Hooks::Installed,
+            send_text: true,
+            tasks: true,
+            task_hooks: None,
+            task_links: true,
+            worktree_refresh: true,
+            shell: None,
+        }),
         Event::Agent(AgentEvent::Session(SessionInfo {
             session,
             status: TermStatus::Idle,
@@ -2815,6 +2834,8 @@ fn group_with_messages(h: &mut Harness<'_, App>, messages: &[(&str, &str, bool)]
             last_prompt: None,
             agent_prompt_mark: None,
             agent_turn_mark: None,
+            agent_prompt_head: None,
+            agent_turn_head: None,
         })),
     ]);
     steps(h, 2);
@@ -3711,7 +3732,16 @@ fn shop_tasks() -> Vec<protocol::Task> {
 }
 
 fn agent_hello(h: &mut Harness<'_, App>) {
-    let hello = Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, shell: None });
+    let hello = Event::Agent(AgentEvent::Hello {
+        version: "1".into(),
+        hooks: protocol::Hooks::Installed,
+        send_text: true,
+        tasks: true,
+        task_hooks: None,
+        task_links: true,
+        worktree_refresh: true,
+        shell: None,
+    });
     h.state_mut().dispatch(vec![hello]);
 }
 
@@ -4102,7 +4132,16 @@ fn the_tasks_panel_in_english() {
     h.key_press(Key::Escape);
     steps(&mut h, 2);
     // An older agent: said so.
-    let hello = Event::Agent(AgentEvent::Hello { version: "0.1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: false, task_hooks: None, task_links: true, shell: None });
+    let hello = Event::Agent(AgentEvent::Hello {
+        version: "0.1".into(),
+        hooks: protocol::Hooks::Installed,
+        send_text: true,
+        tasks: false,
+        task_hooks: None,
+        task_links: true,
+        worktree_refresh: true,
+        shell: None,
+    });
     h.state_mut().dispatch(vec![hello]);
     steps(&mut h, 3);
     assert!(h.query_by_label("The agent is too old to keep task lists: restart tcanvas to update it.").is_some());
@@ -4111,7 +4150,9 @@ fn the_tasks_panel_in_english() {
 #[test]
 fn coding_agents_get_the_tasks_only_once_enabled_from_the_panel() {
     let sets = |h: &Harness<'_, App>| h.state().agent_sent().iter().filter_map(|c| if let protocol::AgentCmd::SetTaskHooks { enabled } = c { Some(*enabled) } else { None }).collect::<Vec<_>>();
-    let hello = |task_hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks, task_links: true, shell: None });
+    let hello = |task_hooks| {
+        Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks, task_links: true, worktree_refresh: true, shell: None })
+    };
     for (lang, missing, on, enable, disable) in [
         (Lang::Fr, "Les agents de code ne voient pas encore ces tâches.", "Les agents de code voient ces tâches.", "Activer", "Désactiver"),
         (Lang::En, "Coding agents cannot see these tasks yet.", "Coding agents see these tasks.", "Enable", "Disable"),
@@ -4194,6 +4235,9 @@ fn session_info(session: &str, status: TermStatus, prompts: u64, turns: u64) -> 
         last_prompt: Some("Task #k3f".into()),
         agent_prompt_mark: mark(prompts),
         agent_turn_mark: mark(turns),
+        // The hooks record the head with their marks: the base, then the turn's commit.
+        agent_prompt_head: (prompts > 0).then(|| "a".repeat(40)),
+        agent_turn_head: (turns > 0).then(|| "b".repeat(40)),
     }))
 }
 
@@ -4277,7 +4321,8 @@ fn starting_a_task_creates_its_worktree_then_opens_its_card_and_follows_its_agen
     h.state_mut().dispatch(vec![session_info(&card.session(), TermStatus::WaitingInput, 1, 1)]);
     steps(&mut h, 2);
     assert_eq!(task_edits(&h).len(), edits, "no commit yet");
-    let committed = protocol::Worktree { ahead: Some(1), ..worktree(path, false, "task/invoice-pdf-k3f") };
+    assert!(h.state().agent_sent().iter().any(|c| matches!(c, protocol::AgentCmd::RefreshWorktrees { key, .. } if key == "p-shop")), "a list scanned after the turn end is asked for");
+    let committed = protocol::Worktree { ahead: Some(1), head: Some("b".repeat(40)), ..worktree(path, false, "task/invoice-pdf-k3f") };
     let list = protocol::WorktreeList {
         key: "p-shop".into(),
         repo: Some("/home/me/shop".into()),
@@ -4508,6 +4553,7 @@ fn starting_tasks_needs_bash_or_zsh_and_a_safe_command() {
         tasks: true,
         task_hooks: Some(protocol::TaskHooks::Installed),
         task_links: true,
+        worktree_refresh: true,
         shell: Some(protocol::ShellKind::Fish),
     });
     h.state_mut().dispatch(vec![fish, task_board("p-shop", shop_tasks())]);
@@ -4583,4 +4629,356 @@ fn two_quick_starts_without_confirmation_both_go() {
     answer_plan(&mut h, |_| {});
     let branches: Vec<String> = sent_creations(&h).into_iter().map(|(_, r)| r.branch.name().to_string()).collect();
     assert_eq!(branches, vec!["task/customer-search-srh".to_string(), "task/changelog-chg".into()]);
+}
+
+// --- "Your turn" queue -----------------------------------------------------------------------
+
+/// Two groups in two spaces: `shop` (linked to a folder, open) with its tasks, one of them in
+/// review on the `front` card, and `blog`, whose `writer` card asks a question. Returns the ids of
+/// `shop`, `blog`, `front` and `writer`.
+fn queue_scene(h: &mut Harness<'_, App>) -> (String, String, String, String) {
+    let shop = add_project(h, "shop", Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 500.0)));
+    h.state_mut().world.projects[0].cwd = Some("/home/me/shop".into());
+    let blog = add_project(h, "blog", Rect::from_min_size(pos2(0.0, 4000.0), Vec2::new(1400.0, 500.0)));
+    let front = add_card(h, "front", pos2(40.0, 40.0));
+    let writer = add_card(h, "writer", pos2(40.0, 4040.0));
+    agent_hello(h);
+    let mut review = agent_task("rl", "q7m", "Rate limit", protocol::TaskStatus::Review);
+    review.session = Some(h.state().world.card(&front).unwrap().session());
+    let mut tasks = shop_tasks();
+    tasks.insert(0, review);
+    h.state_mut().dispatch(vec![task_board("p-shop", tasks), Event::EnterSpace(Some(shop.clone()))]);
+    set_status(h, &writer, TermStatus::Running);
+    set_status(h, &writer, TermStatus::WaitingInput);
+    steps(h, 3);
+    (shop, blog, front, writer)
+}
+
+/// The queue's row (or button) with this text: the open modal's, above the canvas.
+fn queue_item<'a>(h: &'a Harness<'_, App>, text: &'a str) -> egui_kittest::Node<'a> {
+    h.get_all_by_label(text).last().unwrap_or_else(|| panic!("{text} not in the queue"))
+}
+
+/// The task's editor opens with Enter once the queue showed it in the panel.
+fn open_shown_task(h: &mut Harness<'_, App>) -> Option<String> {
+    h.key_press(Key::Enter);
+    steps(h, 2);
+    h.state().tasks.editor().map(|e| e.task.clone())
+}
+
+#[test]
+fn the_queue_lists_what_needs_the_user_in_order_and_a_card_row_goes_to_its_space() {
+    let dir = temp_dir("queue-list");
+    let mut h = harness(&dir);
+    let (_, blog, _, writer) = queue_scene(&mut h);
+    assert!(h.query_by_label("◆ À vous (2)").is_some(), "the waiting card and the review; the ready tasks are listed, not counted");
+    let watched: Vec<String> = h
+        .state()
+        .agent_sent()
+        .iter()
+        .filter_map(|c| match c {
+            protocol::AgentCmd::WatchTasks { key, .. } => Some(key.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(watched, ["p-shop"], "every linked group's list is followed (blog has no folder)");
+    ctrl_shift(&h, Key::Q);
+    steps(&mut h, 2);
+    assert!(h.state().queue_open());
+    let y = |h: &Harness<'_, App>, text: &str| queue_item(h, text).rect().center().y;
+    let order = ["Attendent votre réponse (1)", "writer", "À relire (1)", "#q7m Rate limit", "Prêtes à démarrer (2)", "#k3f !!! Invoice PDF", "#chg Changelog"];
+    for pair in order.windows(2) {
+        assert!(y(&h, pair[0]) < y(&h, pair[1]), "{} before {}", pair[0], pair[1]);
+    }
+    assert!(h.query_by_label("À vous (2)").is_some());
+    assert!(h.query_by_label("#abt About page").is_none() && h.query_by_label("#srh Customer search").is_none(), "blocked and inbox tasks are not listed");
+    assert!(h.query_by_label("Aller au terminal").is_some(), "the review's card is offered");
+    // A row of another space: its space opens and the camera flies to the card.
+    queue_item(&h, "writer").click();
+    steps(&mut h, 45);
+    let app = h.state();
+    assert!(!app.queue_open());
+    assert_eq!((app.world.space.as_deref(), app.world.focused.as_deref()), (Some(blog.as_str()), Some(writer.as_str())));
+    assert!(!app.world.card(&writer).unwrap().attention, "looked at: its alert is acknowledged");
+    assert!(h.query_by_label("◆ À vous (2)").is_some(), "the question stays until it is answered");
+}
+
+#[test]
+fn a_task_row_shows_the_task_in_its_panel_and_offers_its_card() {
+    let dir = temp_dir("queue-task");
+    let mut h = harness(&dir);
+    let (shop, _, front, _) = queue_scene(&mut h);
+    h.state_mut().dispatch(vec![Event::EnterSpace(None), Event::FocusCard(front.clone())]);
+    steps(&mut h, 2);
+    h.get_by_label("◆ À vous (2)").click();
+    steps(&mut h, 2);
+    queue_item(&h, "#q7m Rate limit").click();
+    steps(&mut h, 3);
+    let app = h.state();
+    assert_eq!(app.world.space.as_deref(), Some(shop.as_str()), "the task's group opens");
+    assert!(app.world.tasks_open && app.tasks.editor().is_none(), "shown in the panel, no window over it");
+    assert_eq!(app.world.focused, None, "the terminal lets go of the keyboard");
+    assert!(h.query_by_label("Rate limit").is_some(), "in the panel");
+    // Enter opens it.
+    assert_eq!(open_shown_task(&mut h).as_deref(), Some("rl"));
+    h.key_press(Key::Escape);
+    steps(&mut h, 2);
+    assert!(h.state().tasks.editor().is_none());
+    ctrl_shift(&h, Key::Q);
+    steps(&mut h, 2);
+    queue_item(&h, "Aller au terminal").click();
+    steps(&mut h, 45);
+    assert_eq!(h.state().world.focused.as_deref(), Some(front.as_str()));
+}
+
+#[test]
+fn the_queue_keyboard_keeps_its_row_while_rows_come_and_go() {
+    let dir = temp_dir("queue-keys");
+    let mut h = harness(&dir);
+    let (_, _, _, writer) = queue_scene(&mut h);
+    ctrl_shift(&h, Key::Q);
+    steps(&mut h, 2);
+    h.key_press(Key::ArrowDown);
+    steps(&mut h, 1);
+    h.key_press(Key::ArrowDown);
+    steps(&mut h, 1);
+    // The question above is answered: its row goes, the count follows, the selection stays on the
+    // invoice.
+    set_status(&mut h, &writer, TermStatus::Running);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("À vous (1)").is_some() && h.query_by_label("writer").is_none());
+    h.key_press(Key::Enter);
+    steps(&mut h, 3);
+    assert!(!h.state().queue_open());
+    assert_eq!(open_shown_task(&mut h).as_deref(), Some("pdf"));
+}
+
+#[test]
+fn a_row_leaves_as_soon_as_its_cause_does() {
+    use protocol::TaskStatus;
+    let dir = temp_dir("queue-live");
+    let mut h = harness(&dir);
+    let (_, _, front, writer) = queue_scene(&mut h);
+    ctrl_shift(&h, Key::Q);
+    steps(&mut h, 2);
+    // The review is done: no task row, and its card does not take its place.
+    let mut done = agent_task("rl", "q7m", "Rate limit", TaskStatus::Done);
+    done.session = Some(h.state().world.card(&front).unwrap().session());
+    let mut tasks = shop_tasks();
+    tasks.insert(0, done);
+    h.state_mut().dispatch(vec![task_board("p-shop", tasks)]);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("#q7m Rate limit").is_none() && h.query_by_label("À vous (1)").is_some());
+    // A failed command raises an alert row until the card is looked at.
+    set_status(&mut h, &writer, TermStatus::Exited(2));
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Bloqués ou en échec (1)").is_some() && h.query_by_label_contains("Attendent votre réponse").is_none());
+    h.key_press(Key::Escape);
+    steps(&mut h, 2);
+    assert!(!h.state().queue_open());
+    h.state_mut().dispatch(vec![Event::FocusCard(writer)]);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("◆ À vous (0)").is_some(), "only ready tasks are left: listed, not counted");
+}
+
+#[test]
+fn an_empty_queue_says_so() {
+    let dir = temp_dir("queue-empty");
+    let mut h = harness(&dir);
+    steps(&mut h, 2);
+    h.get_by_label("◆ À vous (0)").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Rien ne vous attend pour l'instant.").is_some());
+    h.key_press(Key::Escape);
+    steps(&mut h, 2);
+    assert!(!h.state().queue_open());
+    ctrl_shift(&h, Key::J);
+    steps(&mut h, 2);
+    assert_eq!(h.state().world.focused, None, "nothing to go to");
+}
+
+#[test]
+fn the_next_shortcut_and_the_palette_start_with_the_queue() {
+    let dir = temp_dir("queue-next");
+    let mut h = harness(&dir);
+    let (shop, blog, _, writer) = queue_scene(&mut h);
+    // Straight to the first row, without opening the list.
+    ctrl_shift(&h, Key::J);
+    steps(&mut h, 45);
+    assert!(!h.state().queue_open());
+    assert_eq!((h.state().world.space.as_deref(), h.state().world.focused.as_deref()), (Some(blog.as_str()), Some(writer.as_str())));
+    // Again, from there: the next row, the review, shown in its panel.
+    ctrl_shift(&h, Key::J);
+    steps(&mut h, 3);
+    assert_eq!(h.state().world.space.as_deref(), Some(shop.as_str()));
+    assert!(h.state().world.tasks_open && h.state().tasks.editor().is_none());
+    // The palette with no query: what waits for the user first, in the queue's order, then the
+    // groups; ready tasks are not put first.
+    ctrl_shift(&h, Key::P);
+    steps(&mut h, 2);
+    assert!(h.state().jump_open());
+    let y = |h: &Harness<'_, App>, text: &str| h.get_by_label_contains(text).rect().center().y;
+    assert!(y(&h, "● writer") < y(&h, "✔ #q7m Rate limit  ·  shop"));
+    assert!(y(&h, "✔ #q7m Rate limit") < y(&h, "■ shop"));
+    assert!(h.query_by_label_contains("✔ #k3f").is_none(), "ready tasks wait for the queue list");
+    h.key_press(Key::ArrowDown);
+    steps(&mut h, 1);
+    h.key_press(Key::Enter);
+    steps(&mut h, 3);
+    assert!(!h.state().jump_open());
+    assert_eq!(open_shown_task(&mut h).as_deref(), Some("rl"), "the second entry: the review");
+}
+
+#[test]
+fn the_queue_shortcuts_wait_while_another_window_is_open() {
+    let dir = temp_dir("queue-modal");
+    let mut h = harness(&dir);
+    let (_, _, _, writer) = queue_scene(&mut h);
+    h.state_mut().dispatch(vec![Event::ToggleTasks]);
+    steps(&mut h, 2);
+    h.get_by_label("Invoice PDF").click();
+    steps(&mut h, 2);
+    assert!(h.state().tasks.editor().is_some());
+    for key in [Key::Q, Key::J] {
+        ctrl_shift(&h, key);
+        steps(&mut h, 3);
+    }
+    let app = h.state();
+    assert!(!app.queue_open() && app.world.focused.as_deref() != Some(writer.as_str()), "neither opened nor flew under the editor");
+    assert_eq!(app.tasks.editor().map(|e| e.task.as_str()), Some("pdf"));
+}
+
+#[test]
+fn the_queue_in_english() {
+    let dir = temp_dir("queue-english");
+    let mut h = harness_in(&dir, Lang::En);
+    queue_scene(&mut h);
+    assert!(h.query_by_label("◆ Your turn (2)").is_some());
+    ctrl_shift(&h, Key::Q);
+    steps(&mut h, 2);
+    for label in ["Your turn (2)", "Waiting for your answer (1)", "To review (1)", "Ready to start (2)", "Go to card", "↑↓ choose · Enter go · Esc close"] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    ctrl_shift(&h, Key::Q);
+    steps(&mut h, 2);
+    assert!(!h.state().queue_open(), "the shortcut closes it too");
+}
+
+#[test]
+fn the_top_bar_keeps_the_queue_button_in_view_on_a_narrow_window() {
+    let dir = temp_dir("queue-narrow");
+    i18n::set(Lang::Fr);
+    let dir2 = dir.clone();
+    let mut h = Harness::builder()
+        .with_size(Vec2::new(640.0, 500.0))
+        .with_step_dt(1.0 / 60.0)
+        .build_eframe(move |cc| App::new(&cc.egui_ctx, Config { launcher: Launcher::Disabled, agent: AgentMode::Disabled, config_dir: dir2, os_toasts: false, update_check: false }));
+    for n in 0..12 {
+        add_project(&mut h, &format!("group-{n}"), Rect::from_min_size(pos2(n as f32 * 3000.0, 0.0), Vec2::new(1400.0, 500.0)));
+    }
+    h.state_mut().world.projects[0].cwd = Some("/home/me/shop".into());
+    agent_hello(&mut h);
+    let reviews = (0..120).map(|n| agent_task(&format!("t{n}"), &format!("r{n}"), &format!("Review {n}"), protocol::TaskStatus::Review)).collect();
+    h.state_mut().dispatch(vec![task_board("p-group-0", reviews)]);
+    steps(&mut h, 4);
+    let button = h.get_by_label("◆ À vous (120)").rect();
+    assert!(button.max.x <= 640.0 && button.min.x >= 0.0, "in the window: {button:?}");
+    let all = h.get_by_label("Tous").rect();
+    assert!(all.max.x < button.min.x, "the chips keep left of it");
+    // The chips that do not fit scroll under their "▾ N" menu, which keeps left of the button.
+    let menu = h.get_by_label_contains("▾ ").rect();
+    assert!(menu.max.x <= button.min.x, "{menu:?} {button:?}");
+}
+
+// --- The agent stops during a worktree's creation -------------------------------------------
+
+/// The dialog of group `shop` with the "Claude" template chosen and a branch typed; returns the
+/// creation's id once sent.
+fn create_with_claude(h: &mut Harness<'_, App>, branch: &str) -> u64 {
+    h.state_mut().dispatch(vec![Event::NewWorktree("p-shop".into())]);
+    steps(h, 3);
+    h.state_mut().world.projects[0].templates = vec![tcanvas::shell::world::CommandTemplate { name: "Claude".into(), command: "claude".into(), task: false }];
+    answer_plan(h, |p| p.recipe = Some(shop_recipe("npm ci")));
+    type_branch(h, branch);
+    answer_plan(h, |p| p.recipe = Some(shop_recipe("npm ci")));
+    combo(h, "Shell").click();
+    steps(h, 2);
+    h.get_by_label("Claude").click();
+    steps(h, 2);
+    h.get_by_label("Créer").click();
+    steps(h, 2);
+    sent_creations(h).pop().expect("sent").0
+}
+
+#[test]
+fn an_agent_lost_during_a_creation_ends_it_and_a_held_card_opens_as_a_plain_shell() {
+    let dir = temp_dir("worktree-agent-lost");
+    let mut h = harness(&dir);
+    shop_group(&mut h);
+    h.state_mut().dispatch(vec![only_main("p-shop")]);
+    steps(&mut h, 3);
+    // Lost before the answer: the dialog says so at once, no spinner left.
+    let id = create_with_claude(&mut h, "early");
+    assert_eq!(h.state().worktrees.creations_waiting(), 1);
+    h.state_mut().dispatch(vec![Event::AgentLost]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("L'agent s'est arrêté avant de répondre : le worktree a peut-être été créé, ou non. Rouvrez cette fenêtre pour le voir.").is_some());
+    assert_eq!(h.state().worktrees.creations_waiting(), 0);
+    let cards = h.state().world.cards.len();
+    let path = "/home/me/shop/.claude/worktrees/early".to_string();
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: Some(path), problem: None, excluded: false, recipe_pending: false })]);
+    steps(&mut h, 3);
+    assert_eq!(h.state().world.cards.len(), cards, "a late answer opens nothing");
+    h.key_press(Key::Escape);
+    steps(&mut h, 2);
+
+    // Lost between the answer and the recipe's report: the card opens, running nothing.
+    agent_hello(&mut h);
+    let id = create_with_claude(&mut h, "late");
+    let path = "/home/me/shop/.claude/worktrees/late".to_string();
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: Some(path.clone()), problem: None, excluded: false, recipe_pending: true })]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Copies et liens en cours...").is_some());
+    assert!(!h.state().world.cards.iter().any(|c| c.cwd.as_deref() == Some(path.as_str())), "held for the copies");
+    h.state_mut().dispatch(vec![Event::AgentLost]);
+    steps(&mut h, 3);
+    let app = h.state();
+    let card = app.world.cards.iter().find(|c| c.cwd.as_deref() == Some(path.as_str())).expect("opened");
+    assert_eq!((app.cards.pending_setup(&card.id), app.cards.pending_command(&card.id)), (None, None), "a plain shell");
+    assert!(h.query_by_label("Copies et liens en cours...").is_none(), "no spinner left");
+    // The setup was not ticked: only the command is offered.
+    assert!(h.query_by_label("Commande de préparation (non lancée) :").is_none());
+    for label in ["Recette interrompue", "Commande (non lancée) :", "claude", "Copier"] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    h.get_by_label("OK").click();
+    steps(&mut h, 2);
+    assert!(h.state().worktrees.recipe_interrupted().is_none());
+}
+
+#[test]
+fn an_interrupted_recipe_in_english() {
+    let dir = temp_dir("worktree-agent-lost-en");
+    let mut h = harness_in(&dir, Lang::En);
+    shop_group(&mut h);
+    h.state_mut().dispatch(vec![only_main("p-shop")]);
+    steps(&mut h, 3);
+    h.state_mut().world.projects[0].templates = vec![tcanvas::shell::world::CommandTemplate { name: "Claude".into(), command: "claude".into(), task: false }];
+    h.state_mut().dispatch(vec![Event::NewWorktree("p-shop".into())]);
+    steps(&mut h, 3);
+    answer_plan(&mut h, |p| p.recipe = Some(shop_recipe("npm ci")));
+    type_branch(&mut h, "late");
+    answer_plan(&mut h, |p| p.recipe = Some(shop_recipe("npm ci")));
+    h.get_by_label("Create").click();
+    steps(&mut h, 2);
+    let id = sent_creations(&h).pop().expect("sent").0;
+    let path = "/home/me/shop/.claude/worktrees/late".to_string();
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: Some(path), problem: None, excluded: false, recipe_pending: true }), Event::AgentLost]);
+    steps(&mut h, 3);
+    for label in [
+        "Recipe interrupted",
+        "The agent stopped before it was done: which copies and links were made is not known, and nothing ran in the new terminal (it is a plain shell; a task's card was not opened, Resume starts it).",
+    ] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
 }

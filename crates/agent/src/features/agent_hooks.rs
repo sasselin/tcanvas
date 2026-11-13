@@ -8,6 +8,10 @@
 //!   session id, transcript path and last prompt in pane options next to the mark (hex
 //!   encoded, tagged with the same pids), set in the same `tmux` call. It only acts inside the tcanvas tmux server, prints `{}` (a
 //!   valid "no decision" for every agent) and always exits 0: it can never block an agent.
+//!   On a submitted prompt and on a turn end it also moves a mark (`PROMPTS_OPTION`,
+//!   `TURNS_OPTION`) in that same call, with the commit checked out in the agent's folder at that
+//!   moment (`git rev-parse`, bounded by `HEAD_WAIT`: a slow repository costs the head, never the
+//!   hook's time).
 //! - Adapters: `install` writes one hook entry per useful event into each detected agent's
 //!   config, merged with what is already there; `uninstall` removes only those entries.
 //! - Task integration, opt-in and separate from the status hooks (`Part::Tasks`): for the agents
@@ -144,6 +148,69 @@ pub fn counter_args(pane: &str, option: &str, token: &str) -> Vec<String> {
 /// A token no other hook writes: the time in nanoseconds and this process's id.
 pub fn mark_token(nanos: u128, pid: u32) -> String {
     format!("{nanos}-{pid}")
+}
+
+/// A mark's option value: its token, then the commit checked out when it was written, if known.
+pub fn mark_value(token: &str, head: Option<&str>) -> String {
+    match head {
+        Some(head) => format!("{token} {head}"),
+        None => token.to_string(),
+    }
+}
+
+/// A commit id as git prints it (SHA-1 or SHA-256, lowercase hex).
+fn is_commit(s: &str) -> bool {
+    matches!(s.len(), 40 | 64) && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// A mark's option value read back: the mark (its token) and the head recorded with it. A value
+/// of an older writer (the token alone) has no head; anything after the token that is not a
+/// commit id is no head either.
+pub fn split_mark(value: Option<&str>) -> (Option<String>, Option<String>) {
+    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else { return (None, None) };
+    match value.split_once(' ') {
+        Some((token, head)) => (Some(token.to_string()), Some(head.trim().to_string()).filter(|h| is_commit(h))),
+        None => (Some(value.to_string()), None),
+    }
+}
+
+/// How long a hook waits for the commit of its folder: past that, the mark goes without it.
+pub const HEAD_WAIT: Duration = Duration::from_millis(250);
+
+/// The commit checked out in `dir`, through the agent's git helper (redirecting variables
+/// removed, no optional locks), or `None` when git does not answer within `wait`, fails, or
+/// `dir` is not in a repository. A git still running is killed.
+pub fn head_of(dir: &Path, wait: Duration) -> Option<String> {
+    let mut child = super::changes::git_command(dir)
+        .args(["rev-parse", "-q", "--verify", "HEAD^{commit}"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let until = std::time::Instant::now() + wait;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) | Err(_) => return None,
+            Ok(None) if std::time::Instant::now() >= until => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(2)),
+        }
+    }
+    let mut out = String::new();
+    child.stdout.take()?.read_to_string(&mut out).ok()?;
+    Some(out.trim().to_string()).filter(|h| is_commit(h))
+}
+
+/// The folder a hook works in: the payload's `cwd` (the agent's), else the hook's own.
+pub fn hook_dir(value: Option<&Value>) -> Option<PathBuf> {
+    let given = value.and_then(|v| v.get("cwd")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(PathBuf::from);
+    given.filter(|p| p.is_absolute()).or_else(|| std::env::current_dir().ok())
 }
 
 /// First JSON value of `reader`, without waiting for the end of the stream (some callers
@@ -294,7 +361,13 @@ pub fn hook_cli(event: Option<&str>) -> io::Result<()> {
         let payload = payload_of(event, value.as_ref());
         let pids = if change.is_some() { ancestors() } else { Vec::new() };
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let count = counter_of(event).map(|option| counter_args(&pane, option, &mark_token(nanos, std::process::id()))).unwrap_or_default();
+        // Only a prompt or a turn end costs a `git rev-parse` (never a tool call).
+        let count = counter_of(event)
+            .map(|option| {
+                let head = hook_dir(value.as_ref()).and_then(|dir| head_of(&dir, HEAD_WAIT));
+                counter_args(&pane, option, &mark_value(&mark_token(nanos, std::process::id()), head.as_deref()))
+            })
+            .unwrap_or_default();
         let with_count = |mut args: Vec<String>| {
             args.extend(count.iter().cloned());
             args
@@ -1225,6 +1298,14 @@ mod tests {
         // write other tokens: none is lost, none repeats.
         assert_ne!(mark_token(17, 42), mark_token(17, 43));
         assert_ne!(mark_token(17, 42), mark_token(18, 42));
+        // The head goes with the mark, in the same argument (still one tmux call).
+        let head = "a".repeat(40);
+        assert_eq!(counter_args("%3", TURNS_OPTION, &mark_value("17-42", Some(&head))), [";", "set", "-p", "-t", "%3", TURNS_OPTION, &format!("17-42 {head}")]);
+        assert_eq!(split_mark(Some(&format!("17-42 {head}"))), (Some("17-42".into()), Some(head.clone())));
+        assert_eq!(split_mark(Some("17-42")), (Some("17-42".into()), None), "an older writer's mark: no head");
+        assert_eq!(split_mark(Some("17-42 nothex")), (Some("17-42".into()), None));
+        assert_eq!(split_mark(Some("  ")), (None, None));
+        assert_eq!(split_mark(None), (None, None));
         // `SessionEnd` unsets the mark and the payload, never the counters.
         assert!(!tmux_args("%3", None, &[], &Payload::default()).iter().any(|a| a == PROMPTS_OPTION || a == TURNS_OPTION));
     }
