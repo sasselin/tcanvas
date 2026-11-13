@@ -206,3 +206,63 @@ impl Drop for TempDir {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
+/// `git` in `dir`, seeing neither the user's nor the system's configuration.
+fn git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git").arg("-C").arg(dir).args(args).env("GIT_CONFIG_GLOBAL", "/dev/null").env("GIT_CONFIG_NOSYSTEM", "1").output().unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn prompt_and_turn_end_marks_carry_the_commit_of_the_agents_folder() {
+    if !has("tmux") || !has("bash") || !has("git") {
+        eprintln!("tmux, bash or git missing: test skipped");
+        return;
+    }
+    let server = Server { socket: format!("tcanvas-agenthead-{}", std::process::id()) };
+    let session = "tc_head";
+    server.tmux(&["new-session", "-d", "-s", session, "-x", "100", "-y", "20", "bash --norc --noprofile -i"]);
+    thread::sleep(Duration::from_millis(300));
+    let dir = TempDir(std::env::temp_dir().join(format!("tcanvas-agenthead-{}", std::process::id())));
+    let repo = dir.0.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q", "-b", "main"]);
+    let commit = |n: u32| {
+        git(&repo, &["-c", "user.name=T", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", &format!("c{n}")]);
+        git(&repo, &["rev-parse", "HEAD"])
+    };
+    let first = commit(1);
+    // The payload names the agent's folder; the hook itself runs elsewhere.
+    let payload = dir.0.join("payload.json");
+    std::fs::write(&payload, serde_json::json!({ "session_id": "s", "cwd": repo.display().to_string() }).to_string()).unwrap();
+    let outside = dir.0.join("outside.json");
+    std::fs::write(&outside, serde_json::json!({ "session_id": "s", "cwd": dir.0.display().to_string() }).to_string()).unwrap();
+
+    let mut child = Command::new(AGENT).env("TCANVAS_TMUX_SOCKET", &server.socket).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let _stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, events) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = tx.send(protocol::decode(&line).expect("valid JSON line"));
+        }
+    });
+    let agent = Agent { child, events };
+    agent.wait_status(session, "Idle", |i| i.status == TermStatus::Idle);
+
+    // A prompt, a commit, a turn end: each mark with the head of its moment.
+    server.type_line(session, &format!("cd /; {AGENT} hook UserPromptSubmit <{} >/dev/null", payload.display()));
+    agent.wait_status(session, "the prompt's head", |i| i.agent_prompt_mark.is_some() && i.agent_prompt_head.as_deref() == Some(first.as_str()));
+    let second = commit(2);
+    server.type_line(session, &format!("{AGENT} hook Stop <{} >/dev/null", payload.display()));
+    agent.wait_status(session, "the turn end's head", |i| {
+        i.agent_turn_mark.is_some() && i.agent_turn_head.as_deref() == Some(second.as_str()) && i.agent_prompt_head.as_deref() == Some(first.as_str())
+    });
+    // One option per mark, the head in its value (set by the hook's single tmux call).
+    let raw = server.tmux(&["display", "-p", "-t", session, "#{@tc_agent_turn_mark}"]);
+    assert!(raw.ends_with(&format!(" {second}")), "{raw}");
+    // Outside a repository: the mark moves, without a head.
+    server.type_line(session, &format!("{AGENT} hook UserPromptSubmit <{} >/dev/null", outside.display()));
+    agent.wait_status(session, "a prompt outside any repository", |i| i.agent_prompt_mark.is_some() && i.agent_prompt_head.is_none());
+}

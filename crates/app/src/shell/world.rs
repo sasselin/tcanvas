@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use egui::{Pos2, Rect, Vec2};
-use protocol::{DEFAULT_STALL_SECS, SESSION_PREFIX, SessionInfo, TermStatus};
+use protocol::{DEFAULT_STALL_SECS, Priority, SESSION_PREFIX, SessionInfo, TaskList, TermStatus};
 use serde::{Deserialize, Serialize};
 
 pub type CardId = String;
@@ -224,6 +224,70 @@ pub struct CardWorktree {
     pub linked: Option<String>,
 }
 
+/// Why a row is in the "Your turn" queue, in the queue's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum QueueKind {
+    /// A terminal or its coding agent asks for permission or input.
+    Waiting,
+    /// A task in review.
+    Review,
+    /// A terminal stalled, failed or ended, not looked at yet.
+    Alert,
+    /// A task to do that waits for nothing unfinished.
+    Ready,
+}
+
+impl QueueKind {
+    /// Someone waits for the user (the top bar counts these; ready tasks only wait to be started).
+    pub fn needs_user(self) -> bool {
+        self != QueueKind::Ready
+    }
+}
+
+/// What a queue row is about: the identity the keyboard selection follows across updates.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum QueueKey {
+    Card(CardId),
+    /// A task of the list `list` (its key: groups of one repository share it).
+    Task {
+        list: String,
+        task: String,
+    },
+}
+
+/// A task named by a queue row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueueTask {
+    /// The group whose list shows it.
+    pub project: ProjectId,
+    pub id: String,
+    pub reference: String,
+    /// One line.
+    pub title: String,
+    pub priority: Priority,
+}
+
+/// One row of the "Your turn" queue (kept by the `queue` slice, in its order).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueueEntry {
+    pub key: QueueKey,
+    pub kind: QueueKind,
+    /// Its group (`None`: a terminal outside any group).
+    pub project: Option<ProjectId>,
+    /// The card it is about, or the live card of its task.
+    pub card: Option<CardId>,
+    /// The task it is about, or the task its card was started for.
+    pub task: Option<QueueTask>,
+    /// The card's status (the one that put it here, or its task's card's).
+    pub status: Option<TermStatus>,
+    /// The card is stalled, failed or stopped, its alert not looked at (shown on a task's row too).
+    pub card_alert: bool,
+    /// One line from the terminal: the question it shows, or the last prompt it was given.
+    pub detail: Option<String>,
+    /// Unix seconds: since when its cause has been seen (a card's), or the task's last change.
+    pub since: u64,
+}
+
 #[derive(Default)]
 pub struct World {
     pub cards: Vec<Card>,
@@ -253,6 +317,12 @@ pub struct World {
     pub card_worktrees: BTreeMap<CardId, CardWorktree>,
     /// The task each card was started for (kept by the `tasks` slice).
     pub card_tasks: BTreeMap<CardId, CardTask>,
+    /// The task list each group shows (kept by the `tasks` slice, for the groups it follows).
+    pub task_lists: BTreeMap<ProjectId, TaskList>,
+    /// Goes up whenever `task_lists` changes.
+    pub task_lists_rev: u64,
+    /// What needs the user now, in order (kept by the `queue` slice).
+    pub queue: Vec<QueueEntry>,
     /// Groups whose folder is in a git repository (kept by the `worktrees` slice): they offer
     /// to create a worktree.
     pub git_groups: std::collections::BTreeSet<ProjectId>,
@@ -670,6 +740,8 @@ mod tests {
             last_prompt: None,
             agent_prompt_mark: None,
             agent_turn_mark: None,
+            agent_prompt_head: None,
+            agent_turn_head: None,
         });
         assert_eq!(c.title(), "python3 -m http.server");
         c.name = Some("API".into());

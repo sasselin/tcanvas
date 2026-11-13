@@ -1,7 +1,7 @@
 //! Event bus: the only way for one slice to act on another.
 
 use egui::{Pos2, Rect};
-use protocol::{AgentCmd, AgentEvent, LocalBranch, Problem, WorktreeBranch};
+use protocol::{AgentCmd, AgentEvent, LocalBranch, Problem, TermStatus, WorktreeBranch};
 
 use super::world::{Camera, CardId, CommandTemplate, ProjectId, QuickMessage, TaskSettings};
 
@@ -105,6 +105,21 @@ pub enum Notice {
     NotSent(SendRefusal),
     /// Text sent to this terminal by the app was typed in but not submitted, for this reason.
     NotSubmitted(SendRefusal),
+}
+
+/// Exit code of a Ctrl+C: not a failure worth reporting.
+pub const SIGINT_EXIT: i32 = 130;
+
+/// The alert a status calls for, whatever came before: stalled, waiting for an answer, failed
+/// (not a Ctrl+C), stopped. `None` for a status that needs nobody.
+pub fn alert(status: TermStatus) -> Option<Notice> {
+    match status {
+        TermStatus::Stalled => Some(Notice::Stalled),
+        TermStatus::WaitingInput => Some(Notice::WaitingInput),
+        TermStatus::Exited(code) if code != SIGINT_EXIT => Some(Notice::Failed(code)),
+        TermStatus::Dead => Some(Notice::Stopped),
+        _ => None,
+    }
 }
 
 /// Why a card did not take the text sent to it (`Event::SendText`).
@@ -274,6 +289,11 @@ pub enum Event {
     ToggleTasks,
     /// Turns the "free grid" option on or off (inside a group: the group is the whole canvas).
     ToggleFreeGrid,
+    /// Opens the group's space and its "Tasks" panel, on this task (its id).
+    ShowTask {
+        project: ProjectId,
+        task: String,
+    },
     /// Opens the "Changes" panel on this group.
     ShowChanges(ProjectId),
     /// Command to forward to the agent.

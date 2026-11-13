@@ -88,6 +88,15 @@ pub fn report_lines(report: &RecipeReport) -> Vec<(String, bool)> {
     lines
 }
 
+/// A recipe the agent stopped applying: its worktree exists, its copies and links may be
+/// incomplete, and what its card was to run did not run (offered for copying instead).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Interrupted {
+    pub path: String,
+    pub setup: Option<String>,
+    pub command: Option<String>,
+}
+
 #[derive(Default)]
 pub struct Worktrees {
     /// Latest list of each group's repository (key: project id), with the group folder it was
@@ -101,8 +110,11 @@ pub struct Worktrees {
     /// What the recipe did to the last worktree created (its folder, the report: `None` while it
     /// is being applied), until closed.
     report: Option<(String, Option<RecipeReport>)>,
-    /// Creations whose recipe is being applied, with the creation whose card waits for it.
-    applying: Vec<(u64, Option<create::Sent>)>,
+    /// Creations whose recipe is being applied: (request id, the new worktree's folder, the
+    /// creation whose card waits for it).
+    applying: Vec<(u64, String, Option<create::Sent>)>,
+    /// The agent stopped while a recipe was being applied: what the report window says instead.
+    interrupted: Option<Interrupted>,
     /// The recipe setup commands accepted.
     trust: Trust,
     /// Plans asked for tasks' starts, by request id.
@@ -120,6 +132,11 @@ impl Worktrees {
     /// What the recipe did to the last worktree created, while it is shown.
     pub fn recipe_report(&self) -> Option<&(String, Option<RecipeReport>)> {
         self.report.as_ref()
+    }
+
+    /// The recipe the agent stopped applying, while its report window is open.
+    pub fn recipe_interrupted(&self) -> Option<&Interrupted> {
+        self.interrupted.as_ref()
     }
 
     pub fn list(&self, project: &str) -> Option<&WorktreeList> {
@@ -246,7 +263,8 @@ impl Worktrees {
                         }
                         if *recipe_pending {
                             self.report = Some((path.clone(), None));
-                            self.applying.push((sent.id, hold.then_some(sent)));
+                            self.interrupted = None;
+                            self.applying.push((sent.id, path.clone(), hold.then_some(sent)));
                         }
                     }
                     if !keep {
@@ -259,9 +277,11 @@ impl Worktrees {
                     self.create = None;
                 }
             }
+            // The agent stopped (or another one started): what it was asked will never be answered.
+            Event::AgentLost | Event::Agent(AgentEvent::Hello { .. }) => self.agent_gone(world, out),
             Event::Agent(AgentEvent::RecipeApplied { id, path, report, .. }) => {
-                if let Some(i) = self.applying.iter().position(|(sent, _)| sent == id) {
-                    let (_, held) = self.applying.remove(i);
+                if let Some(i) = self.applying.iter().position(|(sent, _, _)| sent == id) {
+                    let (_, _, held) = self.applying.remove(i);
                     self.report = Some((path.clone(), Some((**report).clone())));
                     if let Some(sent) = held {
                         out.extend(create::open_card(&sent, path, world));
@@ -301,14 +321,55 @@ impl Worktrees {
         }
     }
 
+    /// The agent went away. A creation not answered yet ends now, in its dialog (it may or may
+    /// not have been made), and is forgotten: a late answer with its id changes nothing. A recipe
+    /// being applied is not waited for any more: its worktree exists, so a card held for it opens,
+    /// as a plain shell (the copies and links may be incomplete: its setup and command do not run,
+    /// they are offered for copying). A task's card does not open: the task keeps its links, and
+    /// its row offers to resume it (the tasks slice ends its start).
+    fn agent_gone(&mut self, world: &World, out: &mut Vec<Event>) {
+        self.sent.clear();
+        self.task_plans.clear();
+        if let Some(dialog) = self.create.as_mut() {
+            dialog.agent_lost();
+        }
+        for (_, path, held) in std::mem::take(&mut self.applying) {
+            out.push(Event::Inform { title: t().recipe_interrupted_title.into(), body: (t().recipe_interrupted_body)(&path) });
+            let (setup, command) = match &held {
+                Some(sent) => (sent.setup.clone(), sent.task.as_ref().map(|t| t.card.command.clone()).or(sent.command.clone())),
+                None => (None, None),
+            };
+            if let Some(sent) = held.filter(|s| s.task.is_none() && world.project(&s.project).is_some()) {
+                out.push(Event::NewCard { at: None, project: Some(sent.project.clone()), command: None, setup: None, cwd: Some(path.clone()) });
+            }
+            self.report = Some((path.clone(), None));
+            self.interrupted = Some(Interrupted { path, setup, command });
+        }
+    }
+
     /// What the recipe did to the worktree just created, until the user closes it.
     fn report_ui(&mut self, ctx: &egui::Context) {
         let Some((path, report)) = &self.report else { return };
+        let interrupted = self.interrupted.as_ref().filter(|i| &i.path == path);
         let mut open = true;
         egui::Window::new(t().recipe_report_title).id(egui::Id::unique("recipe-report")).collapsible(false).resizable(false).show(ctx, |ui| {
             ui.set_max_width(520.0);
             ui.label((t().recipe_report_intro)(path));
             match report {
+                _ if interrupted.is_some() => {
+                    let i = interrupted.expect("checked");
+                    ui.label(RichText::new(t().recipe_interrupted_unknown).color(DIRTY));
+                    for (label, text) in [(t().recipe_interrupted_setup, &i.setup), (t().recipe_interrupted_command, &i.command)] {
+                        let Some(text) = text else { continue };
+                        ui.label(RichText::new(label).color(theme::TEXT_DIM));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(text).monospace());
+                            if ui.small_button(t().recipe_interrupted_copy).clicked() {
+                                ui.ctx().copy_text(text.clone());
+                            }
+                        });
+                    }
+                }
                 Some(report) => {
                     ScrollArea::vertical().max_height(240.0).show(ui, |ui| {
                         for (line, ok) in report_lines(report) {
@@ -330,6 +391,7 @@ impl Worktrees {
         });
         if !open {
             self.report = None;
+            self.interrupted = None;
         }
     }
 
@@ -684,6 +746,81 @@ mod tests {
 
     fn new_cards(out: &[Event]) -> usize {
         out.iter().filter(|e| matches!(e, Event::NewCard { .. })).count()
+    }
+
+    #[test]
+    fn a_creation_the_agent_never_answered_ends_in_its_dialog_and_is_forgotten() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
+        let (mut w, _) = world_with_cards(&[]);
+        let mut s = Worktrees::default();
+        s.handle(&Event::Agent(AgentEvent::Worktrees(list("p", shop()))), &mut w, &mut vec![]);
+        s.handle(&Event::NewWorktree("p".into()), &mut w, &mut vec![]);
+        let id = send_creation(&mut s, &w, "r", std::time::Instant::now());
+        assert!(s.create.as_ref().unwrap().creating() && s.creations_waiting() == 1);
+        let mut out = vec![];
+        s.handle(&Event::AgentLost, &mut w, &mut out);
+        let dialog = s.create.as_ref().expect("still open, saying why");
+        assert!(!dialog.creating() && dialog.lost(), "not creating any more");
+        assert_eq!(s.creations_waiting(), 0);
+        assert!(out.is_empty());
+        // A late answer with that id (the old agent's, replayed) changes nothing.
+        let mut out = vec![];
+        s.handle(&answer(id, false), &mut w, &mut out);
+        assert!(out.is_empty() && s.create.is_some(), "{out:?}");
+        // A new agent's hello does the same.
+        let id = send_creation(&mut s, &w, "r2", std::time::Instant::now());
+        let hello = AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, worktree_refresh: true, shell: None };
+        s.handle(&Event::Agent(hello), &mut w, &mut vec![]);
+        assert!(s.create.as_ref().unwrap().lost() && s.creations_waiting() == 0);
+        let mut out = vec![];
+        s.handle(&answer(id, true), &mut w, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_recipe_the_agent_stopped_applying_opens_a_plain_shell_and_offers_what_did_not_run() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
+        let (mut w, _) = world_with_cards(&[]);
+        w.projects[0].templates = vec![crate::shell::world::CommandTemplate { name: "Claude".into(), command: "claude".into(), task: false }];
+        let mut s = Worktrees::default();
+        s.handle(&Event::Agent(AgentEvent::Worktrees(list("p", shop()))), &mut w, &mut vec![]);
+        s.handle(&Event::NewWorktree("p".into()), &mut w, &mut vec![]);
+        s.create.as_mut().unwrap().template = Some(0);
+        let id = send_creation(&mut s, &w, "r", std::time::Instant::now());
+        s.handle(&answer(id, true), &mut w, &mut vec![]);
+        let mut out = vec![];
+        s.handle(&Event::AgentLost, &mut w, &mut out);
+        assert!(
+            matches!(&out[..], [Event::Inform { title, body }, Event::NewCard { command: None, setup: None, cwd: Some(p), .. }] if title == "Recette interrompue" && body.contains("/w") && p == "/w"),
+            "{out:?}"
+        );
+        assert_eq!(s.recipe_interrupted(), Some(&Interrupted { path: "/w".into(), setup: None, command: Some("claude".into()) }));
+        assert_eq!(s.recipe_report(), Some(&("/w".to_string(), None)), "the report window stays, saying what is unknown");
+        // The report that never came, coming anyway: nothing opens twice.
+        let mut out = vec![];
+        s.handle(&applied(id, &RecipeReport::default()), &mut w, &mut out);
+        assert!(out.is_empty());
+
+        // A task's start: its card does not open (the task keeps its links: Resume), what it would
+        // have run is offered.
+        let card = crate::shell::event::TaskCard {
+            card: "c1".into(),
+            project: "p".into(),
+            cwd: "/w".into(),
+            command: "claude \"$TCANVAS_TASK\"".into(),
+            setup: Some("npm ci".into()),
+            task: crate::shell::event::TaskEnv { reference: "k3f".into(), title: "Invoice".into(), prompt: "p".into() },
+        };
+        let task = create::SentTask { task: "pdf".into(), branch: "task/invoice-k3f".into(), card };
+        s.sent.push(create::Sent { id: 77, project: "p".into(), command: None, setup: Some("npm ci".into()), repo: None, location: None, task: Some(Box::new(task)) });
+        let mut out = vec![];
+        s.handle(&answer(77, true), &mut w, &mut out);
+        assert!(out.iter().any(|e| matches!(e, Event::TaskWorktreeCreated { task, .. } if task == "pdf")), "its links are set: {out:?}");
+        assert!(!out.iter().any(|e| matches!(e, Event::NewTaskCard(_))));
+        let mut out = vec![];
+        s.handle(&Event::AgentLost, &mut w, &mut out);
+        assert!(matches!(&out[..], [Event::Inform { .. }]), "no card: {out:?}");
+        assert_eq!(s.recipe_interrupted().map(|i| (i.setup.as_deref(), i.command.as_deref())), Some((Some("npm ci"), Some("claude \"$TCANVAS_TASK\""))));
     }
 
     #[test]

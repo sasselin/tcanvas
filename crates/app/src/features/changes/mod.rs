@@ -10,6 +10,7 @@ use protocol::{AgentCmd, AgentEvent, ChangeKind, ChangeSet, CommitInfo, FileChan
 use crate::shell::event::Event;
 use crate::shell::i18n::t;
 use crate::shell::theme;
+use crate::shell::widgets::age_label;
 use crate::shell::world::{Project, ProjectId, World, unix_now};
 
 /// A file touched more recently than this is highlighted: you see the AI at work.
@@ -116,20 +117,6 @@ pub fn reconcile(watched: &mut BTreeMap<ProjectId, String>, projects: &[Project]
         }
     }
     cmds
-}
-
-/// "just now", "12 s ago", "3 min ago"…
-pub fn age_label(now: u64, mtime: u64) -> String {
-    if mtime == 0 {
-        return String::new();
-    }
-    match now.saturating_sub(mtime) {
-        0..=2 => t().just_now.into(),
-        s @ 3..=59 => (t().secs_ago)(s),
-        s @ 60..=3599 => (t().mins_ago)(s / 60),
-        s @ 3600..=86_399 => (t().hours_ago)(s / 3600),
-        s => (t().days_ago)(s / 86_400),
-    }
 }
 
 /// `src/features/a.rs` → (`src/features/`, `a.rs`).
@@ -606,7 +593,16 @@ mod tests {
         c.poll(&w, &mut ev);
         assert_eq!(ev.len(), 1);
         c.handle(
-            &Event::Agent(AgentEvent::Hello { version: "x".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None, task_links: true, shell: None }),
+            &Event::Agent(AgentEvent::Hello {
+                version: "x".into(),
+                hooks: protocol::Hooks::Installed,
+                send_text: true,
+                tasks: true,
+                task_hooks: None,
+                task_links: true,
+                worktree_refresh: true,
+                shell: None,
+            }),
             &mut world(),
             &mut vec![],
         );

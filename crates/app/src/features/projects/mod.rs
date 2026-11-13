@@ -1055,6 +1055,8 @@ mod tests {
             last_prompt: None,
             agent_prompt_mark: None,
             agent_turn_mark: None,
+            agent_prompt_head: None,
+            agent_turn_head: None,
         });
         let (ia, outside) = (a.id.clone(), Card::new(Rect::from_min_size(pos2(5000.0, 0.0), Vec2::splat(50.0)), None));
         w.add_card(a);

@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Receiver};
 use egui::{Align2, Id, RichText, Sense};
 use protocol::{AgentEvent, SessionInfo, TermStatus};
 
-use crate::shell::event::{Event, Notice};
+use crate::shell::event::{Event, Notice, alert};
 use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::world::{Card, CardId, World};
@@ -20,8 +20,6 @@ const TOAST_SECS: f64 = 15.0;
 /// A copy confirmation doesn't need to linger.
 const COPIED_SECS: f64 = 2.0;
 const MAX_TOASTS: usize = 5;
-/// Exit code of a Ctrl+C: not a failure worth reporting.
-const SIGINT_EXIT: i32 = 130;
 
 /// Status transition → possible notification. `prev == None`: first observation
 /// (startup, reconnection), nothing is reported.
@@ -31,15 +29,11 @@ pub fn decide(prev: Option<TermStatus>, info: &SessionInfo) -> Option<Notice> {
         return None;
     }
     match info.status {
-        TermStatus::Stalled => Some(Notice::Stalled),
-        TermStatus::WaitingInput => Some(Notice::WaitingInput),
-        TermStatus::Exited(code) if code != SIGINT_EXIT => Some(Notice::Failed(code)),
-        TermStatus::Dead => Some(Notice::Stopped),
         TermStatus::Idle if matches!(prev, TermStatus::Running | TermStatus::Stalled | TermStatus::WaitingInput) => match (info.last_exit, info.last_duration_secs) {
             (Some(0), Some(secs)) if secs >= LONG_COMMAND_SECS => Some(Notice::Finished { secs }),
             _ => None,
         },
-        _ => None,
+        status => alert(status),
     }
 }
 
@@ -266,6 +260,8 @@ mod tests {
             last_prompt: None,
             agent_prompt_mark: None,
             agent_turn_mark: None,
+            agent_prompt_head: None,
+            agent_turn_head: None,
         }
     }
 
@@ -286,6 +282,13 @@ mod tests {
         assert_eq!(decide(Some(Running), &info(Idle, Some(0), Some(45))), Some(Notice::Finished { secs: 45 }));
         assert_eq!(decide(Some(Running), &info(Idle, Some(0), Some(3))), None);
         assert_eq!(decide(Some(Exited(1)), &info(Idle, Some(0), Some(300))), None);
+    }
+
+    #[test]
+    fn alerts_by_status() {
+        use TermStatus::*;
+        assert_eq!([Idle, Running, Exited(130)].map(alert), [None, None, None]);
+        assert_eq!([Stalled, WaitingInput, Exited(2), Dead].map(alert), [Some(Notice::Stalled), Some(Notice::WaitingInput), Some(Notice::Failed(2)), Some(Notice::Stopped)]);
     }
 
     fn world_with_card() -> (World, CardId) {

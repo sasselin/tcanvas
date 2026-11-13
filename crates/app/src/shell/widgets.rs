@@ -2,7 +2,41 @@
 
 use egui::{Id, Key, Modal, Modifiers, RichText};
 
+use protocol::Priority;
+
 use crate::shell::i18n::t;
+
+/// "just now", "12 s ago", "3 min ago"…
+pub fn age_label(now: u64, mtime: u64) -> String {
+    if mtime == 0 {
+        return String::new();
+    }
+    match now.saturating_sub(mtime) {
+        0..=2 => t().just_now.into(),
+        s @ 3..=59 => (t().secs_ago)(s),
+        s @ 60..=3599 => (t().mins_ago)(s / 60),
+        s @ 3600..=86_399 => (t().hours_ago)(s / 3600),
+        s => (t().days_ago)(s / 86_400),
+    }
+}
+
+/// Text as a header shows it: control characters and the invisible ones that reorder or hide
+/// what is drawn around them (bidirectional controls, zero-width marks) dropped.
+pub fn visible_text(text: &str) -> String {
+    let hidden = |c: char| c.is_control() || matches!(c, '\u{00ad}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}');
+    text.chars().map(|c| if c.is_control() { ' ' } else { c }).filter(|c| !hidden(*c) || *c == ' ').collect::<String>().trim().to_string()
+}
+
+/// The mark of a priority in a row (empty for none).
+pub fn priority_mark(p: Priority) -> &'static str {
+    match p {
+        Priority::None => "",
+        Priority::Low => "↓",
+        Priority::Medium => "!",
+        Priority::High => "!!",
+        Priority::Urgent => "!!!",
+    }
+}
 
 /// Modal confirmation. `Some(true)`: confirmed (button or Enter), `Some(false)`: cancelled
 /// (button, Escape or click outside), `None`: still open.

@@ -19,11 +19,23 @@ pub enum Shortcut {
     Help,
     /// The "Tasks" panel.
     Tasks,
+    /// The "Your turn" list.
+    Queue,
+    /// The next row of the "Your turn" list, without opening it.
+    QueueNext,
 }
 
 /// Ctrl+Shift+<letter> shortcuts. Digits (projects, fit all) are handled apart: physical key.
-pub const GLOBAL: &[(Shortcut, Key)] =
-    &[(Shortcut::Jump, Key::P), (Shortcut::NewCard, Key::N), (Shortcut::Search, Key::F), (Shortcut::CloseCard, Key::W), (Shortcut::Help, Key::K), (Shortcut::Tasks, Key::T)];
+pub const GLOBAL: &[(Shortcut, Key)] = &[
+    (Shortcut::Jump, Key::P),
+    (Shortcut::NewCard, Key::N),
+    (Shortcut::Search, Key::F),
+    (Shortcut::CloseCard, Key::W),
+    (Shortcut::Help, Key::K),
+    (Shortcut::Tasks, Key::T),
+    (Shortcut::Queue, Key::Q),
+    (Shortcut::QueueNext, Key::J),
+];
 
 const DIGITS: [Key; 10] = [Key::Num0, Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9];
 
@@ -136,19 +148,26 @@ pub fn action(tx: &Texts, s: Shortcut) -> &'static str {
         Shortcut::CloseCard => tx.key_close_card,
         Shortcut::Help => tx.key_help,
         Shortcut::Tasks => tx.key_tasks,
+        Shortcut::Queue => tx.key_queue,
+        Shortcut::QueueNext => tx.key_queue_next,
     }
+}
+
+/// The combo of a Ctrl+Shift+<letter> shortcut, shown in hints (`Shortcut::Project` and
+/// `Shortcut::FitAll`, on digits, are not in `GLOBAL`: Ctrl+Shift+0).
+pub fn combo_of(s: Shortcut) -> Combo {
+    let key = GLOBAL.iter().find(|(g, _)| *g == s).map_or(Key::Num0, |(_, k)| *k);
+    Combo::ctrl_shift(Input::Key(key))
 }
 
 /// The combo of the "Tasks" panel, shown in its button's hint.
 pub fn tasks_combo() -> Combo {
-    let key = GLOBAL.iter().find(|(s, _)| *s == Shortcut::Tasks).map_or(Key::T, |(_, k)| *k);
-    Combo::ctrl_shift(Input::Key(key))
+    combo_of(Shortcut::Tasks)
 }
 
 /// The combo of the "Keyboard shortcuts" window, shown next to its entries.
 pub fn help_combo() -> Combo {
-    let key = GLOBAL.iter().find(|(s, _)| *s == Shortcut::Help).map_or(Key::K, |(_, k)| *k);
-    Combo::ctrl_shift(Input::Key(key))
+    combo_of(Shortcut::Help)
 }
 
 pub fn sections() -> Vec<Section> {
@@ -211,7 +230,11 @@ mod tests {
         let cs = Modifiers::CTRL | Modifiers::SHIFT;
         assert_eq!(shortcut_of(&key(Key::P, cs)), Some(Shortcut::Jump));
         assert_eq!(shortcut_of(&key(Key::K, cs)), Some(Shortcut::Help));
-        assert_eq!(shortcut_of(&key(Key::J, cs)), None);
+        assert_eq!(shortcut_of(&key(Key::Q, cs)), Some(Shortcut::Queue));
+        assert_eq!(shortcut_of(&key(Key::J, cs)), Some(Shortcut::QueueNext));
+        assert_eq!(shortcut_of(&key(Key::G, cs)), None);
+        // Taken by the terminals (copy, paste): never global.
+        assert!(GLOBAL.iter().all(|(_, k)| ![Key::C, Key::V].contains(k)));
         assert_eq!(shortcut_of(&key(Key::N, cs)), Some(Shortcut::NewCard));
         assert_eq!(shortcut_of(&key(Key::T, cs)), Some(Shortcut::Tasks));
         assert_eq!(shortcut_of(&key(Key::P, Modifiers::CTRL)), None, "Ctrl+P stays with the shell");

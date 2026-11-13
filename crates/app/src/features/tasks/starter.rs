@@ -19,13 +19,14 @@ use std::time::{Duration, Instant};
 use egui::{Button, CollapsingHeader, Color32, ComboBox, Id, Key, Modal, Modifiers, RichText, ScrollArea, TextEdit, Ui};
 use protocol::{DEFAULT_WORKTREE_LOCATION, LinkChange, Problem, RECIPE_FILE, Task, TaskOp, WorktreeBranch, folder_for_branch};
 
-use super::logic::{blocked_by, find};
+use super::logic::find;
 use super::start::{self, Branch, Target, TaskCommand};
 use super::{Pending, Tasks};
 use crate::shell::event::{Event, TaskCard, TaskWorktreeOrder, TaskWorktreePlan, TaskWorktreeSpec};
 use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::world::{CommandTemplate, Project, ProjectId, TaskSettings, World, new_id};
+use protocol::blocked_by;
 
 const ERROR: Color32 = Color32::from_rgb(235, 95, 95);
 const WARNING: Color32 = Color32::from_rgb(230, 180, 80);

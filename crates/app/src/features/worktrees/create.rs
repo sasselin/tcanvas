@@ -412,6 +412,8 @@ pub struct CreateDialog {
     refused: Option<(Form, Problem)>,
     /// The agent never answered the creation.
     no_answer: bool,
+    /// The agent stopped before answering the creation.
+    lost: bool,
 }
 
 impl CreateDialog {
@@ -434,7 +436,23 @@ impl CreateDialog {
             pending: None,
             refused: None,
             no_answer: false,
+            lost: false,
         }
+    }
+
+    /// The agent stopped: a creation not answered yet never will be (it may or may not have been
+    /// made), and its answer is not waited for any more.
+    pub fn agent_lost(&mut self) {
+        if self.pending.take().is_some() {
+            self.lost = true;
+        }
+        // What the next agent knows is asked again.
+        self.asked = None;
+    }
+
+    /// The agent stopped before answering this dialog's creation.
+    pub fn lost(&self) -> bool {
+        self.lost
     }
 
     pub fn creating(&self) -> bool {
@@ -559,6 +577,7 @@ impl CreateDialog {
         self.pending = Some(Pending { id, at: now, running: false });
         self.refused = None;
         self.no_answer = false;
+        self.lost = false;
         Some(Sent { id, project: self.project.clone(), command, setup, repo, location, task: None })
     }
 
@@ -619,6 +638,9 @@ impl CreateDialog {
             }
             if self.no_answer {
                 ui.label(RichText::new(t().cleanup_no_answer).color(ERROR));
+            }
+            if self.lost {
+                ui.label(RichText::new(t().worktree_agent_lost).color(ERROR));
             }
             ui.horizontal(|ui| {
                 let ready = form.request(plan, false).is_some() && !busy;

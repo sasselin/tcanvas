@@ -861,6 +861,13 @@ pub struct SessionInfo {
     pub agent_prompt_mark: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_turn_mark: Option<String>,
+    /// The commit checked out in the hook's folder when it wrote that prompt's (that turn end's)
+    /// mark, recorded with the mark (`None`: not a repository, git too slow for the hook, or an
+    /// older agent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_prompt_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_turn_head: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
@@ -1488,6 +1495,11 @@ pub fn task_cycle(tasks: &[Task], task: &str, on: &str) -> bool {
     false
 }
 
+/// The live, unfinished tasks `task` waits for, in its own order: what holds it up.
+pub fn blocked_by<'a>(task: &Task, tasks: &'a [Task]) -> Vec<&'a Task> {
+    task.depends_on.iter().filter_map(|id| tasks.iter().find(|t| &t.id == id)).filter(|d| d.removed.is_none() && !d.status.finished()).collect()
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(tag = "type")]
 pub enum AgentEvent {
@@ -1510,6 +1522,9 @@ pub enum AgentEvent {
         /// The user's login shell, the one the cards run (`None` from older agents).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shell: Option<ShellKind>,
+        /// The agent answers `AgentCmd::RefreshWorktrees` (missing from older agents).
+        #[serde(default)]
+        worktree_refresh: bool,
     },
     /// A subscribed task list, on subscribing and whenever it changes.
     Tasks(Box<TaskBoard>),
@@ -1563,6 +1578,12 @@ pub enum AgentEvent {
     /// Worktrees of a watched folder's repository (follows `AgentCmd::Watch`). An app that
     /// predates this event fails to decode the line and skips it.
     Worktrees(WorktreeList),
+    /// Answer to `AgentCmd::RefreshWorktrees`: a scan of `key` that started after the request is
+    /// done, and its worktree list, if it changed, was sent before this.
+    WorktreesRefreshed {
+        key: String,
+        seq: u64,
+    },
     /// Answer to `AgentCmd::Cleanup`: `problem` is `None` when everything asked was done.
     /// `deleted_branch`: the branch deleted along with a worktree.
     Cleaned {
@@ -1705,6 +1726,12 @@ pub enum AgentCmd {
         key: String,
         request: CreateWorktree,
     },
+    /// Scans the watched folder `key` again as soon as possible, and says so when done
+    /// (`AgentEvent::WorktreesRefreshed`), even when nothing changed.
+    RefreshWorktrees {
+        key: String,
+        seq: u64,
+    },
     /// Subscribes `key` to the task list of `path`: its repository's (keyed by the main
     /// checkout), or the folder's own outside git. Answered by `AgentEvent::Tasks`, then again
     /// whenever the list changes on disk. Read only: nothing is created until a change.
@@ -1775,6 +1802,8 @@ mod tests {
             last_prompt: None,
             agent_prompt_mark: None,
             agent_turn_mark: None,
+            agent_prompt_head: None,
+            agent_turn_head: None,
         });
         let line = encode(&ev);
         assert!(line.ends_with('\n') && !line[..line.len() - 1].contains('\n'));
@@ -1796,6 +1825,8 @@ mod tests {
             last_prompt: Some("add the total with taxes to the PDF \"now\" \u{e9}t\u{e9}".into()),
             agent_prompt_mark: None,
             agent_turn_mark: None,
+            agent_prompt_head: None,
+            agent_turn_head: None,
         });
         assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
     }
@@ -1832,6 +1863,8 @@ mod tests {
             last_prompt: Some("hi".into()),
             agent_prompt_mark: None,
             agent_turn_mark: None,
+            agent_prompt_head: None,
+            agent_turn_head: None,
         };
         let old: OldSessionInfo = decode(&encode(&new)).unwrap();
         assert_eq!(old.session, "tc_a");
@@ -2332,7 +2365,7 @@ mod tests {
     #[test]
     fn roundtrip_hooks() {
         for hooks in [Hooks::Installed, Hooks::Missing, Hooks::Unsupported] {
-            let ev = AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true, task_hooks: Some(TaskHooks::Missing), task_links: true, shell: None };
+            let ev = AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true, task_hooks: Some(TaskHooks::Missing), task_links: true, worktree_refresh: true, shell: None };
             assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
             let ev = AgentEvent::HooksChanged { hooks };
             assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);

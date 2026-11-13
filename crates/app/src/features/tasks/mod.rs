@@ -23,14 +23,15 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use egui::{Button, CollapsingHeader, Color32, ComboBox, Id, Key, Modal, Panel, RichText, ScrollArea, Sides, TextEdit, Ui};
 use protocol::{AgentCmd, AgentEvent, Author, FoundList, FoundWhy, LinkChange, Priority, Problem, SessionInfo, Task, TaskBoard, TaskHooks, TaskOp, TaskStatus, WorktreeList};
 
-use crate::features::changes::age_label;
 use crate::features::shortcuts::keymap::tasks_combo;
 use crate::shell::event::Event;
 use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::widgets;
+use crate::shell::widgets::{age_label, priority_mark, visible_text};
 use crate::shell::world::{CardId, CardTask, Project, ProjectId, World, unix_now};
-use logic::{blocked_by, dependency_choices, find, move_op, open_count, priority_mark, ready, sections};
+use logic::{dependency_choices, find, move_op, open_count, ready, sections};
+use protocol::blocked_by;
 use start::{Blocked, RowAction};
 
 const ERROR: Color32 = Color32::from_rgb(235, 95, 95);
@@ -190,6 +191,10 @@ pub struct Tasks {
     error: Option<(ProjectId, String)>,
     /// In the "All" view: the group of the last focused terminal.
     shown: Option<ProjectId>,
+    /// The task shown to the user (`Event::ShowTask`): highlighted in the panel, Enter opens it.
+    selected: Option<(ProjectId, String)>,
+    /// Scroll the panel to it at the next frame.
+    reveal: bool,
     /// Merging another list into a group's, waiting for confirmation.
     merge: Option<(ProjectId, FoundList)>,
     /// Whether coding agents get these tasks (a session start hook, a skill): `None` while no
@@ -201,6 +206,16 @@ pub struct Tasks {
     task_hooks_error: Option<String>,
     /// The agent records where tasks are worked on (`TaskOp::SetLinks`).
     task_links: bool,
+    /// The agent answers `AgentCmd::RefreshWorktrees`.
+    worktree_refresh: bool,
+    /// The last refresh asked (any group).
+    next_refresh: u64,
+    /// The last refresh answered, per group.
+    refreshed: HashMap<ProjectId, u64>,
+    /// Goes up with every list received or forgotten.
+    boards_rev: u64,
+    /// What `World::card_tasks` was last computed from: (`boards_rev`, `cards_signature`).
+    card_tasks_of: Option<(u64, u64)>,
     /// Each group's repository as the agent lists it (`None`: its folder is outside git; missing:
     /// not known yet).
     repos: BTreeMap<ProjectId, Option<WorktreeList>>,
@@ -269,25 +284,24 @@ impl Tasks {
         self.boards.get(key).and_then(|b| b.list.as_ref()).map(|l| l.tasks.as_slice()).unwrap_or_default()
     }
 
-    /// Every frame: the agent follows exactly the panel group's list, the edited one, and those
-    /// of the groups holding terminals (a task's card shows its task, and its status follows its
-    /// agent); the count shows on the toolbar even when the panel is closed. Which task each card
-    /// was started for goes to the world.
+    /// Every frame: the agent follows the list of every group linked to a folder (the panel's, a
+    /// task's card shows its task and its status follows its agent, and the "Your turn" queue
+    /// lists what needs the user in all of them), the panel's group first; the count shows on the
+    /// toolbar even when the panel is closed. Which task each card was started for goes to the
+    /// world (computed again only when a list or the cards changed), and so does every list
+    /// received (`World::task_lists`).
     pub fn poll(&mut self, world: &mut World, events: &mut Vec<Event>) {
         let mut wanted: BTreeMap<ProjectId, String> = BTreeMap::new();
         if self.capable != Some(false) {
-            let edited = self.editor.as_ref().and_then(|e| world.project(&e.key));
-            let with_cards = world.projects.iter().filter(|p| world.members(&p.id).next().is_some());
-            let starting = self.starter.as_ref().and_then(|s| world.project(&s.project));
-            for p in self.panel_project(world).into_iter().chain(edited).chain(with_cards).chain(starting) {
-                if let Some(cwd) = &p.cwd {
-                    wanted.insert(p.id.clone(), cwd.clone());
-                }
-            }
+            wanted = world.projects.iter().filter_map(|p| Some((p.id.clone(), p.cwd.clone()?))).collect();
         }
-        let tasks = card_tasks(&self.boards, world);
-        if tasks != world.card_tasks {
-            world.card_tasks = tasks;
+        let inputs = (self.boards_rev, cards_signature(world));
+        if self.card_tasks_of != Some(inputs) {
+            self.card_tasks_of = Some(inputs);
+            let tasks = card_tasks(&self.boards, world);
+            if tasks != world.card_tasks {
+                world.card_tasks = tasks;
+            }
         }
         let mut cmds = Vec::new();
         self.watched.retain(|key, path| {
@@ -297,11 +311,13 @@ impl Tasks {
             }
             keep
         });
-        for (key, path) in wanted {
-            if !self.watched.contains_key(&key) {
-                self.watched.insert(key.clone(), path.clone());
-                cmds.push(AgentCmd::WatchTasks { key, path });
-            }
+        // The panel's list first: the agent answers in order, and it is the one on screen.
+        let first = self.panel_project(world).map(|p| p.id.clone());
+        let mut new: Vec<(ProjectId, String)> = wanted.into_iter().filter(|(k, _)| !self.watched.contains_key(k)).collect();
+        new.sort_by_key(|(k, _)| Some(k) != first.as_ref());
+        for (key, path) in new {
+            self.watched.insert(key.clone(), path.clone());
+            cmds.push(AgentCmd::WatchTasks { key, path });
         }
         events.extend(cmds.into_iter().map(Event::ToAgent));
     }
@@ -460,10 +476,11 @@ impl Tasks {
 
     pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
         match ev {
-            Event::Agent(AgentEvent::Hello { tasks, task_hooks, task_links, shell, .. }) => {
+            Event::Agent(AgentEvent::Hello { tasks, task_hooks, task_links, worktree_refresh, shell, .. }) => {
                 // A new agent: it follows nothing yet, and what the last one was asked is lost.
                 self.capable = Some(*tasks);
                 self.task_links = *task_links;
+                self.worktree_refresh = *worktree_refresh;
                 self.shell_ok = shell.is_none_or(|s| s.runs_task_script());
                 self.starts_lost();
                 self.reset_follow();
@@ -509,9 +526,22 @@ impl Tasks {
                         self.clearing.retain(|id| shown.contains(id));
                     }
                     self.boards.insert(board.key.clone(), (**board).clone());
+                    self.boards_rev += 1;
+                    match &board.list {
+                        Some(list) => world.task_lists.insert(board.key.clone(), list.clone()),
+                        None => world.task_lists.remove(&board.key),
+                    };
+                    world.task_lists_rev += 1;
                     self.reconcile(&board.key, out);
                     self.follow_unlinked(out);
+                    // A turn end kept while an automatic change was not shown yet: decided now.
+                    self.follow_branches(&board.key, out);
                 }
+            }
+            Event::Agent(AgentEvent::WorktreesRefreshed { key, seq }) => {
+                let last = self.refreshed.entry(key.clone()).or_default();
+                *last = (*last).max(*seq);
+                self.follow_branches(key, out);
             }
             Event::Agent(AgentEvent::Worktrees(list)) => {
                 if world.project(&list.key).is_some_and(|p| p.cwd.is_some()) {
@@ -539,8 +569,29 @@ impl Tasks {
                     out.push(Event::Inform { title: t().tasks_notice_title.into(), body: t().problem(problem) });
                 }
             }
+            Event::ShowTask { project, task } => {
+                if !world.tasks_open {
+                    world.tasks_open = true;
+                    world.touch();
+                }
+                self.shown = Some(project.clone());
+                (self.selected, self.reveal) = (Some((project.clone(), task.clone())), true);
+                // The panel takes the keyboard (Enter opens the task), not the focused terminal.
+                out.push(Event::Unfocus);
+                let reference = find(self.tasks_of(project), task).map_or_else(|| "?".to_string(), |t| t.reference.clone());
+                match &mut self.editor {
+                    Some(e) if e.key == *project && e.task == *task => {}
+                    // Typed text is never dropped: the editor stays, and says why.
+                    Some(e) if e.dirty() => e.error = Some((t().task_reveal_blocked)(&reference)),
+                    _ => self.editor = None,
+                }
+            }
             Event::SetProjectCwd(id, _) | Event::RemoveProject(id) => {
                 self.boards.remove(id);
+                self.boards_rev += 1;
+                if world.task_lists.remove(id).is_some() {
+                    world.task_lists_rev += 1;
+                }
                 self.repos.remove(id);
                 self.undo.retain(|u| &u.key != id);
                 if let Some(ed) = self.editor.as_mut().filter(|e| &e.key == id) {
@@ -573,6 +624,7 @@ impl Tasks {
     /// change that never applied, nor from counters of another agent's run).
     fn reset_follow(&mut self) {
         self.follows.clear();
+        self.refreshed.clear();
         self.sessions.clear();
         self.unlinked.clear();
         // From now on, the first report of every session is a baseline only: a card started
@@ -611,14 +663,21 @@ impl Tasks {
         let signals = start::signals(&prev, &now);
         self.sessions.insert(session.to_string(), now);
         let branch = start::branch_state(self.repos.get(&project).and_then(|r| r.as_ref()), task.worktree.as_deref());
-        let instant = std::time::Instant::now();
-        for signal in signals {
+        for (signal, head) in signals {
             let follow = self.follows.entry((list.clone(), task.id.clone())).or_default();
-            if let Some(change) = follow.signal(task.status, signal, &branch, instant) {
+            if let Some(change) = follow.signal(task.status, signal, &branch, head.as_deref()) {
                 self.send_move(&project, &list, &task.id, change, out);
             }
         }
-        self.follows.entry((list, task.id)).or_default().reported(&branch);
+        let follow = self.follows.entry((list, task.id)).or_default();
+        follow.reported(&branch);
+        // A turn end waits for a list scanned after it: asked for now, answered even when nothing
+        // changed. An agent that cannot refresh decides on the first list whose head moved.
+        if follow.wants_refresh() && self.worktree_refresh {
+            self.next_refresh += 1;
+            follow.asked(self.next_refresh);
+            out.push(Event::ToAgent(AgentCmd::RefreshWorktrees { key: project, seq: self.next_refresh }));
+        }
     }
 
     /// The list changed: reports that waited for their session's link are counted now.
@@ -638,10 +697,10 @@ impl Tasks {
         }
         let Some(list) = self.boards.get(project).and_then(|b| b.list.clone()) else { return };
         let repo = self.repos.get(project).and_then(|r| r.clone());
-        let instant = std::time::Instant::now();
+        let answered = self.refreshed.get(project).copied();
         for task in list.tasks.iter().filter(|t| t.removed.is_none()) {
             let Some(follow) = self.follows.get_mut(&(list.key.clone(), task.id.clone())).filter(|f| f.awaits_branch()) else { continue };
-            if let Some(change) = follow.branch(task.status, &start::branch_state(repo.as_ref(), task.worktree.as_deref()), instant) {
+            if let Some(change) = follow.branch(task.status, &start::branch_state(repo.as_ref(), task.worktree.as_deref()), answered) {
                 self.send_move(project, &list.key, &task.id, change, out);
             }
         }
@@ -773,12 +832,32 @@ impl Tasks {
         let launching: Vec<String> = self.starts.keys().cloned().collect();
         let blocked = move |t: &Task| start::blocked(start::Readiness { starting: launching.contains(&t.id), ..base });
         let ctx = StartCtx { world, blocked: &blocked };
+        let selected = self.selected.as_ref().filter(|(p, _)| *p == project.id).map(|(_, id)| id.clone());
+        // Enter opens the task shown, unless something else has the keyboard (a field, a terminal,
+        // a window above the panel).
+        let free = ui.ctx().memory(|m| m.focused().is_none() && m.allows_interaction(ui.layer_id())) && world.focused.is_none();
+        if let Some(id) = selected.as_ref().filter(|_| free)
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Enter))
+        {
+            actions.push(Action::Open(id.clone()));
+        }
+        let reveal = std::mem::take(&mut self.reveal);
         ScrollArea::vertical().id_salt("tasks-list").auto_shrink([false, false]).show(ui, |ui| {
             for (status, tasks) in sections(&list.tasks) {
                 let header = format!("{} ({})", t().task_status(status), tasks.len());
-                CollapsingHeader::new(RichText::new(header).small().strong().color(theme::TEXT_DIM)).id_salt(("tasks-section", status as u8)).default_open(!status.finished()).show(ui, |ui| {
+                let holds = reveal && tasks.iter().any(|t| Some(&t.id) == selected.as_ref());
+                let section = CollapsingHeader::new(RichText::new(header).small().strong().color(theme::TEXT_DIM)).id_salt(("tasks-section", status as u8)).default_open(!status.finished());
+                section.open(holds.then_some(true)).show(ui, |ui| {
                     for task in tasks {
-                        actions.extend(row(ui, task, &list.tasks, writable, &ctx));
+                        if Some(&task.id) != selected.as_ref() {
+                            actions.extend(row(ui, task, &list.tasks, writable, &ctx));
+                            continue;
+                        }
+                        let shown = egui::Frame::new().fill(theme::TITLE_BG).stroke(egui::Stroke::new(1.0, theme::FOCUS)).corner_radius(3.0).show(ui, |ui| row(ui, task, &list.tasks, writable, &ctx));
+                        if reveal {
+                            shown.response.scroll_to_me(Some(egui::Align::Center));
+                        }
+                        actions.extend(shown.inner);
                     }
                 });
             }
@@ -1095,16 +1174,27 @@ impl Tasks {
     }
 }
 
+/// What the cards are, for `card_tasks`: their ids, in order (cheap, no allocation).
+fn cards_signature(world: &World) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for c in &world.cards {
+        c.id.hash(&mut h);
+    }
+    h.finish()
+}
+
 /// The task each card was started for: the cards whose session a live task records (an
 /// unfinished one first, when two do).
 fn card_tasks(boards: &HashMap<ProjectId, TaskBoard>, world: &World) -> BTreeMap<CardId, CardTask> {
+    let by_session: HashMap<String, &CardId> = world.cards.iter().map(|c| (c.session(), &c.id)).collect();
     let mut out: BTreeMap<CardId, (bool, CardTask)> = BTreeMap::new();
     for list in boards.values().filter_map(|b| b.list.as_ref()) {
         for t in list.tasks.iter().filter(|t| t.removed.is_none()) {
-            let Some(card) = t.session.as_deref().and_then(|s| world.card_by_session(s)) else { continue };
+            let Some(card) = t.session.as_deref().and_then(|s| by_session.get(s)) else { continue };
             let finished = t.status.finished();
-            if out.get(&card.id).is_none_or(|(f, _)| *f && !finished) {
-                out.insert(card.id.clone(), (finished, CardTask { reference: t.reference.clone(), title: start::visible_text(&t.title) }));
+            if out.get(*card).is_none_or(|(f, _)| *f && !finished) {
+                out.insert((*card).clone(), (finished, CardTask { reference: t.reference.clone(), title: visible_text(&t.title) }));
             }
         }
     }
@@ -1268,7 +1358,7 @@ mod tests {
     }
 
     fn hello(tasks: bool) -> Event {
-        Event::Agent(AgentEvent::Hello { version: "x".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks, task_hooks: None, task_links: true, shell: None })
+        Event::Agent(AgentEvent::Hello { version: "x".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks, task_hooks: None, task_links: true, worktree_refresh: true, shell: None })
     }
 
     fn task(id: &str) -> Task {
@@ -1312,39 +1402,66 @@ mod tests {
     }
 
     #[test]
-    fn the_panel_group_and_the_edited_one_are_followed() {
+    fn every_linked_group_is_followed_the_panels_first_and_its_list_published() {
         let mut tasks = Tasks::default();
         let mut w = world();
-        let mut out = vec![];
-        tasks.poll(&mut w, &mut out);
-        assert_eq!(cmds(&out), vec![AgentCmd::WatchTasks { key: "shop".into(), path: "~/shop".into() }]);
-        let mut out = vec![];
-        tasks.poll(&mut w, &mut out);
-        assert!(out.is_empty(), "once");
-        // Another group, without a folder: nothing to follow.
-        w.space = Some("draft".into());
-        let mut out = vec![];
-        tasks.poll(&mut w, &mut out);
-        assert_eq!(cmds(&out), vec![AgentCmd::UnwatchTasks { key: "shop".into() }]);
-        // A task of shop being edited keeps shop followed while another space is open.
-        w.space = Some("shop".into());
-        tasks.poll(&mut w, &mut vec![]);
-        tasks.handle(&board("shop", vec![task("a")]), &mut w, &mut vec![]);
-        tasks.open_editor("shop", "a");
         w.space = Some("blog".into());
         let mut out = vec![];
         tasks.poll(&mut w, &mut out);
-        assert_eq!(cmds(&out), vec![AgentCmd::WatchTasks { key: "blog".into(), path: "~/blog".into() }], "shop stays");
+        let watch = |key: &str, path: &str| AgentCmd::WatchTasks { key: key.into(), path: path.into() };
+        assert_eq!(cmds(&out), vec![watch("blog", "~/blog"), watch("shop", "~/shop")], "the open group's list first; not the group without a folder");
+        let mut out = vec![];
+        tasks.poll(&mut w, &mut out);
+        assert!(out.is_empty(), "once");
+        // A folder unlinked: that list only goes.
+        w.projects[0].cwd = None;
+        let mut out = vec![];
+        tasks.poll(&mut w, &mut out);
+        assert_eq!(cmds(&out), vec![AgentCmd::UnwatchTasks { key: "shop".into() }]);
         // A new agent: subscribed again.
         tasks.handle(&hello(true), &mut w, &mut vec![]);
         let mut out = vec![];
         tasks.poll(&mut w, &mut out);
-        assert_eq!(cmds(&out).len(), 2);
+        assert_eq!(cmds(&out), vec![watch("blog", "~/blog")]);
         // An agent without task lists is asked nothing.
         tasks.handle(&hello(false), &mut w, &mut vec![]);
         let mut out = vec![];
         tasks.poll(&mut w, &mut out);
         assert!(cmds(&out).is_empty());
+        tasks.handle(&board("blog", vec![task("a")]), &mut w, &mut vec![]);
+        assert_eq!(w.task_lists.get("blog").map(|l| l.tasks.len()), Some(1));
+        let empty = Event::Agent(AgentEvent::Tasks(Box::new(TaskBoard { key: "blog".into(), list: None, read_only: false, problem: None, found: vec![] })));
+        tasks.handle(&empty, &mut w, &mut vec![]);
+        assert!(!w.task_lists.contains_key("blog"), "no list any more");
+        tasks.handle(&board("shop", vec![task("a")]), &mut w, &mut vec![]);
+        tasks.handle(&Event::RemoveProject("shop".into()), &mut w, &mut vec![]);
+        assert!(w.task_lists.is_empty());
+    }
+
+    #[test]
+    fn showing_a_task_selects_it_in_the_panel_without_its_editor_and_never_over_typed_text() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
+        let mut tasks = Tasks::default();
+        let mut w = world();
+        tasks.handle(&board("blog", vec![task("a"), task("b")]), &mut w, &mut vec![]);
+        let mut out = vec![];
+        tasks.handle(&Event::ShowTask { project: "blog".into(), task: "a".into() }, &mut w, &mut out);
+        assert!(w.tasks_open);
+        assert_eq!(tasks.shown.as_deref(), Some("blog"));
+        assert_eq!(tasks.selected, Some(("blog".into(), "a".into())));
+        assert!(tasks.reveal && tasks.editor().is_none(), "revealed, not opened");
+        assert!(matches!(out.as_slice(), [Event::Unfocus]), "the panel takes the keyboard");
+        // An editor with typed text stays, and says why the other task does not show.
+        tasks.open_editor("blog", "b");
+        tasks.editor.as_mut().unwrap().title = "typed".into();
+        tasks.handle(&Event::ShowTask { project: "blog".into(), task: "a".into() }, &mut w, &mut vec![]);
+        let ed = tasks.editor().expect("kept");
+        assert_eq!((ed.task.as_str(), ed.title.as_str()), ("b", "typed"));
+        assert_eq!(ed.error.as_deref(), Some("#ra est affichée dans le panneau : enregistrez ou fermez cette tâche pour la voir"));
+        // Without typed text, it closes to let the panel show.
+        tasks.editor.as_mut().unwrap().title = "b".into();
+        tasks.handle(&Event::ShowTask { project: "blog".into(), task: "a".into() }, &mut w, &mut vec![]);
+        assert!(tasks.editor().is_none());
     }
 
     #[test]
