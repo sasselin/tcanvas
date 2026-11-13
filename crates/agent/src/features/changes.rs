@@ -10,7 +10,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use protocol::{AgentEvent, ChangeKind, ChangeSet, CommitInfo, DirEntry, DirListing, FileChange, Problem};
+use protocol::{AgentEvent, ChangeKind, ChangeSet, CommitInfo, DirEntry, DirListing, FileChange, Problem, WorktreeList};
+
+use super::worktrees;
 
 const SCAN_EVERY: Duration = Duration::from_secs(2);
 const MAX_FILES: usize = 500;
@@ -39,6 +41,7 @@ struct Watched {
     /// Start of watching: outside git, only files modified since then count.
     since: u64,
     last_sent: Option<ChangeSet>,
+    last_worktrees: Option<WorktreeList>,
 }
 
 /// Starts the watcher thread. Produced events go through `send`.
@@ -50,12 +53,13 @@ pub fn spawn(send: impl Fn(&AgentEvent) + Send + 'static) -> Sender<Cmd> {
 
 fn run(rx: Receiver<Cmd>, send: impl Fn(&AgentEvent)) {
     let mut watched: HashMap<String, Watched> = HashMap::new();
+    let mut cache = worktrees::Cache::default();
     let mut next_scan = Instant::now();
     loop {
         match rx.recv_timeout(next_scan.saturating_duration_since(Instant::now())) {
             Ok(Cmd::Watch { key, path }) => {
                 if watched.get(&key).is_none_or(|w| w.path != path) {
-                    watched.insert(key.clone(), Watched { path, since: unix_now(), last_sent: None });
+                    watched.insert(key.clone(), Watched { path, since: unix_now(), last_sent: None, last_worktrees: None });
                 }
                 // Immediate response (folder validation): rescan right away.
                 next_scan = Instant::now();
@@ -75,11 +79,27 @@ fn run(rx: Receiver<Cmd>, send: impl Fn(&AgentEvent)) {
             }
             Ok(Cmd::List { path }) => send(&AgentEvent::DirListing(list_dir(&path))),
             Err(RecvTimeoutError::Timeout) => {
+                let mut inputs = Vec::new();
                 for (key, w) in watched.iter_mut() {
                     let set = scan(key, &w.path, w.since);
+                    // A git folder's top is one of its repository's worktrees. When the folder is
+                    // that top, the status just run covers the whole worktree: no second one.
+                    let top = set.root.clone().filter(|_| set.git);
+                    let whole = top.is_some() && resolve(&w.path).ok().map(|d| d.to_string_lossy().into_owned()) == top;
+                    inputs.push(worktrees::Input { key: key.clone(), top, dirty: whole.then_some(!set.files.is_empty()) });
                     if w.last_sent.as_ref() != Some(&set) {
                         send(&AgentEvent::Changes(set.clone()));
                         w.last_sent = Some(set);
+                    }
+                }
+                // Stable order: which groups share a repository scan does not depend on hashing.
+                inputs.sort_by(|a, b| a.key.cmp(&b.key));
+                for list in worktrees::scan_all(&inputs, &mut cache) {
+                    if let Some(w) = watched.get_mut(&list.key)
+                        && w.last_worktrees.as_ref() != Some(&list)
+                    {
+                        send(&AgentEvent::Worktrees(list.clone()));
+                        w.last_worktrees = Some(list);
                     }
                 }
                 next_scan = Instant::now() + SCAN_EVERY;
@@ -122,7 +142,7 @@ fn git(dir: &Path, args: &[&str]) -> Option<Output> {
     Command::new("git").arg("-C").arg(dir).args(args).env("GIT_OPTIONAL_LOCKS", "0").output().ok()
 }
 
-fn git_ok(dir: &Path, args: &[&str]) -> Option<String> {
+pub fn git_ok(dir: &Path, args: &[&str]) -> Option<String> {
     git(dir, args).filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
@@ -322,7 +342,7 @@ const MAX_DIRS: usize = 2000;
 
 /// Subfolders of `path` for the picker: visible ones only, sorted case-insensitively.
 pub fn list_dir(path: &str) -> DirListing {
-    let mut listing = DirListing { request: path.into(), path: None, parent: None, git: false, dirs: Vec::new(), error: None };
+    let mut listing = DirListing { request: path.into(), path: None, parent: None, git: false, worktree: false, dirs: Vec::new(), error: None };
     let dir = match resolve(if path.trim().is_empty() { "~" } else { path }) {
         Ok(d) => d,
         Err(e) => {
@@ -330,7 +350,7 @@ pub fn list_dir(path: &str) -> DirListing {
             return listing;
         }
     };
-    listing.git = dir.join(".git").exists();
+    (listing.git, listing.worktree) = git_marker(&dir);
     listing.parent = dir.parent().map(|p| p.to_string_lossy().into_owned());
     match fs::read_dir(&dir) {
         Ok(entries) => {
@@ -340,7 +360,8 @@ pub fn list_dir(path: &str) -> DirListing {
                 if name.starts_with('.') || !entry.path().metadata().is_ok_and(|m| m.is_dir()) {
                     continue;
                 }
-                listing.dirs.push(DirEntry { git: entry.path().join(".git").exists(), name });
+                let (git, worktree) = git_marker(&entry.path());
+                listing.dirs.push(DirEntry { git, worktree, name });
                 if listing.dirs.len() >= MAX_DIRS {
                     break;
                 }
@@ -351,6 +372,25 @@ pub fn list_dir(path: &str) -> DirListing {
     }
     listing.path = Some(dir.to_string_lossy().into_owned());
     listing
+}
+
+/// (holds a repository, is a linked worktree): a repository has a `.git` folder; a linked
+/// worktree and a submodule both have a `.git` file, told apart by where it points.
+fn git_marker(dir: &Path) -> (bool, bool) {
+    let git = dir.join(".git");
+    match fs::symlink_metadata(&git) {
+        Ok(m) if m.is_file() => (true, fs::read_to_string(&git).is_ok_and(|text| is_worktree_gitdir(&text))),
+        Ok(_) => (true, false),
+        Err(_) => (false, false),
+    }
+}
+
+/// Contents of a `.git` file: `gitdir: <repo>/.git/worktrees/<name>` for a linked worktree,
+/// `gitdir: <...>/.git/modules/<name>` for a submodule.
+pub fn is_worktree_gitdir(text: &str) -> bool {
+    let Some(target) = text.lines().find_map(|l| l.strip_prefix("gitdir:")) else { return false };
+    let target = Path::new(target.trim());
+    target.parent().and_then(Path::file_name).is_some_and(|name| name == "worktrees")
 }
 
 /// A relative path that does not escape the repository.
@@ -444,6 +484,15 @@ mod tests {
     }
 
     #[test]
+    fn a_gitdir_under_worktrees_marks_a_linked_worktree() {
+        assert!(is_worktree_gitdir("gitdir: /home/me/shop/.git/worktrees/invoices\n"));
+        assert!(is_worktree_gitdir("gitdir: ../shop/.git/worktrees/my invoices"), "relative, with a space");
+        assert!(!is_worktree_gitdir("gitdir: ../.git/modules/vendor/lib\n"), "a submodule");
+        assert!(!is_worktree_gitdir("gitdir: /home/me/worktrees/x/.git/modules/y\n"), "`worktrees` elsewhere in the path");
+        assert!(!is_worktree_gitdir("garbage"));
+    }
+
+    #[test]
     fn diff_paths_must_stay_inside() {
         assert!(safe_relative("src/a.rs"));
         assert!(!safe_relative("../etc/passwd"));
@@ -466,14 +515,23 @@ mod tests {
             fs::create_dir_all(root.join(d)).unwrap();
         }
         fs::write(root.join("file.txt"), "x").unwrap();
+        // A linked worktree: `.git` is a file pointing to the repository.
+        fs::create_dir_all(root.join("delta")).unwrap();
+        fs::write(root.join("delta/.git"), "gitdir: /home/me/shop/.git/worktrees/delta\n").unwrap();
+        // A submodule also has a `.git` file, pointing into `modules/`: a plain repository.
+        fs::create_dir_all(root.join("epsilon")).unwrap();
+        fs::write(root.join("epsilon/.git"), "gitdir: ../.git/modules/epsilon\n").unwrap();
         std::os::unix::fs::symlink(root.join("gamma"), root.join("link")).unwrap();
         let l = list_dir(&root.display().to_string());
         assert_eq!(l.error, None);
-        let names: Vec<(&str, bool)> = l.dirs.iter().map(|d| (d.name.as_str(), d.git)).collect();
-        assert_eq!(names, vec![("Alpha", false), ("beta", true), ("gamma", false), ("link", false)]);
+        let names: Vec<(&str, bool, bool)> = l.dirs.iter().map(|d| (d.name.as_str(), d.git, d.worktree)).collect();
+        assert_eq!(names, vec![("Alpha", false, false), ("beta", true, false), ("delta", true, true), ("epsilon", true, false), ("gamma", false, false), ("link", false, false)]);
         assert_eq!(l.path.as_deref(), Some(fs::canonicalize(&root).unwrap().to_str().unwrap()));
-        assert!(l.parent.is_some() && !l.git);
-        assert!(list_dir(&root.join("beta").display().to_string()).git);
+        assert!(l.parent.is_some() && !l.git && !l.worktree);
+        let beta = list_dir(&root.join("beta").display().to_string());
+        assert!(beta.git && !beta.worktree);
+        let delta = list_dir(&root.join("delta").display().to_string());
+        assert!(delta.git && delta.worktree);
         let missing = list_dir("/does/not/exist");
         assert_eq!(missing.error, Some(Problem::DirNotFound { path: "/does/not/exist".into() }));
         assert!(missing.path.is_none());

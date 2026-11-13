@@ -524,7 +524,8 @@ fn folder() {
             path: Some(shown.into()),
             parent: Some(parent.into()),
             git,
-            dirs: dirs.iter().map(|(n, g)| protocol::DirEntry { name: (*n).into(), git: *g }).collect(),
+            worktree: false,
+            dirs: dirs.iter().map(|(n, g)| protocol::DirEntry { name: (*n).into(), git: *g, worktree: false }).collect(),
             error: None,
         };
         h.state_mut().dispatch(vec![Event::Agent(AgentEvent::DirListing(listing))]);
@@ -539,6 +540,52 @@ fn folder() {
     assert!(h.query_by_label("Link this folder").is_some());
     h.event(egui::Event::PointerGone);
     save(&mut h, "folder");
+}
+
+#[test]
+#[ignore = "renders README screenshots; run ./scripts/screenshots.sh"]
+fn worktrees() {
+    let mut h = harness("worktrees");
+    demo_canvas(&mut h);
+    // Claude works in a worktree nested in the repository, the tests run in another one.
+    let root = "/home/me/code/shop-api";
+    let rate_limit = format!("{root}/.claude/worktrees/rate-limit");
+    let argon2 = "/home/me/code/shop-api-argon2";
+    h.state_mut().world.card_mut("t0").unwrap().cwd = Some(rate_limit.clone());
+    h.state_mut().world.card_mut("t1").unwrap().cwd = Some(argon2.into());
+    let now = unix_now();
+    let worktree = |path: &str, main: bool, branch: &str, age: u64| protocol::Worktree {
+        path: path.into(),
+        head: Some("3f9c2a1".repeat(6)[..40].into()),
+        branch: Some(branch.into()),
+        detached: false,
+        main,
+        bare: false,
+        locked: false,
+        lock_reason: None,
+        prunable: false,
+        dirty: Some(false),
+        ahead: Some(0),
+        behind: Some(0),
+        merged: None,
+        last_commit: Some(now - age),
+    };
+    let list = protocol::WorktreeList {
+        key: "p-shop-api".into(),
+        repo: Some(root.into()),
+        default_branch: Some("origin/main".into()),
+        worktrees: vec![
+            protocol::Worktree { dirty: Some(true), ..worktree(root, true, "main", 3_600) },
+            protocol::Worktree { dirty: Some(true), ahead: Some(3), behind: Some(1), merged: Some(false), ..worktree(&rate_limit, false, "feat/rate-limit-login-and-signup", 300) },
+            protocol::Worktree { ahead: Some(0), behind: Some(4), merged: Some(true), ..worktree(argon2, false, "auth/argon2", 86_400) },
+        ],
+    };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Worktrees(list))]);
+    ctrl_shift(&h, Key::Num1);
+    steps(&mut h, 45);
+    assert!(h.query_by_label("⎇ 3 worktrees").is_some() && h.query_by_label_contains("Branch: feat/rate-limit").is_some());
+    h.event(egui::Event::PointerGone);
+    save(&mut h, "worktrees");
 }
 
 /// The README's animated demo: frames rendered here, assembled into `demo.gif` by

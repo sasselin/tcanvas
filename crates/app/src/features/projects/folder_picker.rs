@@ -9,6 +9,13 @@ use crate::shell::theme;
 use crate::shell::world::ProjectId;
 
 const GIT: Color32 = Color32::from_rgb(230, 150, 60);
+/// A linked worktree: another checkout of a repository listed elsewhere.
+const WORKTREE: Color32 = Color32::from_rgb(110, 160, 255);
+
+/// Marker of a subfolder holding a repository: a linked worktree reads differently.
+pub fn git_marker(d: &DirEntry) -> (&'static str, Color32) {
+    if d.worktree { (t().worktree_marker, WORKTREE) } else { ("⎇ git", GIT) }
+}
 
 /// What the user decided this frame.
 #[derive(Debug, PartialEq, Eq)]
@@ -195,7 +202,8 @@ impl FolderPicker {
             for d in &visible {
                 let resp = ui.add(egui::Button::new(format!("📁 {}", d.name)).frame(false).min_size(egui::vec2(ui.available_width(), 22.0)));
                 if d.git {
-                    ui.painter().text(resp.rect.right_center() - egui::vec2(8.0, 0.0), egui::Align2::RIGHT_CENTER, "⎇ git", egui::FontId::proportional(12.0), GIT);
+                    let (marker, color) = git_marker(d);
+                    ui.painter().text(resp.rect.right_center() - egui::vec2(8.0, 0.0), egui::Align2::RIGHT_CENTER, marker, egui::FontId::proportional(12.0), color);
                 }
                 if resp.clicked() {
                     *choice = Some(Choice::Navigate(join(&current, &d.name)));
@@ -206,12 +214,14 @@ impl FolderPicker {
 
     fn footer(&self, ui: &mut Ui, choice: &mut Option<Choice>) {
         let target = self.target();
-        let git = self.listing.as_ref().is_some_and(|l| l.git && self.pending.is_none());
+        let git = self.listing.as_ref().filter(|l| l.git && self.pending.is_none());
         ui.horizontal(|ui| {
             ui.label(RichText::new(target.as_deref().unwrap_or("—")).color(theme::TEXT));
-            if git {
-                ui.label(RichText::new(t().git_repo).color(GIT));
-            }
+            match git {
+                Some(l) if l.worktree => ui.label(RichText::new(t().git_worktree).color(WORKTREE)),
+                Some(_) => ui.label(RichText::new(t().git_repo).color(GIT)),
+                None => return,
+            };
         });
         ui.horizontal(|ui| {
             let link = egui::Button::new(RichText::new(t().link_folder).color(theme::CARD_BG)).fill(theme::FOCUS);
@@ -242,9 +252,19 @@ mod tests {
             path: Some(path.into()),
             parent: Some("/home".into()),
             git: false,
-            dirs: dirs.iter().map(|(n, g)| DirEntry { name: (*n).into(), git: *g }).collect(),
+            worktree: false,
+            dirs: dirs.iter().map(|(n, g)| DirEntry { name: (*n).into(), git: *g, worktree: false }).collect(),
             error: None,
         }
+    }
+
+    #[test]
+    fn linked_worktrees_get_their_own_marker() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
+        let repo = DirEntry { name: "shop".into(), git: true, worktree: false };
+        let linked = DirEntry { name: "shop-invoices".into(), git: true, worktree: true };
+        assert_eq!(git_marker(&repo), ("⎇ git", GIT));
+        assert_eq!(git_marker(&linked), ("⎇ worktree", WORKTREE));
     }
 
     #[test]
@@ -282,7 +302,15 @@ mod tests {
     #[test]
     fn a_missing_folder_cannot_be_linked_as_listed() {
         let (mut p, _) = FolderPicker::open("p".into(), "t".into(), false, "/missing", vec![]);
-        p.on_listing(&DirListing { request: "/missing".into(), path: None, parent: None, git: false, dirs: vec![], error: Some(protocol::Problem::DirNotFound { path: "/missing".into() }) });
+        p.on_listing(&DirListing {
+            request: "/missing".into(),
+            path: None,
+            parent: None,
+            git: false,
+            worktree: false,
+            dirs: vec![],
+            error: Some(protocol::Problem::DirNotFound { path: "/missing".into() }),
+        });
         assert_eq!(p.target(), None);
     }
 }

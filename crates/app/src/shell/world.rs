@@ -142,6 +142,17 @@ impl Wire {
     }
 }
 
+/// The git worktree holding a card's folder: what its branch badge shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CardWorktree {
+    /// Folder of the worktree.
+    pub path: String,
+    /// `None`: detached HEAD.
+    pub branch: Option<String>,
+    /// Folder name of a linked worktree; `None` for the main checkout.
+    pub linked: Option<String>,
+}
+
 #[derive(Default)]
 pub struct World {
     pub cards: Vec<Card>,
@@ -165,6 +176,8 @@ pub struct World {
     pub file_activity: BTreeMap<ProjectId, u64>,
     /// Number of uncommitted files in each project's linked folder (Δ badge).
     pub change_counts: BTreeMap<ProjectId, usize>,
+    /// The git worktree each card's folder is in (kept by the `worktrees` slice).
+    pub card_worktrees: BTreeMap<CardId, CardWorktree>,
     pub window_focused: bool,
     /// Incremented on every change that needs saving.
     pub revision: u64,

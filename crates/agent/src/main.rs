@@ -18,6 +18,7 @@ mod features {
     pub mod status;
     pub mod timing;
     pub mod tmux;
+    pub mod worktrees;
 }
 
 use features::{hooks, serve};

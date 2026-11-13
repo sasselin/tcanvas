@@ -6,7 +6,7 @@ use std::sync::Arc;
 use egui::{FontData, FontDefinitions, FontFamily};
 
 /// Symbols used by the UI; a test checks that they exist in the embedded fonts.
-pub const UI_SYMBOLS: &str = "+●○■×◆⇄·—…⏸⌨✖✔⚠🔔";
+pub const UI_SYMBOLS: &str = "+●○■×◆⇄·—…⏸⌨✖✔⚠🔔↑↓";
 
 /// System fonts tried as a last resort (symbols and rare scripts in terminals).
 const SYSTEM_FALLBACKS: &[&str] = &[

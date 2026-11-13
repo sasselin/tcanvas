@@ -19,7 +19,7 @@ use crate::shell::event::Event;
 use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::widgets::{confirm, text_prompt};
-use crate::shell::world::{Card, CardId, World};
+use crate::shell::world::{Card, CardId, CardWorktree, World};
 pub use clipboard::{ClipboardSource, Fixed as FixedClipboard, FixedImage as FixedImageClipboard};
 use input::{ClipAction, MouseButton};
 use pty::{GridSize, TermRuntime};
@@ -28,6 +28,8 @@ pub use pty::{Launch, attach_command};
 /// Dimensions in world units (1 unit = 1 point at zoom 1).
 pub const TITLE_H: f32 = 28.0;
 pub const PAD: f32 = 6.0;
+/// Background of the branch badge in the title bar.
+const BADGE_BG: Color32 = Color32::from_rgb(48, 54, 68);
 pub const BASE_FONT: f32 = 14.0;
 const GRIP: f32 = 16.0;
 /// Below this, the × button is too small to aim at: use the menu or Ctrl+Shift+W.
@@ -432,9 +434,26 @@ impl TerminalCards {
         }
         let prompt = header_prompt(card);
         let cwd = card.current_cwd().map(|cwd| title_painter.layout_no_wrap(cwd.to_string(), FontId::proportional(11.0 * zoom), theme::TEXT_DIM));
-        let layout = header_layout(label_rect.max.x, right, cwd.as_ref().map(|g| g.size().x), prompt.is_some(), zoom);
+        // Branch badge: the git worktree the card's folder is in.
+        let worktree = world.card_worktrees.get(&id);
+        let badge_pad = 6.0 * zoom;
+        let badge = worktree.map(|w| (badge_label(w), w)).map(|(label, w)| (title_painter.layout_no_wrap(format!("⎇ {label}"), FontId::proportional(11.0 * zoom), theme::TEXT), label, w));
+        let layout = header_layout(label_rect.max.x, right, cwd.as_ref().map(|g| g.size().x), badge.as_ref().map(|(g, ..)| g.size().x + 2.0 * badge_pad), prompt.is_some(), zoom);
         if let Some(cwd) = cwd.filter(|_| layout.cwd) {
             title_painter.galley(pos2(right - cwd.size().x, dot.y - cwd.size().y / 2.0), cwd, theme::TEXT_DIM);
+        }
+        if let Some((galley, label, w)) = badge
+            && let Some(x) = layout.badge
+        {
+            let size = galley.size();
+            let rect = Rect::from_min_size(pos2(x, dot.y - size.y / 2.0 - 2.0 * zoom), vec2(size.x + 2.0 * badge_pad, size.y + 4.0 * zoom));
+            title_painter.rect_filled(rect, CornerRadius::same((rect.height() / 2.0).min(255.0) as u8), BADGE_BG);
+            title_painter.galley(pos2(x + badge_pad, dot.y - size.y / 2.0), galley, theme::TEXT);
+            // Hover only, like the prompt: the title bar underneath keeps clicks and drags.
+            let full = format!("⎇ {}\n{}", w.branch.as_deref().unwrap_or(t().detached_head), w.path);
+            let r = ui.interact(rect, eid.with("badge"), Sense::hover()).on_hover_text(full);
+            let a11y = (t().branch_badge_a11y)(&label);
+            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &a11y));
         }
         // The coding agent's last prompt, elided between the title and the folder.
         if let Some(prompt) = prompt
@@ -791,32 +810,82 @@ pub fn header_prompt(card: &Card) -> Option<&str> {
     card.info.as_ref()?.last_prompt.as_deref().map(str::trim).filter(|p| !p.is_empty())
 }
 
+/// Longest branch and worktree names shown whole in a card's badge.
+const BADGE_BRANCH_CHARS: usize = 24;
+const BADGE_WORKTREE_CHARS: usize = 16;
+
+/// `feat/very-long-branch-name` -> `feat/ver…anch-name`: keeps both ends, which tell branches apart.
+pub fn elide_middle(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max || max < 3 {
+        return s.to_string();
+    }
+    let tail = (max - 1) / 2;
+    let head = max - 1 - tail;
+    let chars: Vec<char> = s.chars().collect();
+    format!("{}…{}", chars[..head].iter().collect::<String>(), chars[n - tail..].iter().collect::<String>())
+}
+
+/// What a card's branch badge says: its branch (or detached HEAD), then the linked worktree's
+/// folder name; nothing more for the main checkout.
+pub fn badge_label(w: &CardWorktree) -> String {
+    let branch = w.branch.as_deref().map_or_else(|| t().detached_head.to_string(), |b| elide_middle(b, BADGE_BRANCH_CHARS));
+    match &w.linked {
+        Some(name) => format!("{branch} · {}", elide_middle(name, BADGE_WORKTREE_CHARS)),
+        None => branch,
+    }
+}
+
 /// What the title bar shows right of the title.
 #[derive(Debug, PartialEq)]
 struct HeaderLayout {
     /// The folder, right-aligned against the close button.
     cwd: bool,
+    /// Left edge (screen x) of the branch badge, which sits just left of the folder.
+    badge: Option<f32>,
     /// Horizontal span (screen x) of the prompt.
     prompt: Option<(f32, f32)>,
 }
 
-/// Lays out the folder and the prompt between the end of the title and `right` (the close
-/// button). The prompt wins over the folder when space is short, and always keeps at least a
-/// small hover target (an ellipsis) so its full text stays reachable.
-fn header_layout(title_end: f32, right: f32, cwd_width: Option<f32>, has_prompt: bool, zoom: f32) -> HeaderLayout {
+/// Lays out the folder, the branch badge and the prompt between the end of the title and
+/// `right` (the close button). When space is short, the folder goes first, then the badge, and
+/// narrowing never brings either back. The prompt keeps at least 120 points next to them,
+/// otherwise it takes the whole room, down to a small hover target (an ellipsis) so its full text
+/// stays reachable.
+fn header_layout(title_end: f32, right: f32, cwd_width: Option<f32>, badge_width: Option<f32>, has_prompt: bool, zoom: f32) -> HeaderLayout {
     let gap = 14.0 * zoom;
-    if !has_prompt {
-        return HeaderLayout { cwd: cwd_width.is_some(), prompt: None };
-    }
+    // Between the badge and the folder.
+    let inner = 8.0 * zoom;
     let x0 = title_end + gap;
-    if let Some(w) = cwd_width
-        && right - w - gap - x0 >= 120.0 * zoom
+    // Room left of `left` (the leftmost extra): what the prompt (or nothing) needs.
+    let need = if has_prompt { 120.0 * zoom + gap } else { 0.0 };
+    let fits = |left: f32| left - x0 >= need;
+    let prompt = |left: f32| has_prompt.then_some((x0, left - gap));
+    if let Some(b) = badge_width {
+        if let Some(c) = cwd_width {
+            let left = right - c - inner - b;
+            if fits(left) {
+                return HeaderLayout { cwd: true, badge: Some(left), prompt: prompt(left) };
+            }
+        }
+        if fits(right - b) {
+            return HeaderLayout { cwd: false, badge: Some(right - b), prompt: prompt(right - b) };
+        }
+    }
+    // The folder went before the badge: once the badge is gone, it does not come back.
+    let cwd_width = cwd_width.filter(|_| badge_width.is_none());
+    if !has_prompt {
+        // Without a badge, as before badges: the folder stays, even over a long title.
+        return HeaderLayout { cwd: cwd_width.is_some(), badge: None, prompt: None };
+    }
+    if let Some(c) = cwd_width
+        && fits(right - c)
     {
-        return HeaderLayout { cwd: true, prompt: Some((x0, right - w - gap)) };
+        return HeaderLayout { cwd: true, badge: None, prompt: prompt(right - c) };
     }
     let min_target = 16.0 * zoom;
     let span = if right - x0 >= min_target { (x0, right) } else { (right - min_target, right) };
-    HeaderLayout { cwd: false, prompt: Some(span) }
+    HeaderLayout { cwd: false, badge: None, prompt: Some(span) }
 }
 
 fn cell_px(cell: Vec2) -> (u16, u16) {
@@ -933,16 +1002,77 @@ mod tests {
 
     #[test]
     fn the_prompt_wins_over_the_folder_when_space_is_short() {
+        let layout = |cwd, prompt| HeaderLayout { cwd, badge: None, prompt };
         // No prompt: the folder, as before.
-        assert_eq!(header_layout(100.0, 500.0, Some(80.0), false, 1.0), HeaderLayout { cwd: true, prompt: None });
+        assert_eq!(header_layout(100.0, 500.0, Some(80.0), None, false, 1.0), layout(true, None));
         // Room for both: the prompt sits between the title and the folder.
-        assert_eq!(header_layout(100.0, 500.0, Some(80.0), true, 1.0), HeaderLayout { cwd: true, prompt: Some((114.0, 406.0)) });
-        assert_eq!(header_layout(100.0, 500.0, None, true, 1.0), HeaderLayout { cwd: false, prompt: Some((114.0, 500.0)) });
+        assert_eq!(header_layout(100.0, 500.0, Some(80.0), None, true, 1.0), layout(true, Some((114.0, 406.0))));
+        assert_eq!(header_layout(100.0, 500.0, None, None, true, 1.0), layout(false, Some((114.0, 500.0))));
         // Short: the folder goes, the prompt takes its room.
-        assert_eq!(header_layout(100.0, 300.0, Some(80.0), true, 1.0), HeaderLayout { cwd: false, prompt: Some((114.0, 300.0)) });
+        assert_eq!(header_layout(100.0, 300.0, Some(80.0), None, true, 1.0), layout(false, Some((114.0, 300.0))));
         // No room at all: still a small hover target against the close button.
-        assert_eq!(header_layout(290.0, 300.0, Some(80.0), true, 1.0), HeaderLayout { cwd: false, prompt: Some((284.0, 300.0)) });
-        assert_eq!(header_layout(290.0, 300.0, Some(80.0), true, 0.5), HeaderLayout { cwd: false, prompt: Some((292.0, 300.0)) });
+        assert_eq!(header_layout(290.0, 300.0, Some(80.0), None, true, 1.0), layout(false, Some((284.0, 300.0))));
+        assert_eq!(header_layout(290.0, 300.0, Some(80.0), None, true, 0.5), layout(false, Some((292.0, 300.0))));
+    }
+
+    #[test]
+    fn the_branch_badge_sits_left_of_the_folder_and_gives_way_to_the_prompt() {
+        let at = |cwd, badge: Option<f32>, prompt| HeaderLayout { cwd, badge, prompt };
+        // Wide card, no prompt: badge then folder against the close button.
+        assert_eq!(header_layout(100.0, 600.0, Some(80.0), Some(60.0), false, 1.0), at(true, Some(452.0), None));
+        // With a prompt: prompt | badge | folder.
+        assert_eq!(header_layout(100.0, 600.0, Some(80.0), Some(60.0), true, 1.0), at(true, Some(452.0), Some((114.0, 438.0))));
+        // Twice the zoom: every gap doubles.
+        assert_eq!(header_layout(100.0, 1200.0, Some(160.0), Some(120.0), true, 2.0), at(true, Some(904.0), Some((128.0, 876.0))));
+        // Less room: the folder goes first, the badge moves against the close button.
+        assert_eq!(header_layout(100.0, 380.0, Some(80.0), Some(60.0), true, 1.0), at(false, Some(320.0), Some((114.0, 306.0))));
+        assert_eq!(header_layout(100.0, 220.0, Some(80.0), Some(60.0), false, 1.0), at(false, Some(160.0), None));
+        // Narrow card: no badge; the prompt keeps its hover target.
+        assert_eq!(header_layout(100.0, 300.0, Some(80.0), Some(60.0), true, 1.0), at(false, None, Some((114.0, 300.0))));
+        assert_eq!(header_layout(290.0, 300.0, Some(80.0), Some(60.0), true, 1.0), at(false, None, Some((284.0, 300.0))));
+        // Narrow card without a prompt: neither, the folder does not come back once the badge went.
+        assert_eq!(header_layout(100.0, 160.0, Some(80.0), Some(60.0), false, 1.0), at(false, None, None));
+        // No badge (cwd outside any known worktree): the folder as before badges.
+        assert_eq!(header_layout(100.0, 160.0, Some(80.0), None, false, 1.0), at(true, None, None));
+        // No folder known: the badge alone.
+        assert_eq!(header_layout(100.0, 600.0, None, Some(60.0), true, 1.0), at(false, Some(540.0), Some((114.0, 526.0))));
+    }
+
+    #[test]
+    fn narrowing_a_card_only_ever_drops_header_extras() {
+        // Folder wider than the badge, then a short folder next to a long badge.
+        for (cwd, badge) in [(80.0, 60.0), (30.0, 90.0)] {
+            for prompt in [false, true] {
+                let mut shown = (true, true);
+                for right in (110..=700).rev().step_by(5) {
+                    let l = header_layout(100.0, right as f32, Some(cwd), Some(badge), prompt, 1.0);
+                    let now = (l.cwd, l.badge.is_some());
+                    assert!((now.0 <= shown.0) && (now.1 <= shown.1), "came back at right={right} (cwd {cwd}, badge {badge}, prompt {prompt}): {shown:?} -> {now:?}");
+                    shown = now;
+                }
+                assert_eq!(shown, (false, false), "all gone on the narrowest card");
+            }
+        }
+    }
+
+    #[test]
+    fn long_names_are_elided_in_the_middle() {
+        assert_eq!(elide_middle("main", 24), "main");
+        assert_eq!(elide_middle("feat/very-long-branch-name", 12), "feat/v…-name");
+        assert_eq!(elide_middle("feat/very-long-branch-name", 12).chars().count(), 12);
+        assert_eq!(elide_middle("éééééé", 5), "éé…éé");
+        assert_eq!(elide_middle("abcdef", 2), "abcdef", "too short to elide");
+    }
+
+    #[test]
+    fn the_badge_names_the_branch_and_a_linked_worktree() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
+        let main = CardWorktree { path: "/home/me/shop".into(), branch: Some("main".into()), linked: None };
+        assert_eq!(badge_label(&main), "main");
+        let linked = CardWorktree { path: "/home/me/shop/.claude/worktrees/invoices".into(), branch: Some("feat/invoices-with-taxes-and-rounding".into()), linked: Some("invoices".into()) };
+        assert_eq!(badge_label(&linked), "feat/invoice…nd-rounding · invoices");
+        let detached = CardWorktree { linked: Some("a-very-long-worktree-folder".into()), branch: None, ..main };
+        assert_eq!(badge_label(&detached), "HEAD détachée · a-very-l…-folder");
     }
 
     #[test]
