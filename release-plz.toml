@@ -3,21 +3,29 @@
 # GitHub release; .github/workflows/release.yml then builds and attaches the binaries.
 # Nothing goes to crates.io: versions come from git tags.
 
+# Every package takes part, so that a change in the agent or the protocol alone opens a release
+# PR: `changelog_include` below only sees packages release-plz works on (a package with
+# `release = false` is dropped and its commits are silently ignored). They all share one version
+# (`version.workspace`) and one tag; only `tcanvas` creates it, the GitHub release and the
+# changelog.
 [workspace]
 git_only = true
 publish = false
 semver_check = false
-release = false
 pr_labels = ["release"]
 # Capitalized like every other subject (checked by ci.yml and scripts/git-hooks).
 pr_name = "chore: Release v{{ version }}"
+git_tag_name = "v{{ version }}"
+git_tag_enable = false
+git_release_enable = false
+changelog_update = false
 
-# The whole workspace shares one version (`version.workspace`): it is released as `tcanvas`.
+# The workspace is released as `tcanvas`.
 [[package]]
 name = "tcanvas"
-release = true
+changelog_update = true
 changelog_path = "CHANGELOG.md"
 changelog_include = ["tcanvas-agent", "protocol"]
-git_tag_name = "v{{ version }}"
+git_tag_enable = true
 git_release_name = "v{{ version }}"
 git_release_enable = true

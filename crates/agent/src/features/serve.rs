@@ -4,11 +4,11 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protocol::{AgentCmd, AgentEvent, DEFAULT_STALL_SECS, Problem, SessionInfo, TermStatus};
 
-use super::{agent_hooks, changes, hooks, kill, send as send_text, status, tasks, tmux};
+use super::{agent_hooks, changes, hooks, kill, send as send_text, status, tasks, timing, tmux};
 
 const POLL: Duration = Duration::from_secs(1);
 const TAIL_LINES: usize = 3;
@@ -16,14 +16,19 @@ const TAIL_LINES: usize = 3;
 #[derive(Default)]
 struct Tracked {
     stall_secs: u64,
-    /// `window_activity` at the last screen capture.
-    captured_activity: Option<u64>,
+    /// The last screen capture.
+    captured: Option<tmux::Capture>,
     tail: Vec<String>,
     /// (foreground pid, CPU ticks) at the previous observation.
     prev_cpu: Option<(u32, u64)>,
     last_sent: Option<SessionInfo>,
     /// Start of the current run of screen output (no pause over `BUSY_GAP_SECS`).
-    busy_since: Option<u64>,
+    busy_since: Option<Instant>,
+    /// The last command, from the shell hooks' marks, of the pane whose shell is `pane_pid`.
+    last_command: timing::LastCommand,
+    pane_pid: u32,
+    /// That pane's shell, which decides how its marks read.
+    shell: Option<hooks::Shell>,
 }
 
 pub fn run() -> io::Result<()> {
@@ -56,6 +61,7 @@ pub fn run() -> io::Result<()> {
     })?;
 
     let mut tracked: HashMap<String, Tracked> = HashMap::new();
+    let mut clock = timing::ClockLog::default();
     loop {
         while let Ok(cmd) = cmds.try_recv() {
             match cmd {
@@ -104,11 +110,14 @@ pub fn run() -> io::Result<()> {
                 Vec::new()
             }
         };
-        let now = unix_now();
+        let wall = unix_now();
+        let mono = Instant::now();
+        clock.record(mono, wall);
+        let now = wall as u64;
 
         for row in &rows {
             let t = tracked.entry(row.session.clone()).or_default();
-            let info = observe(row, t, now);
+            let info = observe(row, t, now, mono, &clock);
             if t.last_sent.as_ref() != Some(&info) {
                 send(&AgentEvent::Session(info.clone()))?;
                 t.last_sent = Some(info);
@@ -125,10 +134,13 @@ pub fn run() -> io::Result<()> {
     }
 }
 
-fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64) -> SessionInfo {
-    if t.captured_activity != Some(row.activity) {
+/// `now`: wall clock (s), the clock of tmux and of the shell hooks; `mono`: the same moment
+/// on the monotonic clock, for durations the agent measures itself; `clock`: the wall clock
+/// steps seen so far.
+fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64, mono: Instant, clock: &timing::ClockLog) -> SessionInfo {
+    if !tmux::capture_is_current(t.captured, row.activity, now) {
         t.tail = tmux::capture_tail(&row.session, TAIL_LINES);
-        t.captured_activity = Some(row.activity);
+        t.captured = Some(tmux::Capture { activity: row.activity, at: now });
     }
 
     let fg = if row.dead { None } else { status::foreground(row.pane_pid) };
@@ -138,11 +150,18 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64) -> SessionInfo {
     });
     t.prev_cpu = fg.as_ref().map(|f| (f.pid, f.cpu_ticks));
 
-    if now.saturating_sub(row.activity) > status::BUSY_GAP_SECS {
-        t.busy_since = None;
-    } else {
-        t.busy_since.get_or_insert(now);
+    // Output stamped after `now` (the clock stepped back) is recent output.
+    let (busy_since, busy_secs) = status::busy_run(t.busy_since, mono, now.saturating_sub(row.activity));
+    t.busy_since = busy_since;
+
+    // Only the session's active pane is read: another pane's marks start a new history.
+    if t.pane_pid != row.pane_pid {
+        t.pane_pid = row.pane_pid;
+        t.shell = shell_of(row.pane_pid);
+        t.last_command = timing::LastCommand::default();
     }
+    let marks = timing::Marks { started: row.started, ended: row.ended, exit: row.exit };
+    let last = t.last_command.observe(marks, t.shell, fg.is_some(), mono, clock);
 
     // A mark left by an agent that has since quit names other processes: ignored. The payload
     // values need a trusted mark too, and must have been written by the same foreground agent.
@@ -156,17 +175,14 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64) -> SessionInfo {
         activity: row.activity,
         cpu_delta,
         last_line: t.tail.last().map(String::as_str),
-        hook_started: row.started,
-        hook_ended: row.ended,
-        hook_exit: row.exit,
+        last_exit: last.and_then(|l| l.exit),
         stall_secs: if t.stall_secs == 0 { DEFAULT_STALL_SECS } else { t.stall_secs },
         agent: mark.map(|m| m.state),
         coding_agent: fg.as_ref().is_some_and(|f| status::is_coding_agent(&f.cmdline)),
-        busy_secs: t.busy_since.map_or(0, |since| now - since),
+        busy_secs,
         was_waiting: t.last_sent.as_ref().is_some_and(|i| i.status == TermStatus::WaitingInput),
     };
     let status = status::classify(&obs);
-    let (last_exit, last_duration_secs) = status::last_command(&obs);
 
     let (prompt_mark, prompt_head) = agent_hooks::split_mark(row.prompts.as_deref());
     let (turn_mark, turn_head) = agent_hooks::split_mark(row.turns.as_deref());
@@ -175,8 +191,8 @@ fn observe(row: &tmux::PaneRow, t: &mut Tracked, now: u64) -> SessionInfo {
         status,
         command: fg.map(|f| f.cmdline).filter(|_| status != TermStatus::Dead),
         cwd: Some(row.path.clone()).filter(|p| !p.is_empty()),
-        last_exit,
-        last_duration_secs,
+        last_exit: last.and_then(|l| l.exit),
+        last_duration_secs: last.and_then(|l| l.secs),
         tail: t.tail.clone(),
         agent_session_id: agent_hooks::trusted(row.agent_session.as_ref(), agent_pid),
         agent_transcript: agent_hooks::trusted(row.transcript.as_ref(), agent_pid),
@@ -284,6 +300,12 @@ fn tasks_gone(id: u64, key: String) {
     }
 }
 
-fn unix_now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+/// The shell running as `pid` (a pane's first process), from its process name.
+fn shell_of(pid: u32) -> Option<hooks::Shell> {
+    std::fs::read_to_string(format!("/proc/{pid}/comm")).ok().and_then(|name| hooks::Shell::from_path(name.trim()))
+}
+
+/// Wall clock, in seconds since the epoch.
+fn unix_now() -> f64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
