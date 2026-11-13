@@ -1,6 +1,7 @@
 //! Computes a terminal's status from tmux and /proc.
 
 use std::fs;
+use std::time::Instant;
 
 use protocol::TermStatus;
 
@@ -32,9 +33,9 @@ pub struct Observation<'a> {
     /// CPU ticks used by the foreground since the last observation.
     pub cpu_delta: Option<u64>,
     pub last_line: Option<&'a str>,
-    pub hook_started: Option<u64>,
-    pub hook_ended: Option<u64>,
-    pub hook_exit: Option<i32>,
+    /// Exit code of the last finished command, from the shell hooks (see `timing`); `None`
+    /// while a new one runs or before any.
+    pub last_exit: Option<i32>,
     pub stall_secs: u64,
     /// State published by the hooks of the coding agent in the foreground (already checked
     /// to belong to that process).
@@ -73,18 +74,22 @@ pub fn classify(o: &Observation) -> TermStatus {
         }
         return TermStatus::Running;
     }
-    match last_command(o) {
-        (Some(code), _) if code != 0 => TermStatus::Exited(code),
+    match o.last_exit {
+        Some(code) if code != 0 => TermStatus::Exited(code),
         _ => TermStatus::Idle,
     }
 }
 
-/// Exit code and duration of the last finished command, from the hooks.
-pub fn last_command(o: &Observation) -> (Option<i32>, Option<u64>) {
-    match (o.hook_started, o.hook_ended) {
-        (Some(s), Some(e)) if e >= s => (o.hook_exit, Some(e - s)),
-        _ => (None, None),
+/// Tracks a run of screen output: from its start `since` (none yet) and the time since the
+/// last output, `quiet_secs`, returns the run's new start and its length in seconds. The
+/// length is the agent's own duration, so it is measured on the monotonic clock: the wall
+/// clock can step back (WSL syncs it with Windows) and land before the start.
+pub fn busy_run(since: Option<Instant>, now: Instant, quiet_secs: u64) -> (Option<Instant>, u64) {
+    if quiet_secs > BUSY_GAP_SECS {
+        return (None, 0);
     }
+    let since = since.unwrap_or(now);
+    (Some(since), now.saturating_duration_since(since).as_secs())
 }
 
 pub fn looks_like_question(line: &str) -> bool {
@@ -182,14 +187,14 @@ mod tests {
     }
 
     #[test]
-    fn failed_command_until_next_one() {
-        let o = Observation { hook_started: Some(10), hook_ended: Some(45), hook_exit: Some(1), stall_secs: 60, ..Default::default() };
+    fn at_the_prompt_a_failed_last_command_shows() {
+        // Which command is the last one, across polls, is `timing`'s job.
+        let o = Observation { last_exit: Some(1), stall_secs: 60, ..Default::default() };
         assert_eq!(classify(&o), TermStatus::Exited(1));
-        assert_eq!(last_command(&o), (Some(1), Some(35)));
-        // New command started: started > ended.
-        let o = Observation { hook_started: Some(50), ..o };
+        let o = Observation { last_exit: None, ..o };
         assert_eq!(classify(&o), TermStatus::Idle);
-        assert_eq!(last_command(&o), (None, None));
+        let o = Observation { last_exit: Some(0), ..o };
+        assert_eq!(classify(&o), TermStatus::Idle);
     }
 
     #[test]
@@ -227,6 +232,25 @@ mod tests {
         for c in ["vim notes.md", "sleep 4", "node server.js", "claude-squad"] {
             assert!(!is_coding_agent(c), "{c}");
         }
+    }
+
+    #[test]
+    fn busy_run_lasts_while_output_keeps_coming() {
+        use std::time::Duration;
+        let t0 = Instant::now();
+        let (since, secs) = busy_run(None, t0, 0);
+        assert_eq!((since, secs), (Some(t0), 0), "output starts a run");
+        assert_eq!(busy_run(since, t0 + Duration::from_secs(3), BUSY_GAP_SECS), (Some(t0), 3), "a short pause keeps it");
+        assert_eq!(busy_run(since, t0 + Duration::from_secs(4), BUSY_GAP_SECS + 1), (None, 0), "a longer one ends it");
+        assert_eq!(busy_run(None, t0, BUSY_GAP_SECS + 1), (None, 0));
+    }
+
+    #[test]
+    fn busy_run_start_in_the_future_counts_as_zero() {
+        use std::time::Duration;
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_secs(5);
+        assert_eq!(busy_run(Some(later), t0, 0), (Some(later), 0));
     }
 
     #[test]
