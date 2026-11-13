@@ -45,6 +45,34 @@ pub fn list_panes() -> io::Result<Vec<PaneRow>> {
     Ok(parse_rows(&String::from_utf8_lossy(&out.stdout)))
 }
 
+/// Current folder of every pane on the canvas socket (every session, every window, not only the
+/// active `tc_*` panes). Empty when there can be no pane: tmux is not installed, its server socket
+/// does not exist, or nothing listens on it. `None` when tmux fails while its server may be up.
+pub fn pane_paths() -> Option<Vec<String>> {
+    let socket = socket_path();
+    match tmux(&["list-panes", "-a", "-F", "#{pane_current_path}"]) {
+        Ok(out) if out.status.success() => Some(String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.is_empty()).map(String::from).collect()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Some(Vec::new()),
+        Err(_) => (!socket.exists()).then(Vec::new),
+        Ok(out) => no_server(socket.exists(), &String::from_utf8_lossy(&out.stderr)).then(Vec::new),
+    }
+}
+
+/// A failed tmux call means "no server" when its socket is absent, or when tmux says nothing
+/// listens on it (a socket left behind by a server that died).
+pub fn no_server(socket_exists: bool, stderr: &str) -> bool {
+    !socket_exists || stderr.contains("no server running") || stderr.contains("Connection refused")
+}
+
+/// tmux's socket file for the canvas socket name: `$TMUX_TMPDIR` (default `/tmp`), then
+/// `tmux-<uid>/<name>`.
+fn socket_path() -> std::path::PathBuf {
+    use std::os::unix::fs::MetadataExt;
+    let uid = std::fs::metadata("/proc/self").map(|m| m.uid()).unwrap_or(0);
+    let tmp = std::env::var("TMUX_TMPDIR").ok().filter(|t| !t.is_empty()).unwrap_or_else(|| "/tmp".into());
+    std::path::Path::new(&tmp).join(format!("tmux-{uid}")).join(protocol::tmux_socket())
+}
+
 pub fn parse_rows(out: &str) -> Vec<PaneRow> {
     out.lines().filter_map(parse_row).collect()
 }
@@ -126,6 +154,15 @@ mod tests {
         assert_eq!(rows[1].agent, None);
         assert_eq!((&rows[1].agent_session, &rows[1].prompt), (&None, &None), "no owner, malformed or empty: nothing");
         assert!(rows[1].dead && rows[1].alternate);
+    }
+
+    #[test]
+    fn a_failing_tmux_means_no_server_only_when_it_says_so() {
+        assert!(no_server(false, "anything"), "no socket file");
+        assert!(no_server(true, "no server running on /tmp/tmux-1000/tcanvas"));
+        assert!(no_server(true, "error connecting to /tmp/tmux-1000/tcanvas (Connection refused)"));
+        assert!(!no_server(true, "protocol version mismatch"), "a server may be up: unknown");
+        assert!(!no_server(true, ""));
     }
 
     #[test]

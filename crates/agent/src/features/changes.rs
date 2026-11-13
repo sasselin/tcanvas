@@ -1,18 +1,19 @@
 //! Modified files of the folders linked to projects: list (with +/− relative to HEAD) and diffs.
 //! Runs on its own thread: `git` never delays watching the terminals.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protocol::{AgentEvent, ChangeKind, ChangeSet, CommitInfo, DirEntry, DirListing, FileChange, Problem, WorktreeList};
 
-use super::worktrees;
+use super::{cleanup, tmux, worktrees};
 
 const SCAN_EVERY: Duration = Duration::from_secs(2);
 const MAX_FILES: usize = 500;
@@ -29,12 +30,56 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const SKIP_DIRS: [&str; 4] = ["node_modules", "target", "dist", "build"];
 
 pub enum Cmd {
-    Watch { key: String, path: String },
-    Unwatch { key: String },
-    Diff { key: String, file: String },
-    ShowCommit { key: String, sha: String },
-    List { path: String },
+    Watch {
+        key: String,
+        path: String,
+    },
+    Unwatch {
+        key: String,
+    },
+    Diff {
+        key: String,
+        file: String,
+    },
+    ShowCommit {
+        key: String,
+        sha: String,
+    },
+    List {
+        path: String,
+    },
+    Cleanup {
+        key: String,
+        action: protocol::Cleanup,
+    },
+    Sizes {
+        key: String,
+        paths: Vec<String>,
+    },
+    /// Scan again now (a cleanup just changed the repository).
+    Rescan,
 }
+
+/// A cleanup to run on the cleanup thread.
+struct Job {
+    key: String,
+    dir: PathBuf,
+    action: protocol::Cleanup,
+}
+
+/// A worktree to measure on the size thread.
+struct SizeJob {
+    key: String,
+    dir: PathBuf,
+    path: String,
+}
+
+/// Where events go (shared with the cleanup and size threads).
+type Sink = Arc<dyn Fn(&AgentEvent) + Send + Sync>;
+/// The watched folders as given (resolved when used), shared with the cleanup thread.
+type WatchedPaths = Arc<Mutex<Vec<String>>>;
+/// (key, path) queued or being measured: asking again adds nothing.
+type Measuring = Arc<Mutex<HashSet<(String, String)>>>;
 
 struct Watched {
     path: String,
@@ -45,13 +90,66 @@ struct Watched {
 }
 
 /// Starts the watcher thread. Produced events go through `send`.
-pub fn spawn(send: impl Fn(&AgentEvent) + Send + 'static) -> Sender<Cmd> {
+pub fn spawn(send: impl Fn(&AgentEvent) + Send + Sync + 'static) -> Sender<Cmd> {
     let (tx, rx) = mpsc::channel();
-    thread::spawn(move || run(rx, send));
+    let send: Sink = Arc::new(send);
+    let paths: WatchedPaths = Arc::default();
+    let measuring: Measuring = Arc::default();
+    let workers = Workers { jobs: spawn_cleaner(send.clone(), tx.clone(), paths.clone()), sizes: spawn_measurer(send.clone(), measuring.clone()), paths, measuring };
+    thread::spawn(move || run(rx, send, workers));
     tx
 }
 
-fn run(rx: Receiver<Cmd>, send: impl Fn(&AgentEvent)) {
+/// The cleanup and size threads, and what they share with the scan thread.
+struct Workers {
+    jobs: Sender<Job>,
+    sizes: Sender<SizeJob>,
+    paths: WatchedPaths,
+    measuring: Measuring,
+}
+
+/// Sizes are measured one folder at a time on their own thread (a big folder takes a while), each
+/// walk bounded (`cleanup::WALK_MAX_*`, then the size is unknown); a path already queued or being
+/// measured for the same key is not queued again.
+fn spawn_measurer(send: Sink, measuring: Measuring) -> Sender<SizeJob> {
+    let (tx, rx) = mpsc::channel::<SizeJob>();
+    thread::spawn(move || {
+        for job in rx {
+            let size = cleanup::measure(&job.dir, &job.path);
+            if let Ok(mut m) = measuring.lock() {
+                m.remove(&(job.key.clone(), job.path.clone()));
+            }
+            send(&AgentEvent::WorktreeSizes { key: job.key, sizes: vec![size] });
+        }
+    });
+    tx
+}
+
+/// Cleanups run one at a time on their own thread (deleting a big folder takes a while; diffs
+/// and scans go on meanwhile), then ask for a scan so the lists follow right away. What uses the
+/// folders (panes, processes, watched folders) is read by `cleanup::run` right before it writes,
+/// after its slow checks.
+fn spawn_cleaner(send: Sink, rescan: Sender<Cmd>, paths: WatchedPaths) -> Sender<Job> {
+    let (tx, rx) = mpsc::channel::<Job>();
+    thread::spawn(move || {
+        for job in rx {
+            let in_use = || {
+                let raw = paths.lock().map(|p| p.clone()).unwrap_or_default();
+                let watched = raw.iter().filter_map(|p| resolve(p).ok()).map(|d| d.to_string_lossy().into_owned()).collect();
+                cleanup::InUse { panes: tmux::pane_paths(), processes: cleanup::process_cwds(), watched }
+            };
+            let (deleted_branch, problem) = match cleanup::run(&job.dir, &job.action, &in_use) {
+                Ok(branch) => (branch, None),
+                Err(p) => (None, Some(p)),
+            };
+            send(&AgentEvent::Cleaned { key: job.key, action: job.action, deleted_branch, problem });
+            let _ = rescan.send(Cmd::Rescan);
+        }
+    });
+    tx
+}
+
+fn run(rx: Receiver<Cmd>, send: Sink, workers: Workers) {
     let mut watched: HashMap<String, Watched> = HashMap::new();
     let mut cache = worktrees::Cache::default();
     let mut next_scan = Instant::now();
@@ -60,12 +158,14 @@ fn run(rx: Receiver<Cmd>, send: impl Fn(&AgentEvent)) {
             Ok(Cmd::Watch { key, path }) => {
                 if watched.get(&key).is_none_or(|w| w.path != path) {
                     watched.insert(key.clone(), Watched { path, since: unix_now(), last_sent: None, last_worktrees: None });
+                    share_paths(&watched, &workers.paths);
                 }
                 // Immediate response (folder validation): rescan right away.
                 next_scan = Instant::now();
             }
             Ok(Cmd::Unwatch { key }) => {
                 watched.remove(&key);
+                share_paths(&watched, &workers.paths);
             }
             Ok(Cmd::Diff { key, file }) => {
                 if let Some(w) = watched.get(&key) {
@@ -78,6 +178,25 @@ fn run(rx: Receiver<Cmd>, send: impl Fn(&AgentEvent)) {
                 }
             }
             Ok(Cmd::List { path }) => send(&AgentEvent::DirListing(list_dir(&path))),
+            Ok(Cmd::Cleanup { key, action }) => match watched.get(&key).map(|w| resolve(&w.path)) {
+                Some(Ok(dir)) => {
+                    let _ = workers.jobs.send(Job { key, dir, action });
+                }
+                Some(Err(problem)) => send(&AgentEvent::Cleaned { key, action, deleted_branch: None, problem: Some(problem) }),
+                None => send(&AgentEvent::Cleaned { key, action, deleted_branch: None, problem: Some(Problem::NotAGitRepo) }),
+            },
+            Ok(Cmd::Sizes { key, paths }) => {
+                // Walking folders takes a while: off this thread, and only on request.
+                if let Some(Ok(dir)) = watched.get(&key).map(|w| resolve(&w.path)) {
+                    for path in paths {
+                        let new = workers.measuring.lock().is_ok_and(|mut m| m.insert((key.clone(), path.clone())));
+                        if new {
+                            let _ = workers.sizes.send(SizeJob { key: key.clone(), dir: dir.clone(), path });
+                        }
+                    }
+                }
+            }
+            Ok(Cmd::Rescan) => next_scan = Instant::now(),
             Err(RecvTimeoutError::Timeout) => {
                 let mut inputs = Vec::new();
                 for (key, w) in watched.iter_mut() {
@@ -106,6 +225,12 @@ fn run(rx: Receiver<Cmd>, send: impl Fn(&AgentEvent)) {
             }
             Err(RecvTimeoutError::Disconnected) => return,
         }
+    }
+}
+
+fn share_paths(watched: &HashMap<String, Watched>, shared: &WatchedPaths) {
+    if let Ok(mut paths) = shared.lock() {
+        *paths = watched.values().map(|w| w.path.clone()).collect();
     }
 }
 

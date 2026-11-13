@@ -2,12 +2,18 @@
 //! each one. The agent lists them (`AgentEvent::Worktrees`, for every watched folder); this slice
 //! keeps the lists, tells which worktree each card's folder is in (`World::card_worktrees`, read
 //! by the card's branch badge) and draws a one-line strip under the toolbar when the open group's
-//! repository has more than its main checkout. Read-only: nothing here changes the disk.
+//! repository has more than its main checkout. The strip opens the cleanup window (`cleanup`),
+//! the only place that asks the agent to delete anything, always after a confirmation. The
+//! window follows the shown group (`World::space`): showing another one closes it.
+
+pub mod cleanup;
 
 use std::collections::BTreeMap;
 
 use egui::{Color32, Panel, RichText, ScrollArea, Ui};
 use protocol::{AgentEvent, Worktree, WorktreeList};
+
+use cleanup::{CleanupWindow, Unattended};
 
 use crate::shell::event::Event;
 use crate::shell::i18n::t;
@@ -54,11 +60,60 @@ pub struct Worktrees {
     /// Latest list of each group's repository (key: project id), with the group folder it was
     /// received for.
     lists: BTreeMap<ProjectId, (String, WorktreeList)>,
+    cleanup: Option<CleanupWindow>,
+    /// What closed windows still wait for from the agent.
+    unattended: Unattended,
 }
 
 impl Worktrees {
     pub fn list(&self, project: &str) -> Option<&WorktreeList> {
         self.lists.get(project).map(|(_, l)| l)
+    }
+
+    pub fn cleanup_open(&self) -> bool {
+        self.cleanup.is_some()
+    }
+
+    /// A confirmation is up (it takes Enter and Escape).
+    pub fn has_dialog(&self) -> bool {
+        self.cleanup.as_ref().is_some_and(|c| c.confirm.is_some())
+    }
+
+    pub fn open_cleanup(&mut self, project: &str, world: &World) {
+        if self.cleanup.as_ref().is_none_or(|c| c.project != project) {
+            self.close_cleanup(world);
+            let mut window = CleanupWindow::new(project.to_string());
+            window.pending = self.unattended.take(project);
+            self.cleanup = Some(window);
+        }
+    }
+
+    /// Closes the cleanup window (and its confirmation: nothing more is sent). What it sent and
+    /// still waits for is answered by toasts.
+    fn close_cleanup(&mut self, world: &World) {
+        if let Some(window) = self.cleanup.take() {
+            let group = cleanup::group_name(world, &window.project);
+            self.unattended.adopt(window, group);
+        }
+    }
+
+    /// The cleanup window and its confirmation. Call with the other dialogs.
+    pub fn dialogs(&mut self, ctx: &egui::Context, world: &World, events: &mut Vec<Event>) {
+        if !self.unattended.is_empty() {
+            events.extend(self.unattended.expire(std::time::Instant::now()));
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
+        let Some(window) = self.cleanup.as_mut() else { return };
+        let open = match self.lists.get(&window.project) {
+            // Another group (or "All") is shown: this one's window goes.
+            Some(_) if !cleanup::stays_open(&window.project, world.space.as_deref()) => false,
+            Some((_, list)) => window.ui(ctx, list, world, events),
+            // The group went, or left git.
+            None => false,
+        };
+        if !open {
+            self.close_cleanup(world);
+        }
     }
 
     /// Every frame: which worktree each card's folder is in, across every known repository.
@@ -70,9 +125,26 @@ impl Worktrees {
         }
     }
 
-    pub fn handle(&mut self, ev: &Event, world: &mut World, _out: &mut Vec<Event>) {
+    pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
         match ev {
-            Event::Agent(AgentEvent::Worktrees(list)) => {
+            // The answer to an action of a closed window: a toast about its group.
+            Event::Agent(ev @ AgentEvent::Cleaned { .. }) => match self.unattended.answer(ev) {
+                Some(notice) => out.push(notice),
+                None => {
+                    if let Some(window) = self.cleanup.as_mut() {
+                        window.handle(ev);
+                    }
+                }
+            },
+            Event::Agent(ev @ AgentEvent::WorktreeSizes { .. }) => {
+                if let Some(window) = self.cleanup.as_mut() {
+                    window.handle(ev);
+                }
+            }
+            Event::Agent(ev @ AgentEvent::Worktrees(list)) => {
+                if let Some(window) = self.cleanup.as_mut() {
+                    window.handle(ev);
+                }
                 // Outside git (empty list) or for a group that no longer watches: forget it.
                 match world.project(&list.key).and_then(|p| p.cwd.clone()) {
                     Some(folder) if !list.worktrees.is_empty() => {
@@ -97,28 +169,42 @@ impl Worktrees {
         }
     }
 
-    /// The open group's list, when its repository has more than its main checkout (otherwise
-    /// the card badges say all there is to say).
+    /// The open group's list, when its repository has more than its main checkout, or merged
+    /// branches to clean up (otherwise the card badges say all there is to say).
     pub fn shown(&self, world: &World) -> Option<&WorktreeList> {
         let id = world.space.as_deref().filter(|id| world.project(id).is_some())?;
-        self.list(id).filter(|l| l.worktrees.iter().filter(|w| !w.bare).count() > 1)
+        self.list(id).filter(|l| l.worktrees.iter().filter(|w| !w.bare).count() > 1 || !l.merged_branches.is_empty())
     }
 
     /// One-line strip under the toolbar. Call after the toolbar, before the side panels.
-    pub fn ui(&self, ui: &mut Ui, world: &World, events: &mut Vec<Event>) {
+    pub fn ui(&mut self, ui: &mut Ui, world: &World, events: &mut Vec<Event>) {
         let Some(list) = self.shown(world) else { return };
         let worktrees: Vec<&Worktree> = list.worktrees.iter().filter(|w| !w.bare).collect();
+        let removable = cleanup::removable(list, world).len();
+        let mut open_cleanup = false;
         Panel::top("worktrees").resizable(false).show(ui, |ui| {
-            ScrollArea::horizontal().id_salt("worktrees-strip").show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new((t().worktrees_title)(worktrees.len())).strong().color(theme::TEXT_DIM)).on_hover_text(list.repo.as_deref().unwrap_or_default());
-                    for wt in worktrees {
-                        ui.separator();
-                        worktree_ui(ui, world, list, wt, events);
-                    }
+            // A floating scroll bar registers its drag area over the bottom of the content, which
+            // in this short strip is the lower half of its buttons: the bar gets its own room.
+            ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+            // The title and the cleanup entry stay put, outside the scrolling part.
+            ui.horizontal(|ui| {
+                ui.label(RichText::new((t().worktrees_title)(worktrees.len())).strong().color(theme::TEXT_DIM)).on_hover_text(list.repo.as_deref().unwrap_or_default());
+                let label = RichText::new((t().cleanup_button)(removable)).color(if removable > 0 { MERGED } else { theme::TEXT_DIM });
+                open_cleanup = ui.small_button(label).on_hover_text(t().cleanup_button_hint).clicked();
+                ScrollArea::horizontal().id_salt("worktrees-strip").show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        for wt in worktrees {
+                            ui.separator();
+                            worktree_ui(ui, world, list, wt, events);
+                        }
+                    });
                 });
             });
         });
+        if open_cleanup {
+            let project = list.key.clone();
+            self.open_cleanup(&project, world);
+        }
     }
 }
 
@@ -186,6 +272,9 @@ mod tests {
             behind: Some(0),
             merged: None,
             last_commit: Some(1),
+            branch_deletable: false,
+            reflog_commits: false,
+            new_branch: false,
         }
     }
 
@@ -239,7 +328,7 @@ mod tests {
     }
 
     fn list(key: &str, worktrees: Vec<Worktree>) -> WorktreeList {
-        WorktreeList { key: key.into(), repo: Some("/home/me/shop".into()), default_branch: Some("main".into()), worktrees }
+        WorktreeList { key: key.into(), repo: Some("/home/me/shop".into()), default_branch: Some("main".into()), worktrees, merged_branches: vec![] }
     }
 
     #[test]
@@ -287,7 +376,7 @@ mod tests {
         s.handle(&Event::Agent(AgentEvent::Worktrees(list("p", vec![wt("/home/me/shop", true, Some("main"))]))), &mut w, &mut vec![]);
         assert!(s.shown(&w).is_none());
         // Outside git: the list is dropped.
-        s.handle(&Event::Agent(AgentEvent::Worktrees(WorktreeList { key: "p".into(), repo: None, default_branch: None, worktrees: vec![] })), &mut w, &mut vec![]);
+        s.handle(&Event::Agent(AgentEvent::Worktrees(WorktreeList { key: "p".into(), repo: None, default_branch: None, worktrees: vec![], merged_branches: vec![] })), &mut w, &mut vec![]);
         assert!(s.list("p").is_none());
         // A group without a folder (or unknown) keeps nothing.
         s.handle(&Event::Agent(AgentEvent::Worktrees(list("ghost", shop()))), &mut w, &mut vec![]);

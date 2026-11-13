@@ -5,7 +5,7 @@
 
 use std::cell::Cell;
 
-use protocol::{Problem, TermStatus};
+use protocol::{BranchKeepReason, KeepReason, Problem, TermStatus};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lang {
@@ -97,8 +97,66 @@ impl Texts {
             Problem::NoDiff => self.no_diff.into(),
             Problem::TmuxMissing { detail } => (self.tmux_missing)(detail),
             Problem::HooksFailed { detail } => (self.hooks_failed)(detail),
+            Problem::WorktreeKept { path, reason } => (self.worktree_kept)(path, &self.keep_reason(*reason, None)),
+            Problem::NotAWorktree { path } => (self.not_a_worktree)(path),
+            Problem::NothingToPrune => self.nothing_to_prune.into(),
+            Problem::BranchKept { branch, reason } => (self.branch_kept)(branch, self.branch_keep_reason(*reason)),
+            Problem::BranchNotDeleted { branch, detail } => (self.branch_not_deleted)(branch, detail),
+            Problem::GitFailed { detail } => (self.git_failed)(detail),
+            Problem::PruneNotConfirmed { path } => (self.prune_not_confirmed)(path),
+            Problem::IgnoredChanged { path } => (self.ignored_changed)(path),
+            Problem::BranchChanged { path, expected, found } => (self.branch_changed)(path, expected, found.as_deref().unwrap_or(self.detached_head)),
         }
     }
+
+    /// Why a worktree is not offered for removal; `base`: the default branch, when known.
+    pub fn keep_reason(&self, reason: KeepReason, base: Option<&str>) -> String {
+        match reason {
+            KeepReason::MainCheckout => self.keep_main.into(),
+            KeepReason::Bare => self.keep_bare.into(),
+            KeepReason::Missing => self.keep_missing.into(),
+            KeepReason::Locked => self.keep_locked.into(),
+            KeepReason::NotMerged => match base {
+                Some(base) => (self.keep_not_merged_into)(base),
+                None => self.keep_not_merged.into(),
+            },
+            KeepReason::NewBranch => self.keep_new_branch.into(),
+            KeepReason::Dirty => self.keep_dirty.into(),
+            KeepReason::NotChecked => self.keep_not_checked.into(),
+            KeepReason::HasTerminal => self.keep_terminal.into(),
+            KeepReason::GroupFolder => self.keep_group_folder.into(),
+            KeepReason::HoldsWorktree => self.keep_holds_worktree.into(),
+            KeepReason::HoldsRepository => self.keep_holds_repository.into(),
+            KeepReason::ProcessInside => self.keep_process.into(),
+            KeepReason::ReflogCommits => self.keep_reflog_commits.into(),
+            KeepReason::HiddenChanges => self.keep_hidden_changes.into(),
+        }
+    }
+
+    pub fn branch_keep_reason(&self, reason: BranchKeepReason) -> &'static str {
+        match reason {
+            BranchKeepReason::NotFound => self.branch_keep_not_found,
+            BranchKeepReason::Default => self.branch_keep_default,
+            BranchKeepReason::CheckedOut => self.branch_keep_checked_out,
+            BranchKeepReason::NotMerged => self.branch_keep_not_merged,
+            BranchKeepReason::NotMergedLocally => self.branch_keep_not_merged_locally,
+            BranchKeepReason::ReflogCommits => self.keep_reflog_commits,
+        }
+    }
+}
+
+/// `1536` -> `1.5 KB` (`1,5 Ko` with French units and a decimal comma): one decimal below 10,
+/// none above, powers of 1024.
+pub fn format_size(bytes: u64, units: [&str; 4], decimal_comma: bool) -> String {
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < units.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    let text = if unit == 0 || value >= 10.0 { format!("{}", value.round() as u64) } else { format!("{value:.1}") };
+    let text = if decimal_comma { text.replace('.', ",") } else { text };
+    format!("{text} {}", units[unit])
 }
 
 pub struct Texts {
@@ -353,6 +411,73 @@ pub struct Texts {
     pub last_commit: fn(&str) -> String,
     pub go_to_terminal: &'static str,
 
+    // Worktree cleanup.
+    pub cleanup_button: fn(usize) -> String,
+    pub cleanup_button_hint: &'static str,
+    /// The cleanup window of a group (its name), also the title of a cleanup answer's toast.
+    pub cleanup_title: fn(&str) -> String,
+    pub cleanup_removable: &'static str,
+    pub cleanup_kept: &'static str,
+    pub cleanup_branches: &'static str,
+    pub cleanup_total: fn(&str) -> String,
+    pub cleanup_with_branch: &'static str,
+    pub cleanup_remove: &'static str,
+    pub cleanup_remove_all: fn(usize) -> String,
+    pub cleanup_prune: fn(usize) -> String,
+    pub cleanup_prune_hint: &'static str,
+    pub cleanup_nothing: &'static str,
+    pub cleanup_pending: &'static str,
+    pub cleanup_confirm_title: &'static str,
+    pub cleanup_confirm_intro: &'static str,
+    pub cleanup_confirm_folder: fn(&str) -> String,
+    pub cleanup_confirm_branch: fn(&str) -> String,
+    pub cleanup_confirm_entry: fn(&str) -> String,
+    pub cleanup_confirm_note: &'static str,
+    pub cleanup_confirm_ok: &'static str,
+    pub cleanup_removed: fn(&str) -> String,
+    pub cleanup_removed_with_branch: fn(&str, &str) -> String,
+    pub cleanup_pruned: &'static str,
+    pub cleanup_branch_deleted: fn(&str) -> String,
+    /// A size in bytes, with this language's units.
+    pub size: fn(u64) -> String,
+    pub keep_main: &'static str,
+    pub keep_bare: &'static str,
+    pub keep_missing: &'static str,
+    pub keep_locked: &'static str,
+    pub keep_not_merged: &'static str,
+    pub keep_not_merged_into: fn(&str) -> String,
+    pub keep_new_branch: &'static str,
+    pub keep_dirty: &'static str,
+    pub keep_not_checked: &'static str,
+    pub keep_terminal: &'static str,
+    pub keep_group_folder: &'static str,
+    pub keep_holds_worktree: &'static str,
+    pub keep_holds_repository: &'static str,
+    pub keep_process: &'static str,
+    pub keep_reflog_commits: &'static str,
+    pub keep_hidden_changes: &'static str,
+    pub ignored_changed: fn(&str) -> String,
+    pub cleanup_ignored_more: fn(usize) -> String,
+    pub branch_keep_not_found: &'static str,
+    pub branch_keep_default: &'static str,
+    pub branch_keep_checked_out: &'static str,
+    pub branch_keep_not_merged: &'static str,
+    pub branch_keep_not_merged_locally: &'static str,
+    pub worktree_kept: fn(&str, &str) -> String,
+    pub not_a_worktree: fn(&str) -> String,
+    pub nothing_to_prune: &'static str,
+    pub branch_kept: fn(&str, &str) -> String,
+    pub branch_not_deleted: fn(&str, &str) -> String,
+    pub git_failed: fn(&str) -> String,
+    pub prune_not_confirmed: fn(&str) -> String,
+    pub branch_changed: fn(&str, &str, &str) -> String,
+    pub cleanup_confirm_ignored: fn(&str) -> String,
+    pub cleanup_confirm_ignored_unknown: &'static str,
+    pub cleanup_confirm_ignored_none: &'static str,
+    pub size_unknown: &'static str,
+    pub cleanup_no_answer: &'static str,
+    pub cleanup_branch_stays: &'static str,
+
     // Links between terminals.
     pub wire_hint: fn(&str, &str) -> String,
     pub linked_group_hint: fn(&str) -> String,
@@ -599,7 +724,7 @@ pub const EN: Texts = Texts {
     ok: "OK",
     branch_badge_a11y: |b| format!("Branch: {b}"),
 
-    worktrees_title: |n| format!("⎇ {n} worktrees"),
+    worktrees_title: |n| if n == 1 { "⎇ 1 worktree".into() } else { format!("⎇ {n} worktrees") },
     main_checkout: "main checkout",
     worktree_dirty_hint: "Uncommitted changes",
     ahead_behind_hint: |b| format!("Commits ahead of (↑) and behind (↓) {b}"),
@@ -611,6 +736,70 @@ pub const EN: Texts = Texts {
     no_terminal_here: "no terminal",
     last_commit: |age| format!("Last commit {age}"),
     go_to_terminal: "Go to this terminal",
+
+    cleanup_button: |n| if n == 0 { "♻ Clean up".into() } else { format!("♻ {n} to clean up") },
+    cleanup_button_hint: "Merged worktrees and branches that can go",
+    cleanup_title: |group| format!("Clean up worktrees - {group}"),
+    cleanup_removable: "Safe to remove",
+    cleanup_kept: "Kept",
+    cleanup_branches: "Merged branches without a worktree",
+    cleanup_total: |s| format!("{s} to reclaim"),
+    cleanup_with_branch: "Also delete the merged branch",
+    cleanup_remove: "Remove…",
+    cleanup_remove_all: |n| format!("Remove all {n}…"),
+    cleanup_prune: |n| if n == 1 { "Prune 1 missing entry…".into() } else { format!("Prune {n} missing entries…") },
+    cleanup_prune_hint: "git worktree prune: forget worktrees whose folder is already gone",
+    cleanup_nothing: "Nothing to clean up",
+    cleanup_pending: "in progress…",
+    cleanup_confirm_title: "Delete for good?",
+    cleanup_confirm_intro: "This deletes:",
+    cleanup_confirm_folder: |p| format!("folder {p}"),
+    cleanup_confirm_branch: |b| format!("branch {b}"),
+    cleanup_confirm_entry: |p| format!("git's record of {p}: its folder is missing right now (also the case for a worktree on an unmounted or removable disk); its index, HEAD and reflog are deleted"),
+    cleanup_confirm_note: "Files git ignores in these folders go with them, listed above: build outputs and dependencies, but also configuration files (.env), local databases and editor or agent settings. Nothing is forced: git refuses if a change shows up meanwhile.",
+    cleanup_confirm_ok: "Delete",
+    cleanup_removed: |p| format!("Removed {p}"),
+    cleanup_removed_with_branch: |p, b| format!("Removed {p} and branch {b}"),
+    cleanup_pruned: "Missing entries pruned",
+    cleanup_branch_deleted: |b| format!("Deleted branch {b}"),
+    size: |b| format_size(b, ["B", "KB", "MB", "GB"], false),
+    keep_main: "main checkout",
+    keep_bare: "bare repository",
+    keep_missing: "folder gone: prune it",
+    keep_locked: "locked",
+    keep_not_merged: "not merged into the default branch",
+    keep_not_merged_into: |b| format!("not merged into {b}"),
+    keep_new_branch: "no commit of its own yet (new branch)",
+    keep_dirty: "uncommitted or untracked changes",
+    keep_not_checked: "changes not checked yet",
+    keep_terminal: "a terminal is open in it",
+    keep_group_folder: "a group's folder is in it",
+    keep_holds_worktree: "another worktree lives inside it",
+    keep_holds_repository: "a git repository sits in its ignored files",
+    keep_process: "a running program is in it",
+    keep_reflog_commits: "holds commits that are in no branch (only its reflog still has them)",
+    keep_hidden_changes: "files flagged assume-unchanged or skip-worktree: git status does not show their changes",
+    ignored_changed: |p| format!("{p} kept: its ignored files changed since the confirmation"),
+    cleanup_ignored_more: |n| format!("and {n} more"),
+    branch_keep_not_found: "it no longer exists",
+    branch_keep_default: "it is the default branch",
+    branch_keep_checked_out: "a worktree has it checked out",
+    branch_keep_not_merged: "not merged into the default branch",
+    branch_keep_not_merged_locally: "not merged into its upstream or the main checkout, which git branch -d checks",
+    worktree_kept: |p, r| format!("{p} kept: {r}"),
+    not_a_worktree: |p| format!("Not a worktree of this repository: {p}"),
+    nothing_to_prune: "Nothing to prune",
+    branch_kept: |b, r| format!("Branch {b} kept: {r}"),
+    branch_not_deleted: |b, d| format!("Worktree removed, but branch {b} kept: {d}"),
+    git_failed: |d| format!("git refused: {d}"),
+    prune_not_confirmed: |p| format!("Nothing pruned: {p} would go too and was not confirmed"),
+    branch_changed: |p, e, f| format!("{p} kept: its branch is now {f}, not {e}"),
+    cleanup_confirm_ignored: |l| format!("ignored, deleted too: {l}"),
+    cleanup_confirm_ignored_unknown: "ignored files: not listed yet",
+    cleanup_confirm_ignored_none: "no ignored files",
+    size_unknown: "unknown",
+    cleanup_no_answer: "No answer from the agent: try again",
+    cleanup_branch_stays: "its branch stays: git branch -d would refuse it (not merged into its upstream or the main checkout)",
 
     wire_hint: |a, b| format!("{a}  ⇄  {b}\nclick: go to the other group · right-click: delete"),
     linked_group_hint: |name| format!("Linked group: open “{name}”"),
@@ -856,7 +1045,7 @@ pub const FR: Texts = Texts {
     ok: "OK",
     branch_badge_a11y: |b| format!("Branche : {b}"),
 
-    worktrees_title: |n| format!("⎇ {n} worktrees"),
+    worktrees_title: |n| if n == 1 { "⎇ 1 worktree".into() } else { format!("⎇ {n} worktrees") },
     main_checkout: "copie principale",
     worktree_dirty_hint: "Modifications non commitées",
     ahead_behind_hint: |b| format!("Commits en avance (↑) et en retard (↓) sur {b}"),
@@ -868,6 +1057,74 @@ pub const FR: Texts = Texts {
     no_terminal_here: "aucun terminal",
     last_commit: |age| format!("Dernier commit {age}"),
     go_to_terminal: "Aller à ce terminal",
+
+    cleanup_button: |n| if n == 0 { "♻ Nettoyer".into() } else { format!("♻ {n} à nettoyer") },
+    cleanup_button_hint: "Worktrees et branches fusionnés qui peuvent partir",
+    cleanup_title: |group| format!("Nettoyer les worktrees - {group}"),
+    cleanup_removable: "Supprimables sans risque",
+    cleanup_kept: "Conservés",
+    cleanup_branches: "Branches fusionnées sans worktree",
+    cleanup_total: |s| format!("{s} à récupérer"),
+    cleanup_with_branch: "Supprimer aussi la branche fusionnée",
+    cleanup_remove: "Supprimer…",
+    cleanup_remove_all: |n| format!("Tout supprimer ({n})…"),
+    cleanup_prune: |n| if n == 1 { "Élaguer 1 entrée introuvable…".into() } else { format!("Élaguer {n} entrées introuvables…") },
+    cleanup_prune_hint: "git worktree prune : oublier les worktrees dont le dossier a déjà disparu",
+    cleanup_nothing: "Rien à nettoyer",
+    cleanup_pending: "en cours…",
+    cleanup_confirm_title: "Supprimer définitivement ?",
+    cleanup_confirm_intro: "Ceci supprime :",
+    cleanup_confirm_folder: |p| format!("le dossier {p}"),
+    cleanup_confirm_branch: |b| format!("la branche {b}"),
+    cleanup_confirm_entry: |p| {
+        format!(
+            "le suivi git de {p} : son dossier est introuvable en ce moment (c'est aussi le cas d'un worktree sur un disque démonté ou amovible) ; son index, son HEAD et son reflog sont supprimés"
+        )
+    },
+    cleanup_confirm_note: "Les fichiers ignorés par git dans ces dossiers partent avec eux, listés plus haut : compilations et dépendances, mais aussi fichiers de configuration (.env), bases de données locales et réglages d'éditeur ou d'agent. Rien n'est forcé : git refuse si une modification apparaît entre-temps.",
+    cleanup_confirm_ok: "Supprimer",
+    cleanup_removed: |p| format!("Supprimé : {p}"),
+    cleanup_removed_with_branch: |p, b| format!("Supprimés : {p} et la branche {b}"),
+    cleanup_pruned: "Entrées introuvables élaguées",
+    cleanup_branch_deleted: |b| format!("Branche {b} supprimée"),
+    size: |b| format_size(b, ["o", "Ko", "Mo", "Go"], true),
+    keep_main: "copie principale",
+    keep_bare: "dépôt nu",
+    keep_missing: "dossier disparu : à élaguer",
+    keep_locked: "verrouillé",
+    keep_not_merged: "pas fusionnée dans la branche par défaut",
+    keep_not_merged_into: |b| format!("pas fusionnée dans {b}"),
+    keep_new_branch: "pas encore de commit à elle (nouvelle branche)",
+    keep_dirty: "modifications non commitées ou fichiers non suivis",
+    keep_not_checked: "modifications pas encore vérifiées",
+    keep_terminal: "un terminal y est ouvert",
+    keep_group_folder: "le dossier d'un groupe s'y trouve",
+    keep_holds_worktree: "un autre worktree se trouve dedans",
+    keep_holds_repository: "un dépôt git se trouve dans ses fichiers ignorés",
+    keep_process: "un programme y tourne",
+    keep_reflog_commits: "contient des commits qui ne sont dans aucune branche (seul son reflog les a encore)",
+    keep_hidden_changes: "fichiers marqués assume-unchanged ou skip-worktree : git status ne montre pas leurs modifications",
+    ignored_changed: |p| format!("{p} conservé : ses fichiers ignorés ont changé depuis la confirmation"),
+    cleanup_ignored_more: |n| format!("et {n} de plus"),
+    branch_keep_not_found: "elle n'existe plus",
+    branch_keep_default: "c'est la branche par défaut",
+    branch_keep_checked_out: "un worktree l'utilise",
+    branch_keep_not_merged: "pas fusionnée dans la branche par défaut",
+    branch_keep_not_merged_locally: "pas fusionnée dans sa branche amont ni dans la copie principale, ce que vérifie git branch -d",
+    worktree_kept: |p, r| format!("{p} conservé : {r}"),
+    not_a_worktree: |p| format!("Pas un worktree de ce dépôt : {p}"),
+    nothing_to_prune: "Rien à élaguer",
+    branch_kept: |b, r| format!("Branche {b} conservée : {r}"),
+    branch_not_deleted: |b, d| format!("Worktree supprimé, mais branche {b} conservée : {d}"),
+    git_failed: |d| format!("git a refusé : {d}"),
+    prune_not_confirmed: |p| format!("Rien d'élagué : {p} partirait aussi et n'a pas été confirmé"),
+    branch_changed: |p, e, f| format!("{p} conservé : sa branche est maintenant {f}, pas {e}"),
+    cleanup_confirm_ignored: |l| format!("ignorés, supprimés aussi : {l}"),
+    cleanup_confirm_ignored_unknown: "fichiers ignorés : pas encore listés",
+    cleanup_confirm_ignored_none: "aucun fichier ignoré",
+    size_unknown: "inconnue",
+    cleanup_no_answer: "Pas de réponse de l'agent : réessayer",
+    cleanup_branch_stays: "sa branche reste : git branch -d la refuserait (pas fusionnée dans sa branche amont ni dans la copie principale)",
 
     wire_hint: |a, b| format!("{a}  ⇄  {b}\nclic : aller à l'autre groupe · clic droit : supprimer"),
     linked_group_hint: |name| format!("Groupe relié : ouvrir « {name} »"),
@@ -931,6 +1188,28 @@ mod tests {
         assert_eq!(texts(Lang::En).problem(&p), "folder not found: ~/x");
         assert_eq!(texts(Lang::Fr).problem(&p), "dossier introuvable : ~/x");
         assert!(texts(Lang::En).problem(&Problem::NotAGitRepo).starts_with("Not a git repository"));
+        let kept = Problem::WorktreeKept { path: "/home/me/shop-taxes".into(), reason: KeepReason::Dirty };
+        assert_eq!(texts(Lang::Fr).problem(&kept), "/home/me/shop-taxes conservé : modifications non commitées ou fichiers non suivis");
+        assert_eq!(texts(Lang::En).problem(&kept), "/home/me/shop-taxes kept: uncommitted or untracked changes");
+        let branch = Problem::BranchKept { branch: "wip".into(), reason: BranchKeepReason::CheckedOut };
+        assert_eq!(texts(Lang::En).problem(&branch), "Branch wip kept: a worktree has it checked out");
+        assert_eq!(texts(Lang::Fr).keep_reason(KeepReason::NotMerged, Some("origin/main")), "pas fusionnée dans origin/main");
+        assert!(texts(Lang::En).keep_reason(KeepReason::ReflogCommits, None).starts_with("holds commits that are in no branch"));
+        assert!(texts(Lang::Fr).keep_reason(KeepReason::HiddenChanges, None).contains("skip-worktree"));
+        assert_eq!(texts(Lang::En).problem(&Problem::IgnoredChanged { path: "/w".into() }), "/w kept: its ignored files changed since the confirmation");
+        // A branch with no commit of its own: the same words in the list and in the refusal.
+        let fresh = Problem::WorktreeKept { path: "/home/me/shop-fresh".into(), reason: KeepReason::NewBranch };
+        assert_eq!(texts(Lang::Fr).problem(&fresh), "/home/me/shop-fresh conservé : pas encore de commit à elle (nouvelle branche)");
+        assert_eq!(texts(Lang::En).problem(&fresh), "/home/me/shop-fresh kept: no commit of its own yet (new branch)");
+        assert_eq!(texts(Lang::En).keep_reason(KeepReason::NewBranch, Some("main")), "no commit of its own yet (new branch)");
+    }
+
+    #[test]
+    fn sizes_in_each_language() {
+        let (en, fr) = (texts(Lang::En), texts(Lang::Fr));
+        assert_eq!(((en.size)(0), (en.size)(1023), (en.size)(1536), (en.size)(340 * 1024 * 1024)), ("0 B".into(), "1023 B".into(), "1.5 KB".into(), "340 MB".into()));
+        assert_eq!(((fr.size)(1536), (fr.size)(1400 * 1024 * 1024)), ("1,5 Ko".into(), "1,4 Go".into()));
+        assert_eq!((en.size)(3 * 1024u64.pow(4)), "3072 GB", "no bigger unit");
     }
 
     #[test]

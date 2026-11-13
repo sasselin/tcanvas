@@ -55,7 +55,13 @@ pub fn run() -> io::Result<()> {
                     Ok(_) => send(&AgentEvent::HooksChanged { hooks: hooks::state() })?,
                     Err(e) => send(&AgentEvent::Error { problem: Problem::HooksFailed { detail: e.to_string() } })?,
                 },
-                AgentCmd::Watch { .. } | AgentCmd::Unwatch { .. } | AgentCmd::Diff { .. } | AgentCmd::ShowCommit { .. } | AgentCmd::ListDir { .. } => {}
+                AgentCmd::Watch { .. }
+                | AgentCmd::Unwatch { .. }
+                | AgentCmd::Diff { .. }
+                | AgentCmd::ShowCommit { .. }
+                | AgentCmd::ListDir { .. }
+                | AgentCmd::Cleanup { .. }
+                | AgentCmd::WorktreeSizes { .. } => {}
             }
         }
 
@@ -185,6 +191,12 @@ fn spawn_stdin_reader(watcher: Sender<changes::Cmd>) -> Receiver<AgentCmd> {
                 }
                 Ok(AgentCmd::ListDir { path }) => {
                     let _ = watcher.send(changes::Cmd::List { path });
+                }
+                Ok(AgentCmd::Cleanup { key, action }) => {
+                    let _ = watcher.send(changes::Cmd::Cleanup { key, action });
+                }
+                Ok(AgentCmd::WorktreeSizes { key, paths }) => {
+                    let _ = watcher.send(changes::Cmd::Sizes { key, paths });
                 }
                 Ok(cmd) => {
                     if tx.send(cmd).is_err() {

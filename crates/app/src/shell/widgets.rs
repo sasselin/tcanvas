@@ -7,19 +7,41 @@ use crate::shell::i18n::t;
 /// Modal confirmation. `Some(true)`: confirmed (button or Enter), `Some(false)`: cancelled
 /// (button, Escape or click outside), `None`: still open.
 pub fn confirm(ctx: &egui::Context, id: &str, title: &str, body: &str, ok_label: &str) -> Option<bool> {
-    let mut result = None;
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
         return Some(true);
     }
+    confirm_dialog(ctx, id, title, body, ok_label, 380.0, None, true)
+}
+
+/// Like `confirm`, for a deletion: only a click on the button confirms (Enter does nothing), and
+/// a long body scrolls instead of pushing the buttons off screen. `ready`: the button can be
+/// clicked (`false` while what it would delete is not fully listed yet).
+pub fn confirm_by_click(ctx: &egui::Context, id: &str, title: &str, body: &str, ok_label: &str, ready: bool) -> Option<bool> {
+    // Swallowed: Enter must neither confirm nor reach a terminal.
+    ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+    let max = (ctx.content_rect().height() * 0.5).max(120.0);
+    confirm_dialog(ctx, id, title, body, ok_label, 460.0, Some(max), ready)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn confirm_dialog(ctx: &egui::Context, id: &str, title: &str, body: &str, ok_label: &str, width: f32, max_body: Option<f32>, ready: bool) -> Option<bool> {
+    let mut result = None;
     let modal = Modal::new(Id::unique(("confirm", id))).show(ctx, |ui| {
-        ui.set_width(380.0);
+        ui.set_width(width);
         ui.label(RichText::new(title).strong().size(16.0));
         ui.add_space(4.0);
-        ui.label(body);
+        match max_body {
+            Some(max) => {
+                egui::ScrollArea::vertical().max_height(max).show(ui, |ui| ui.label(body));
+            }
+            None => {
+                ui.label(body);
+            }
+        }
         ui.add_space(8.0);
         ui.horizontal(|ui| {
             let danger = egui::Button::new(RichText::new(ok_label).color(egui::Color32::WHITE)).fill(egui::Color32::from_rgb(190, 60, 60));
-            if ui.add(danger).clicked() {
+            if ui.add_enabled(ready, danger).clicked() {
                 result = Some(true);
             }
             if ui.button(t().cancel).clicked() {
