@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8](https://github.com/sasselin/tcanvas/compare/v0.1.7...v0.1.8) - 2026-11-12
+
+### Fixed
+
+- *(agent)* Survive wall clock steps and same-second output ([#37](https://github.com/sasselin/tcanvas/pull/37))
+
 ## [0.1.7](https://github.com/sasselin/tcanvas/compare/v0.1.6...v0.1.7) - 2026-11-08
 
 ### Added

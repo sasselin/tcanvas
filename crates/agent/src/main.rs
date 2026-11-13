@@ -20,6 +20,7 @@ mod features {
     pub mod send;
     pub mod serve;
     pub mod status;
+    pub mod timing;
     pub mod tmux;
     pub mod worktrees;
 }
