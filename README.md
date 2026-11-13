@@ -10,7 +10,9 @@ All your WSL terminals on an **infinite canvas**, Figma- or Miro-style. No more 
 terminal is a card you can move and resize. Group them by project, filter them, jump straight to
 the one you need, and get notified when one of them gets stuck.
 A project linked to a folder shows **changed files and their diffs live**, which makes it ideal
-for watching what Claude (or any other AI agent) is doing while it works.
+for watching what Claude (or any other AI agent) is doing while it works. For git projects it
+also keeps the **worktrees** your agents work in, a **task list** they can read and add to, a
+**"Your turn"** list of what needs you, and a **review and merge** of the branches they produce.
 
 - Native Windows app (`tcanvas.exe`, Rust + egui/wgpu, terminal emulation by `alacritty_terminal`),
   also available as a native Linux app (tmux runs locally, no WSL involved).
@@ -50,6 +52,20 @@ for watching what Claude (or any other AI agent) is doing while it works.
   path, which coding agents such as Claude Code turn into an attachment.
 - **Clean shutdown**: closing a terminal really stops its shell and every process it started.
   A terminal whose session ended offers **Restart** or **Remove**.
+- **Coding agents at a glance**: with the hooks installed, a coding agent's card shows its last
+  prompt in its title bar, and says when the agent waits for you.
+- **Commands and messages**: per group, command templates that open a terminal running a command,
+  and quick messages typed into a terminal from its menu.
+- **Worktrees**: a strip lists the open repository's worktrees and the terminals in each; cards
+  show their branch; create a worktree from a group, with a per-repository recipe
+  (`.tcanvas.toml`), and clean up merged ones.
+- **Tasks**: a task list per project, kept outside the repository, that coding agents can read
+  and add to; **Start** runs a task in its own worktree with a coding agent, and its status follows
+  the agent.
+- **"Your turn"**: one list, across every project, of the questions, reviews, alerts and ready
+  tasks waiting for you.
+- **Review and merge**: review a whole branch against its base, then merge it from the app,
+  prepared aside and applied by a fast-forward. Nothing is ever pushed.
 - **Persistent layout**: cards, groups, wires, the open project, the view and the free grid
   option are saved.
 - **Updates from the app**: a new release shows a toast and an **Update** button with its
@@ -131,7 +147,15 @@ tcanvas-agent uninstall-hooks    # removes the coding agent hooks
   "waiting for input" as soon as the agent finishes its turn or asks for a permission. Your
   own settings and hooks are kept, and the original file is saved as `*.tcanvas.bak`. Outside
   tcanvas the hook exits at once and does nothing. Without these hooks, a known coding agent
-  is shown as waiting after a few seconds without screen output.
+  is shown as waiting after a few seconds without screen output. They also give a card its
+  agent's last prompt, and let a started task's status follow its agent.
+
+The **task integration** is a separate opt-in: **Enable** in the Tasks panel, or
+`tcanvas-agent install-hooks --tasks` (`uninstall-hooks --tasks` removes it). For each coding
+agent found it adds a session start hook that hands the agent the project's open tasks
+(`tcanvas-agent task prime`), and for Claude Code and Codex a `tcanvas-tasks` skill describing the
+`tcanvas-agent task` commands (`~/.claude/skills/`, `~/.agents/skills/`). A skill file you edited
+is never overwritten nor removed.
 
 ### Building from source
 
@@ -153,10 +177,11 @@ cargo build --release -p tcanvas -p tcanvas-agent
 ./target/release/tcanvas
 ```
 
-Agent commands: `tcanvas-agent` (server mode, used by the app), `tcanvas-agent install-hooks`,
-`tcanvas-agent uninstall-hooks`, `tcanvas-agent hook <event>` (called by coding agent hooks),
-`tcanvas-agent hooks [bash|zsh]` (print the hooks without installing them), and
-`tcanvas-agent kill <session>` (stop every process of a session, then the session itself).
+Agent commands: `tcanvas-agent` (server mode, used by the app), `tcanvas-agent install-hooks
+[--tasks]`, `tcanvas-agent uninstall-hooks [--tasks]`, `tcanvas-agent hook <event>` (called by
+coding agent hooks), `tcanvas-agent hooks [bash|zsh]` (print the hooks without installing them),
+`tcanvas-agent kill <session>` (stop every process of a session, then the session itself), and
+`tcanvas-agent task <command>` (the current project's task list, see [Tasks](#tasks)).
 
 ## Usage
 
@@ -166,6 +191,7 @@ Agent commands: `tcanvas-agent` (server mode, used by the app), `tcanvas-agent i
 | **+ Terminal** in the top bar | New terminal in the open project (`Ctrl+Shift+N`) |
 | **+ Project** in the top bar | New empty project (group) |
 | **+ Terminal** next to a group's label · big button in the middle of an empty group | New terminal in that group (in its linked folder), placed next to the others |
+| **▾** next to a group's **+ Terminal** | A plain shell, one of the group's command templates, **Edit templates…**, **⎇ New worktree…** (git folders) |
 | Drag empty canvas · middle-click drag | Pan the view (closed hand) |
 | **Hold Shift** · Shift + drag | Hand tool: pan from anywhere, even over a terminal |
 | Mouse wheel · Ctrl + wheel | Scroll · zoom around the cursor |
@@ -175,14 +201,14 @@ Agent commands: `tcanvas-agent` (server mode, used by the app), `tcanvas-agent i
 | Right-click the title bar → **Move to** | Send the terminal to another group (or out of any group), even from a space where the others are hidden |
 | Double-click the title bar | Center and zoom on the card |
 | **×** on the title bar | Close the terminal after confirmation: the shell and **all** its processes |
-| Right-click the title bar | Rename, delay before "stalled", center and zoom, move to, close |
+| Right-click the title bar | Rename, delay before "stalled", center and zoom, move to, **send a message** (the group's quick messages), close |
 | Right-click inside a terminal · Alt + right-click | Paste · tmux's own menu |
 | **Alt + drag** from a group's label onto another group | Link the two groups with a **wire** |
 | Click a wire · right-click | Fly to the other group · delete the wire |
 | Click a linked-group chip (`⇄ web`) in a project's space | Open that group's space |
 | **Free grid** in the top bar (inside a group) | Toggle the free grid: no frame, the whole canvas belongs to the open group |
 | Click the minimap | Go there |
-| Group label: drag · **double-click** · right-click | Move it with its cards · **rename in place** (Enter confirms, Esc cancels) · menu: new terminal here, rename, linked folder, color, remove the frame (keep the terminals), close the group |
+| Group label: drag · **double-click** · right-click | Move it with its cards · **rename in place** (Enter confirms, Esc cancels) · menu: new terminal here, new worktree (git folders), rename, linked folder, color, remove the frame (keep the terminals), close the group |
 | **×** on a group's label | Close the group **and all its terminals**, after confirmation (lists the running commands) |
 | **📁** next to the label | **Link a folder**: a picker that browses WSL (breadcrumb, ⌂, ⬆, recent folders, filter, ⎇ git marker, editable path), opened on the folder of one of the group's terminals; **Unlink** removes it |
 | **Δ n** next to a linked group's label | Number of uncommitted files; opens the Changes panel (also from **All**) |
@@ -190,6 +216,9 @@ Agent commands: `tcanvas-agent` (server mode, used by the app), `tcanvas-agent i
 | A project's chip in the top bar | **Open that project alone**, framed and centered in one click: the other projects are hidden (🔔 = a terminal there needs attention, ✎ = files are being written there) |
 | **All** chip | Overview of every project, for organizing |
 | **🔔 n** in the top bar | Go to the next terminal that needs attention |
+| **◆ Your turn (n)** in the top bar | The list of what needs you, across every project (`Ctrl+Shift+Q`) |
+| **✔ Tasks (n)** in the top bar (linked group open) | The group's task panel (`Ctrl+Shift+T`) |
+| Worktree strip (under the top bar) | A terminal's chip: go to it · **Review**: review that branch · **+ Worktree** · **♻ Clean up** |
 
 Global shortcuts (they work even when a terminal has the keyboard):
 
@@ -201,6 +230,9 @@ Global shortcuts (they work even when a terminal has the keyboard):
 | `Ctrl+Shift+W` | Close the focused terminal (confirmation: Enter closes, Esc cancels) |
 | `Ctrl+Shift+F` | Filter (Enter: frame the matches) |
 | `Ctrl+Shift+0` | Show all (in the open space) |
+| `Ctrl+Shift+T` | Open or close the Tasks panel |
+| `Ctrl+Shift+Q` | Open or close the "Your turn" list (↑↓ choose, Enter go, Esc close) |
+| `Ctrl+Shift+J` | Go to the next item of the "Your turn" list, without opening it |
 | `Ctrl+Shift+K` | Every shortcut and mouse gesture (also the ⌨ button of the top bar, or the "Go to" palette) |
 
 Ctrl+C, Ctrl+K, Ctrl+P, Ctrl+plus/minus, Esc, Tab… go to the terminal. Ctrl+V and `Ctrl+Shift+V` paste (an image pastes the path of a saved PNG).
@@ -239,7 +271,64 @@ stops following.
 A ✎ on another project's chip means files are being written there right now. Outside git: list
 of files modified since tracking started, without diffs.
 
-**Worktree recipe**: a fresh worktree lacks what git does not check out (`.env`, installed
+**Closing**: `tcanvas-agent kill` really stops everything: the shells' descendants, processes from
+the same session (`nohup`), and those that detached (`setsid`, daemons), found through their
+`TMUX_PANE`. SIGHUP + SIGTERM first, SIGKILL for the stubborn ones, then a check that nothing is
+left.
+
+**Notifications**: a toast in the app and a pulsing border on the card (plus a desktop
+notification, Windows toast or D-Bus on Linux, when the window is in the background) when a
+terminal is stalled
+(no output for 60 s with an idle CPU; adjustable per card), waits for an answer (`[y/N]`,
+`password:`…), fails (exit code ≠ 0, except Ctrl+C), finishes a command that took more than 30 s,
+or stops. Nothing if you are already looking at that terminal. In-app notices also confirm a
+copy, or that a terminal moved to another group (click: go there), without any alert.
+
+The icon (`assets/icon.svg`, with an `icon-small.svg` variant for 16–32 px) is embedded in the
+Windows exe (`crates/app/build.rs`, `embed-resource` + mingw-w64's `windres`) and in the window.
+To regenerate the PNGs and the ICO: `sudo apt install librsvg2-bin imagemagick`, then
+`rsvg-convert -w N` and `convert icon-*.png icon.ico`.
+
+## Worktrees, tasks and reviews
+
+Coding agents work best on their own branch, in their own folder. tcanvas keeps those folders
+(git worktrees) in view, gives each project a task list the agents share, tells you whose turn it
+is, and lets you review and merge what they did. Everything here is local: nothing is pushed or
+fetched.
+
+### Command templates and quick messages
+
+The **▾** next to a group's **+ Terminal** opens a terminal that runs one of the group's
+**command templates** (`claude`, `npm run dev`...): the command runs once, through your shell, in
+the group's folder, and the shell stays when it ends. **Quick messages** are a group's canned
+texts ("Commit your changes with a clear message"): right-click a terminal's title bar, **Send a
+message**, and the text is typed into that terminal as one paste, followed by Enter if the message
+asks for it.
+
+### Worktrees
+
+![The worktree strip: each worktree of the repository with its branch, ahead/behind counts and its terminals; the cards show their branch](docs/screenshots/worktrees.png)
+
+When the open group's repository has more than its main checkout, a strip under the top bar lists
+its worktrees: folder, branch, uncommitted changes (●), commits ahead of and behind the default
+branch (↑↓), **✔ merged**, and the terminals working in each (click one to go there). Every card
+shows its branch in a badge (with the worktree's folder when it is not the main checkout).
+
+- **+ Worktree** (in the strip, or **⎇ New worktree…** in the group's menus) creates a worktree on
+  a new or an existing branch, from the default branch or another base, in
+  `.claude/worktrees/<name>` by default (the location is editable and kept per group), applies the
+  repository's recipe (below) and opens a terminal there, a shell or one of the group's templates.
+  When git does not ignore that folder, the dialog offers to add it to `.git/info/exclude`.
+- **♻ Clean up** lists what can go: worktrees whose branch is merged into the default branch, with
+  no uncommitted or untracked change, no terminal and no program running in them, and merged
+  branches without a worktree; everything else is listed as kept, with the reason. Removing asks
+  for a confirmation that lists the folders, the branches and the ignored files that go with
+  them (`.env`, build outputs, local databases...). Nothing is forced: git refuses if a change
+  shows up meanwhile. Worktrees whose folder is already gone can be pruned.
+
+#### Worktree recipe
+
+A fresh worktree lacks what git does not check out (`.env`, installed
 dependencies, a local database). A repository describes what a new worktree needs in
 `.tcanvas.toml`, at the root of its main checkout (commit it to share it):
 
@@ -284,23 +373,90 @@ created, without it.
   the dialog. It runs in the new terminal's shell, its output in the card; the chosen command
   runs after it only if it succeeded (its last command's status).
 
-**Closing**: `tcanvas-agent kill` really stops everything: the shells' descendants, processes from
-the same session (`nohup`), and those that detached (`setsid`, daemons), found through their
-`TMUX_PANE`. SIGHUP + SIGTERM first, SIGKILL for the stubborn ones, then a check that nothing is
-left.
+### Tasks
 
-**Notifications**: a toast in the app and a pulsing border on the card (plus a desktop
-notification, Windows toast or D-Bus on Linux, when the window is in the background) when a
-terminal is stalled
-(no output for 60 s with an idle CPU; adjustable per card), waits for an answer (`[y/N]`,
-`password:`…), fails (exit code ≠ 0, except Ctrl+C), finishes a command that took more than 30 s,
-or stops. Nothing if you are already looking at that terminal. In-app notices also confirm a
-copy, or that a terminal moved to another group (click: go there), without any alert.
+![The Tasks panel of a project: tasks by status, priorities, a task waiting for another, ready ones, notes](docs/screenshots/tasks.png)
 
-The icon (`assets/icon.svg`, with an `icon-small.svg` variant for 16–32 px) is embedded in the
-Windows exe (`crates/app/build.rs`, `embed-resource` + mingw-w64's `windres`) and in the window.
-To regenerate the PNGs and the ICO: `sudo apt install librsvg2-bin imagemagick`, then
-`rsvg-convert -w N` and `convert icon-*.png icon.ico`.
+**✔ Tasks** in the top bar (`Ctrl+Shift+T`) opens the task list of the open group's project: a
+title, a Markdown description, a priority, notes (yours or an agent's) and the tasks it waits for,
+sorted by status: inbox, to do, active, review, done, canceled. A task whose dependencies are all
+done is marked **ready**. Type a title in the panel to add a task to the inbox.
+
+The list is kept **outside the repository**, in `~/.local/share/tcanvas/tasks/` (in WSL on
+Windows; files only you can read): it is never committed, survives branch switches, and every
+worktree of a repository shares one list (a folder outside git has its own).
+
+Coding agents use it from their terminal with `tcanvas-agent task` (`list`, `show`, `add`, `note`,
+`status`, `dep`; `tcanvas-agent task --help` lists them). They append, never rewrite: an agent can
+read tasks, file new ones, add notes and dependencies, and move a task to active or review; it
+cannot edit a title or a description, remove a task, or close one (done and canceled are yours,
+in the panel). With the [task integration](#hooks) enabled, each new agent session starts with the
+project's open tasks, and Claude Code and Codex get a skill describing these commands.
+
+### Starting a task
+
+![Starting a task: a new worktree on its own branch, and the command that starts the coding agent with the task as its prompt](docs/screenshots/task-start.png)
+
+**Start** on a task creates its worktree on a new branch (`task/<title>-<ref>`, from the default
+branch; the prefix is a group setting), applies the recipe, and opens a card there that runs the
+group's **task command**: the command template ticked **Starts the group's tasks**, chosen the
+first time. A confirmation shows the branch, the folder, the command and the prompt the agent
+receives (it can be skipped for the group, except when a dependency is not finished). Outside git,
+the command runs in the group's folder. The task's card shows the task in its title bar; the
+task's row offers **Go to**, or **Resume** once the card is closed. Cards that start tasks need a
+bash or zsh login shell.
+
+The task's text is data, never part of a command line. In the task command, `{task}` (the
+prompt), `{task_ref}`, `{task_title}` and `{task_file}` (a file holding the prompt) are accepted
+only as words of their own, outside quotes, and become quoted variables: `claude {task}` runs
+`claude "$TCANVAS_TASK"`. Any other use is refused; write the variable yourself instead, e.g.
+`bash -c 'claude "$TCANVAS_TASK"'`.
+
+The task's status then **follows its agent** (with the coding agent hooks installed): a new prompt
+moves it to active, and the end of a turn that committed, with the branch ahead of its base, moves
+it to review. Nothing ever moves a task to done or canceled, and a status you set by hand stays
+until the agent's next prompt.
+
+### "Your turn"
+
+![The "Your turn" list: a question waiting for an answer, a task to review, a failed and a stalled terminal, tasks ready to start](docs/screenshots/queue.png)
+
+**◆ Your turn** in the top bar (`Ctrl+Shift+Q`) is one list, across every project, of what needs
+you: agents and terminals waiting for your answer, tasks in review, stalled or failed terminals
+you have not looked at, then tasks ready to start. Up/Down and Enter go to a row;
+`Ctrl+Shift+J` goes straight to the next one without opening the list. A question stays listed
+until it is answered; the 🔔 button still counts every alert, a long command that finished
+included.
+
+### Review and merge
+
+![Reviewing a task's branch against main: its commits, the files it changes and their diff, and the Merge button](docs/screenshots/review.png)
+
+**Review** (in the worktree strip, on a task in review, or in the "Your turn" list) opens the
+Changes panel in **Review branch** mode: the whole branch against its base (the default branch, or
+another one), like a merge request: its commits, every file it changes with its diff, and a
+warning when the base moved on since the branch started. Uncommitted changes of that worktree are
+listed apart: they are not part of the branch.
+
+**Merge…** merges the reviewed branch into its base, after a confirmation that says what will
+happen. Choose a merge commit, a fast-forward when possible, a squash into one commit (with its
+message) or a rebase then fast-forward; the choice is remembered per group.
+
+- The result is **prepared aside**, in a private worktree of the agent; your worktrees are not
+  touched while it is built. Only at the end is the base moved to it, in the worktree that has the
+  base checked out, by a fast-forward that does all or nothing. The branch's worktree is never
+  written.
+- On a **conflict**, nothing is applied and the conflicting files are listed; open a terminal in
+  the branch's worktree to resolve them (or let the agent do it), then review and merge again.
+- **Nothing is pushed.** Commits use your own git identity (the app never makes one up), and git
+  hooks run as usual. The merge is refused while a coding agent is working in the base's
+  worktree, or when the branch or the base moved since the review.
+- A **squash** or a **rebase** leaves the branch with its own commits, which git does not count as
+  merged: the cleanup keeps that branch and its worktree, and the app tells you how to remove them
+  by hand once you are sure. A rebase is refused when the branch has merge commits, and is checked
+  to give the same files as a merge.
+- After a merge, the app offers to remove the worktree (through the cleanup window and its own
+  checks) and to move the linked task to done.
 
 ## Architecture
 
@@ -314,10 +470,13 @@ The workspace is organized in **vertical slices**:
 
 ```
 crates/protocol   app ⇄ agent messages (serde, one JSON line per message)
-crates/agent      features/{tmux, status, hooks, agent_hooks, kill, changes, serve}
+crates/agent      features/{serve, tmux, status, timing, hooks, agent_hooks, kill, send, changes,
+                            worktrees, create, recipe, cleanup, review, merge,
+                            tasks, task_cli, task_skill}
 crates/app        shell/ (world, event bus, i18n, agent launch, theme, fonts, widgets, version)
-                  features/{canvas, terminal_card, projects, spaces, changes, wires,
-                            filters, jump, notifications, agent_link, persistence, updates}
+                  features/{canvas, terminal_card, projects, spaces, changes, wires, worktrees,
+                            tasks, queue, filters, jump, shortcuts, notifications, agent_link,
+                            persistence, updates}
 ```
 
 Slices never call each other: they read the `World` and emit `Event`s that the `shell`
@@ -370,8 +529,10 @@ cargo clippy --workspace --all-targets
 The end-to-end test opens a real terminal, types into it, checks the "stalled" status and the
 notification, **closes and reopens the app** and checks that it is the same shell, then closes
 the terminal. It also links a group to a temporary git repository, checks that a terminal from
-the group opens there and that a file written from that terminal shows up in the changes. It uses
-a throwaway tmux server and never touches your sessions.
+the group opens there and that a file written from that terminal shows up in the changes. Other
+end-to-end tests start a card with a command, send text to a session, apply a worktree recipe and
+start a task in its own worktree. They use a throwaway tmux server, throwaway git repositories and
+a scratch home, and never touch your sessions, repositories or settings.
 
 ## Contributing
 

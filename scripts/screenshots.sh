@@ -23,14 +23,4 @@ if [[ -f "$frames/0000.png" && "$frames/0000.png" -nt docs/screenshots/demo.gif 
         -loop 0 docs/screenshots/demo.gif
     echo "wrote docs/screenshots/demo.gif ($(du -h docs/screenshots/demo.gif | cut -f1))"
 fi
-
-# The animated demo: the frames rendered by the `demo` scene, assembled with ffmpeg
-# (apt install ffmpeg) into a GIF with its own palette, at 12 frames per second.
-frames=target/demo-frames
-if [[ -f "$frames/0000.png" && "$frames/0000.png" -nt docs/screenshots/demo.gif ]]; then
-    ffmpeg -loglevel error -y -framerate 12 -i "$frames/%04d.png" \
-        -vf "split[a][b];[a]palettegen=max_colors=256:stats_mode=diff[p];[b][p]paletteuse=dither=none:diff_mode=rectangle" \
-        -loop 0 docs/screenshots/demo.gif
-    echo "wrote docs/screenshots/demo.gif ($(du -h docs/screenshots/demo.gif | cut -f1))"
-fi
 git status --short docs/screenshots

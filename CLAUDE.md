@@ -23,17 +23,28 @@ Cargo workspace (`Cargo.toml`, edition 2024, resolver 3):
 
 - `crates/protocol` - shared message types (`AgentCmd`, `AgentEvent`, `TermStatus`,
   `Problem`, ...), JSON lines via `encode`/`decode`. Also owns the tmux socket name and the
-  session prefix (`SESSION_PREFIX = "tc_"`).
+  session prefix (`SESSION_PREFIX = "tc_"`). Command families beyond sessions and changes:
+  worktrees (`PlanWorktree`, `CreateWorktree`, `RefreshWorktrees`, `Cleanup`, `WorktreeSizes`),
+  tasks (`WatchTasks`, `EditTasks`, `AdoptTasks`, `SetTaskHooks`), `SendText`, and review/merge
+  (`Review`, `ReviewFiles`, `ReviewDiff`, `Merge`). `task_command.rs` validates and expands the
+  `{task}` placeholders of a task command (a whitelist, see "Git, home and data safety").
 - `crates/agent` - binary `tcanvas-agent` (runs in WSL). Subcommands:
-  `serve` (default), `install-hooks`, `uninstall-hooks`, `hook <event>`, `hooks [bash|zsh]`,
-  `kill <session>`. Code in `src/features/*.rs` (serve loop, tmux access, status from tmux +
-  /proc, shell hooks for bash and zsh following `$SHELL`, coding agent hooks in
-  `agent_hooks.rs`, git changes, session kill).
+  `serve` (default), `install-hooks [--tasks]`, `uninstall-hooks [--tasks]`, `hook <event>`,
+  `hooks [bash|zsh]`, `kill <session>`, `task <list|show|add|note|status|dep|prime>`. Code in
+  `src/features/*.rs`: serve loop, tmux access, status from tmux + /proc, `timing` (last command
+  from the shell hooks' marks), shell hooks (`hooks`), coding agent hooks (`agent_hooks`), git
+  changes, session kill, `send` (text pasted through tmux), `worktrees` (lists), `create` (new
+  worktree), `recipe` (`.tcanvas.toml`), `cleanup`, `review`, `merge`, `tasks` (the task store,
+  `~/.local/share/tcanvas/tasks/`, flock + atomic writes), `task_cli` (`tcanvas-agent task`) and
+  `task_skill` (the `tcanvas-tasks` skill, `task_skill.md`).
 - Coding agents (Claude Code, Codex, Gemini CLI, Copilot CLI, Qwen Code) report "working" /
   "waiting" through their own hooks: `install-hooks` merges `tcanvas-agent hook <event>` into
   their settings, the hook sets the pane option `@tc_agent` (state + its ancestor pids), and
   the status loop trusts it only while one of those pids is in the foreground. Without
-  hooks, a known agent CLI quiet for 5 s counts as waiting.
+  hooks, a known agent CLI quiet for 5 s counts as waiting. The same hook keeps the last prompt
+  and moves prompt/turn marks (with the checked-out commit) that a started task's status follows
+  (`tasks/start.rs`, `Follow`). `install-hooks --tasks` is the separate, opt-in task integration
+  (session start hook running `task prime`, plus the skill for Claude Code and Codex).
 - `crates/app` - package `tcanvas` (lib + Windows exe). `src/lib.rs` declares the modules;
   `build.rs` (Windows target only) embeds `assets/icon.ico` (needs mingw-w64 `windres`) and
   builds `tcanvas-agent` for `x86_64-unknown-linux-musl` (static, any distro) in its own target
@@ -51,7 +62,10 @@ Cargo workspace (`Cargo.toml`, edition 2024, resolver 3):
 ## App architecture: vertical slices
 
 - `crates/app/src/features/<name>/` - one folder per feature (canvas, terminal_card, wires,
-  projects, changes, filters, jump, spaces, notifications, persistence, agent_link, updates, ...).
+  projects, changes, filters, jump, spaces, notifications, persistence, agent_link, updates,
+  shortcuts, `worktrees` (strip, create dialog, cleanup window, recipe trust), `tasks` (panel,
+  editor, task start), `queue` ("Your turn"), ...). Review and merge live in `changes`
+  (`review.rs`, `merge.rs`); command templates and quick messages in `projects`.
   A slice owns its state, UI, logic and its unit tests.
 - `crates/app/src/shell/` - shared plumbing only: `App`/`Config` (`mod.rs`, global
   shortcuts), `world.rs` (shared data read by every slice), `event.rs` (event bus: the
@@ -63,6 +77,18 @@ Cargo workspace (`Cargo.toml`, edition 2024, resolver 3):
   bytes with no UI); the egui code just wires inputs to those functions.
 - The agent sends **typed values, not human text**: errors are `protocol::Problem` variants
   and the app translates them (`Texts::problem`). Never put UI sentences in the protocol.
+- Slices only talk through `Event`s and `World`, never by calling each other. The main links of
+  the newer slices:
+  - `NewWorktree` (projects menus -> worktrees dialog); `RemoveWorktree` (merge follow-up ->
+    cleanup window, with its own checks).
+  - `ReviewWorktree` (strip, tasks, queue -> changes in review mode).
+  - `PlanTaskWorktree`/`TaskWorktreePlanned`, `CreateTaskWorktree`/`TaskWorktreeCreated`/
+    `TaskWorktreeFailed` (tasks <-> worktrees to start a task), then `NewTaskCard`
+    (-> terminal_card).
+  - `SetTaskStatus` (merge "move to done" -> tasks); `ShowTask` (queue, jump, spaces -> tasks).
+  - `SendText`/`TextSendOutcome`: the only way to type into a terminal.
+  - `World`: `card_worktrees` and `git_groups` (by worktrees), `card_tasks` and `task_lists` (by
+    tasks), `queue` (by queue, read by jump), `review_unsupported` (by changes).
 
 ## i18n
 
@@ -93,14 +119,31 @@ Every slice ships with automated tests; a feature is not finished without them.
 
 - **Unit tests**: inline `#[cfg(test)] mod tests` next to the pure logic (input mapping,
   camera, layout, persistence, protocol round trips, agent parsing, ...).
-- **Agent integration tests** (`crates/agent/tests/live_*.rs`): drive a real tmux server on
-  a throwaway socket via `TCANVAS_TMUX_SOCKET`.
+- **Agent integration tests** (`crates/agent/tests/live_*.rs`: tmux, changes, agent hooks,
+  send, worktrees, create, recipe, cleanup, review, merge, tasks, task CLI): a real tmux server
+  on a throwaway socket via `TCANVAS_TMUX_SOCKET`, throwaway git repositories with
+  `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`, and a scratch `HOME` (plus
+  `TCANVAS_TEST_HOME`) wherever something writes to the home.
 - **Headless UI tests** (`crates/app/tests/ui.rs`): `egui_kittest` harness around the real
   `App`, with launcher and agent disabled through `Config` and a temp config dir.
-- **End to end** (`crates/app/tests/e2e_tmux.rs`): real PTY + real tmux (throwaway socket) +
-  real `tcanvas-agent`. On Linux it builds the agent itself; on Windows it needs
-  `TCANVAS_E2E_AGENT` (set by `scripts/test-windows.sh`) and is skipped without it.
+- **End to end** (`crates/app/tests/e2e_*.rs`: `tmux`, `command`, `send_text`, `recipe`,
+  `task_start`): real PTY + real tmux (throwaway socket) + real `tcanvas-agent`. On Linux they
+  build the agent themselves; on Windows they need `TCANVAS_E2E_AGENT` (set by
+  `scripts/test-windows.sh`) and are skipped without it.
 - `crates/app/tests/english_only.rs`: the language rule above.
+- Test-only environment variables (all read by the agent unless noted):
+  - `TCANVAS_TEST_HOME`: replaces the home for the task store, the merge's private worktrees,
+    and (app side, forwarded through `wsl.exe`) the `HOME` of everything a card runs. Hook
+    installation follows `HOME` itself: tests set both.
+  - `TCANVAS_E2E_AGENT`: the Linux agent the Windows e2e tests use.
+  - `TCANVAS_RECIPE_TEST_DELAY_MS`: slows the recipe copies down (nothing must wait for them).
+  - `TCANVAS_RECIPE_MAX_BYTES`, `TCANVAS_RECIPE_MAX_ENTRIES`, `TCANVAS_RECIPE_SEARCH_LIMIT`:
+    lower the recipe limits.
+  - `TCANVAS_MERGE_TEST_PAUSE` (a folder), `TCANVAS_MERGE_TEST_PAUSE_SPAWN`: stop a merge at
+    named points until the test lets it go on.
+  - `TCANVAS_MERGE_CEILING_SECS`, `TCANVAS_WRITE_LIMIT_SECS`: time limits of the merge's and the
+    cleanup's git commands.
+  - `TCANVAS_SCREENSHOTS_DIR`, `TCANVAS_DEMO_FRAMES` (screenshot scenes): output folders.
 
 ## Verification (before saying "done")
 
@@ -149,6 +192,9 @@ cargo build --release --target x86_64-pc-windows-gnu -p tcanvas   # Windows cros
   `target/demo-frames/` and `screenshots.sh` assembles them with `ffmpeg` (12 fps, own palette).
   Keep it short and light (a few hundred KB).
 - Scenes use the English UI and fake but realistic content (`/home/me/...`, no real data).
+  Agent answers a scene needs (worktree lists, plans, reviews) are dispatched by hand after
+  reading the command the app sent (`agent_sent()`). Some images are kept current without being
+  in the README (`new-worktree.png`, `cleanup.png`).
 - The WSL GPU driver crashes in headless rendering: the script uses Mesa's lavapipe
   (`VK_ICD_FILENAMES`, needs `mesa-vulkan-drivers`).
 - The harness loads Windows' Segoe UI Symbol from `/mnt/c/Windows/Fonts` (the app's fallback on
@@ -173,6 +219,27 @@ cargo build --release --target x86_64-pc-windows-gnu -p tcanvas   # Windows cros
 - Tests must use a throwaway socket (e.g. `tcanvas-e2e-<pid>`) via `TCANVAS_TMUX_SOCKET`
   and clean it up; never run tests against `tcanvas` or `default`.
 - Windows env vars do not cross `wsl.exe`: `shell/launch.rs` forwards the socket explicitly.
+- CI runs a newer tmux and git than a typical dev machine: end-to-end tests wait on reliable
+  signals (an agent event, a file, a pane's content) with a deadline, never on fixed sleeps nor
+  on the behavior of one tmux version.
+
+## Git, home and data safety
+
+- Tests (and experiments) that create, remove or merge worktrees and branches run only on
+  throwaway repositories, never on the repository being worked on, and never with the real home:
+  scratch `HOME` and `TCANVAS_TEST_HOME`, git without the user's configuration.
+- Never install or uninstall hooks (`install-hooks`, `--tasks`, `uninstall-hooks`) against the
+  real home from tests or experiments: they edit `~/.bashrc` and every coding agent's settings.
+- The merge never writes in the user's worktrees except its final `git merge --ff-only` in the
+  base's worktree; it is prepared in the agent's private worktree, and the branch's worktree is
+  never written. Nothing is undone there automatically: a failed fast-forward is reported, with
+  the commands to finish or go back. Nothing is ever pushed or fetched.
+- Cleanup deletes only after the user's confirmation, and never forces git (`--force`, `-D`).
+- Task text and command text are data: never spliced into a command line. A task reaches its
+  command only as exported variables (`TCANVAS_TASK`, `TCANVAS_TASK_REF`, `TCANVAS_TASK_TITLE`,
+  `TCANVAS_TASK_FILE`), and a template names them only through placeholders that are whole
+  words outside quotes (`protocol::task_command`, a whitelist that refuses anything else). Text
+  sent to a session goes through a tmux buffer (`send.rs`), never through `send-keys` arguments.
 
 ## UX decisions to preserve
 
@@ -184,5 +251,10 @@ cargo build --release --target x86_64-pc-windows-gnu -p tcanvas   # Windows cros
 - **Alt+right-click** goes to tmux (its menu); wires link **groups**, not terminals: **Alt+drag**
   from a group's label onto another group (Alt+click in a card goes to the terminal);
   Shift+click belongs to the hand tool (pans the view), not the terminal.
-- Global shortcuts are Ctrl+Shift+<key> (`shortcut_of` in `shell/mod.rs`); digits use the
-  physical key so they work on AZERTY layouts.
+- When a bar or panel changes the canvas' top or left edge, a view still framed by the app (a
+  space just opened, "show all") is framed again, at once; a view the user moved keeps the cards
+  where they are on screen (`canvas`: `Camera::follow_viewport`, `Canvas::viewport_changed`).
+- Global shortcuts are Ctrl+Shift+<key> (`GLOBAL` and `shortcut_of` in
+  `features/shortcuts/keymap.rs`, which also feeds the shortcuts window: P, N, F, W, K, T (Tasks),
+  Q ("Your turn"), J (its next row), 0-9); digits use the physical key so they work on AZERTY
+  layouts.
