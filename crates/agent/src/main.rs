@@ -17,6 +17,7 @@ mod features {
     pub mod kill;
     pub mod serve;
     pub mod status;
+    pub mod timing;
     pub mod tmux;
     pub mod worktrees;
 }
