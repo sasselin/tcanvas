@@ -255,6 +255,7 @@ impl Texts {
                 Some(base) => (self.keep_not_merged_into)(base),
                 None => self.keep_not_merged.into(),
             },
+            KeepReason::NewBranch => self.keep_new_branch.into(),
             KeepReason::Dirty => self.keep_dirty.into(),
             KeepReason::NotChecked => self.keep_not_checked.into(),
             KeepReason::HasTerminal => self.keep_terminal.into(),
@@ -702,7 +703,8 @@ pub struct Texts {
     // Worktree cleanup.
     pub cleanup_button: fn(usize) -> String,
     pub cleanup_button_hint: &'static str,
-    pub cleanup_title: &'static str,
+    /// The cleanup window of a group (its name), also the title of a cleanup answer's toast.
+    pub cleanup_title: fn(&str) -> String,
     pub cleanup_removable: &'static str,
     pub cleanup_kept: &'static str,
     pub cleanup_branches: &'static str,
@@ -733,6 +735,7 @@ pub struct Texts {
     pub keep_locked: &'static str,
     pub keep_not_merged: &'static str,
     pub keep_not_merged_into: fn(&str) -> String,
+    pub keep_new_branch: &'static str,
     pub keep_dirty: &'static str,
     pub keep_not_checked: &'static str,
     pub keep_terminal: &'static str,
@@ -1273,7 +1276,7 @@ pub const EN: Texts = Texts {
 
     cleanup_button: |n| if n == 0 { "♻ Clean up".into() } else { format!("♻ {n} to clean up") },
     cleanup_button_hint: "Merged worktrees and branches that can go",
-    cleanup_title: "Clean up worktrees",
+    cleanup_title: |group| format!("Clean up worktrees - {group}"),
     cleanup_removable: "Safe to remove",
     cleanup_kept: "Kept",
     cleanup_branches: "Merged branches without a worktree",
@@ -1303,6 +1306,7 @@ pub const EN: Texts = Texts {
     keep_locked: "locked",
     keep_not_merged: "not merged into the default branch",
     keep_not_merged_into: |b| format!("not merged into {b}"),
+    keep_new_branch: "no commit of its own yet (new branch)",
     keep_dirty: "uncommitted or untracked changes",
     keep_not_checked: "changes not checked yet",
     keep_terminal: "a terminal is open in it",
@@ -1841,7 +1845,7 @@ pub const FR: Texts = Texts {
 
     cleanup_button: |n| if n == 0 { "♻ Nettoyer".into() } else { format!("♻ {n} à nettoyer") },
     cleanup_button_hint: "Worktrees et branches fusionnés qui peuvent partir",
-    cleanup_title: "Nettoyer les worktrees",
+    cleanup_title: |group| format!("Nettoyer les worktrees - {group}"),
     cleanup_removable: "Supprimables sans risque",
     cleanup_kept: "Conservés",
     cleanup_branches: "Branches fusionnées sans worktree",
@@ -1875,6 +1879,7 @@ pub const FR: Texts = Texts {
     keep_locked: "verrouillé",
     keep_not_merged: "pas fusionnée dans la branche par défaut",
     keep_not_merged_into: |b| format!("pas fusionnée dans {b}"),
+    keep_new_branch: "pas encore de commit à elle (nouvelle branche)",
     keep_dirty: "modifications non commitées ou fichiers non suivis",
     keep_not_checked: "modifications pas encore vérifiées",
     keep_terminal: "un terminal y est ouvert",
@@ -2091,6 +2096,11 @@ mod tests {
         assert_eq!((texts(Lang::En).problem(&long), texts(Lang::Fr).problem(&long)), ("A description is at most 32 KB.".into(), "Une description fait au plus 32 Ko.".into()));
         assert_eq!(texts(Lang::En).problem(&Problem::TaskTooLong { field: TaskField::Title, max: 200 }), "A title has at most 200 characters.");
         assert_eq!((texts(Lang::Fr).task_status(TaskStatus::Todo), texts(Lang::En).priority(Priority::Urgent)), ("À faire", "Urgent"));
+        // A branch with no commit of its own: the same words in the list and in the refusal.
+        let fresh = Problem::WorktreeKept { path: "/home/me/shop-fresh".into(), reason: KeepReason::NewBranch };
+        assert_eq!(texts(Lang::Fr).problem(&fresh), "/home/me/shop-fresh conservé : pas encore de commit à elle (nouvelle branche)");
+        assert_eq!(texts(Lang::En).problem(&fresh), "/home/me/shop-fresh kept: no commit of its own yet (new branch)");
+        assert_eq!(texts(Lang::En).keep_reason(KeepReason::NewBranch, Some("main")), "no commit of its own yet (new branch)");
     }
 
     #[test]
