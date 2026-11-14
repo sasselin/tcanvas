@@ -1,5 +1,6 @@
 //! Notifications: when a terminal stalls, waits for an answer, fails, finishes a long
 //! command or stops, and when an update is out. Badge on the card, in-app toast, system toast.
+//! Other slices can also show a plain in-app toast about a group (`Event::GroupNotice`).
 
 mod os;
 
@@ -12,7 +13,7 @@ use protocol::{AgentEvent, SessionInfo, TermStatus};
 use crate::shell::event::{Event, Notice};
 use crate::shell::i18n::t;
 use crate::shell::theme;
-use crate::shell::world::{Card, CardId, World};
+use crate::shell::world::{Card, CardId, ProjectId, World};
 
 /// A successful command is only reported if it lasted at least this long.
 pub const LONG_COMMAND_SECS: u64 = 30;
@@ -79,11 +80,13 @@ pub enum ToastTarget {
     /// Information about nothing on the canvas (`Event::Inform`): a click only brings the app
     /// back.
     Info,
+    /// Information about a group: opens its space.
+    Group(ProjectId),
 }
 
 struct Toast {
     target: ToastTarget,
-    /// `None` for an update.
+    /// `None` for an update or a group's information.
     notice: Option<Notice>,
     title: String,
     body: String,
@@ -155,6 +158,8 @@ impl Notifications {
                 }
                 self.push(Toast { target: ToastTarget::Info, notice: None, title: title.clone(), body: body.clone(), created: None });
             }
+            // Plain information, seen in the app: no alert, no system toast.
+            Event::GroupNotice { project, title, body } => self.push(Toast { target: ToastTarget::Group(project.clone()), notice: None, title: title.clone(), body: body.clone(), created: None }),
             Event::FocusCard(id) | Event::KillCard(id) | Event::RemoveCard(id) => self.toasts.retain(|t| t.target != ToastTarget::Card(id.clone())),
             _ => {}
         }
@@ -209,7 +214,7 @@ impl Notifications {
                 t.created.get_or_insert(now);
                 let color = match &t.target {
                     ToastTarget::Card(id) => theme::status_color(world.card(id).and_then(|c| c.status())),
-                    ToastTarget::Update | ToastTarget::Info => theme::FOCUS,
+                    ToastTarget::Update | ToastTarget::Info | ToastTarget::Group(_) => theme::FOCUS,
                 };
                 let frame = egui::Frame::popup(ui.style()).stroke(egui::Stroke::new(1.5, color));
                 let resp = frame
@@ -244,6 +249,7 @@ fn click_event(target: &ToastTarget) -> Option<Event> {
         ToastTarget::Card(id) => Some(Event::FlyTo(id.clone())),
         ToastTarget::Update => Some(Event::ShowReleaseNotes),
         ToastTarget::Info => None,
+        ToastTarget::Group(id) => Some(Event::EnterSpace(Some(id.clone()))),
     }
 }
 
@@ -411,5 +417,16 @@ mod tests {
         assert_eq!(n.pending(), 1);
         assert_eq!((n.toasts[0].title.as_str(), n.toasts[0].body.as_str()), ("t", "b"));
         assert!(click_event(&n.toasts[0].target).is_none(), "nothing to fly to");
+    }
+
+    #[test]
+    fn a_group_notice_is_a_plain_toast_that_opens_the_group() {
+        let (mut w, _) = world_with_card();
+        let mut n = Notifications::new(egui::Context::default(), false);
+        n.handle(&Event::GroupNotice { project: "p".into(), title: "t".into(), body: "b".into() }, &mut w, &mut vec![]);
+        assert_eq!(n.pending(), 1);
+        assert_eq!((n.toasts[0].title.as_str(), n.toasts[0].body.as_str()), ("t", "b"));
+        assert!(!w.cards[0].attention);
+        assert!(matches!(click_event(&n.toasts[0].target), Some(Event::EnterSpace(Some(id))) if id == "p"));
     }
 }

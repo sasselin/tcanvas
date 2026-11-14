@@ -2147,6 +2147,7 @@ fn worktree(path: &str, main: bool, branch: &str) -> protocol::Worktree {
         last_commit: Some(tcanvas::shell::world::unix_now() - 3600),
         branch_deletable: false,
         reflog_commits: false,
+        new_branch: false,
     }
 }
 
@@ -2370,7 +2371,7 @@ fn a_merged_worktree_is_removed_only_after_confirmation() {
     let dir = temp_dir("cleanup");
     let mut h = harness(&dir);
     cleanup_window(&mut h, shop_worktrees("p-shop"), "♻ 1 à nettoyer");
-    assert!(h.query_by_label("Nettoyer les worktrees").is_some());
+    assert!(h.query_by_label("Nettoyer les worktrees - shop").is_some(), "titled with its group");
     assert!(h.query_by_label("Supprimables sans risque").is_some() && h.query_by_label("Conservés").is_some());
     // The kept ones, with their reason.
     assert!(h.query_by_label("pas fusionnée dans main").is_some(), "invoices: unmerged");
@@ -2567,7 +2568,7 @@ fn the_cleanup_window_in_english() {
     let dir = temp_dir("cleanup-en");
     let mut h = harness_in(&dir, Lang::En);
     cleanup_window(&mut h, shop_worktrees("p-shop"), "♻ 1 to clean up");
-    for label in ["Clean up worktrees", "Safe to remove", "Kept", "not merged into main", "Also delete the merged branch", "Remove all 1…"] {
+    for label in ["Clean up worktrees - shop", "Safe to remove", "Kept", "not merged into main", "Also delete the merged branch", "Remove all 1…"] {
         assert!(h.query_by_label(label).is_some(), "{label} missing");
     }
     let size = |h: &mut Harness<'_, App>| {
@@ -2745,12 +2746,28 @@ fn the_template_editor_never_loses_typed_text_by_accident() {
     steps(&mut h, 2);
     assert!(h.query_by_label("Abandonner les modifications de ces modèles ?").is_none());
     assert_eq!(h.get_by_role(Role::MultilineTextInput).value().as_deref(), Some("claude \"un long prompt\""));
-    h.key_press(Key::Escape);
+    // The Cancel button asks too, exactly as Escape does.
+    h.get_by_label("Annuler").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Abandonner les modifications de ces modèles ?").is_some());
+    h.get_by_label("Continuer").click();
+    steps(&mut h, 2);
+    assert!(h.state().projects_editing(), "Continuer keeps the editor open");
+    assert_eq!(h.get_by_role(Role::MultilineTextInput).value().as_deref(), Some("claude \"un long prompt\""));
+    h.get_by_label("Annuler").click();
     steps(&mut h, 2);
     h.get_by_label("Abandonner").click();
     steps(&mut h, 2);
     assert!(!h.state().projects_editing());
     assert!(h.state().world.project("p-api").unwrap().templates.is_empty());
+    // Nothing typed: Cancel closes at once.
+    h.get_by_label("Modèles de terminal du groupe api").click();
+    steps(&mut h, 2);
+    h.get_by_label("Modifier les modèles…").click();
+    steps(&mut h, 2);
+    h.get_by_label("Annuler").click();
+    steps(&mut h, 2);
+    assert!(!h.state().projects_editing(), "Cancel with nothing typed closes directly");
 }
 
 #[test]
@@ -3205,9 +3222,9 @@ fn a_worktree_is_created_from_the_group_and_a_card_opens_in_it() {
     answer_plan(&mut h, |p| p.exclude = Some("/.claude/worktrees/".into()));
     assert!(h.query_by_label("/home/me/shop/.claude/worktrees/feat-factures").is_some());
     assert!(h.query_by_label("⚠ git n'ignore pas ce dossier : la copie principale le listerait comme non suivi.").is_some());
+    // Ticked by default: nothing to click, the request carries it.
     let exclude = "Ajouter /.claude/worktrees/ au .git/info/exclude du dépôt (propre à ce clone, jamais commité)";
-    h.get_by_label(exclude).click();
-    steps(&mut h, 2);
+    assert!(h.query_by_label(exclude).is_some());
 
     h.get_by_label("Créer").click();
     steps(&mut h, 2);
@@ -4128,5 +4145,105 @@ fn coding_agents_get_the_tasks_only_once_enabled_from_the_panel() {
         assert_eq!(sets(&h), vec![true, true, false]);
         // The status bar's hooks indicator is not concerned.
         assert!(h.query_by_label("⚠ hooks").is_none());
+    }
+}
+
+/// A second group, `blog`, with its own repository and a merged worktree.
+fn blog_group(h: &mut Harness<'_, App>) -> String {
+    let id = add_project(h, "blog", Rect::from_min_size(pos2(0.0, 700.0), Vec2::new(800.0, 400.0)));
+    h.state_mut().world.projects.iter_mut().find(|p| p.id == id).unwrap().cwd = Some("/home/me/blog".into());
+    let posts = protocol::Worktree { merged: Some(true), branch_deletable: true, ..worktree("/home/me/blog-posts", false, "posts") };
+    let list = protocol::WorktreeList {
+        key: id.clone(),
+        repo: Some("/home/me/blog".into()),
+        default_branch: Some("main".into()),
+        worktrees: vec![worktree("/home/me/blog", true, "main"), posts],
+        merged_branches: vec![],
+    };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Worktrees(list))]);
+    id
+}
+
+fn the_cleanup_window_follows_its_group(lang: Lang) {
+    let fr = lang == Lang::Fr;
+    let dir = temp_dir(if fr { "cleanup-follow-fr" } else { "cleanup-follow-en" });
+    let mut h = harness_in(&dir, lang);
+    let (title, button, remove, ask, delete) = if fr {
+        ("Nettoyer les worktrees - shop", "♻ 1 à nettoyer", "Supprimer…", "Supprimer définitivement ?", "Supprimer")
+    } else {
+        ("Clean up worktrees - shop", "♻ 1 to clean up", "Remove…", "Delete for good?", "Delete")
+    };
+    cleanup_window(&mut h, shop_worktrees("p-shop"), button);
+    let blog = blog_group(&mut h);
+    steps(&mut h, 2);
+    assert!(h.query_by_label(title).is_some());
+
+    // A confirmation up, then another group shown: the window and its confirmation go, nothing sent.
+    h.get_by_label(remove).click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label(ask).is_some());
+    h.state_mut().dispatch(vec![Event::EnterSpace(Some(blog.clone()))]);
+    steps(&mut h, 3);
+    assert!(!h.state().worktrees.cleanup_open() && !h.state().worktrees.has_dialog());
+    assert!(h.query_by_label(title).is_none() && h.query_by_label(ask).is_none());
+    assert!(sent_cleanups(&h).is_empty());
+
+    // Back in the group: closed until asked again. A removal sent, then "All" shown.
+    h.state_mut().dispatch(vec![Event::EnterSpace(Some("p-shop".into()))]);
+    steps(&mut h, 3);
+    assert!(!h.state().worktrees.cleanup_open());
+    h.get_by_label(button).click();
+    steps(&mut h, 3);
+    h.event(egui::Event::PointerGone);
+    h.get_by_label(remove).click();
+    steps(&mut h, 2);
+    measured_all(&mut h, &["/home/me/shop-taxes"]);
+    h.get_by_label(delete).click();
+    steps(&mut h, 2);
+    let removal = protocol::Cleanup::RemoveWorktree { path: "/home/me/shop-taxes".into(), delete_branch: Some("taxes".into()), ignored: seen(&[]) };
+    assert_eq!(sent_cleanups(&h), vec![removal.clone()]);
+    h.state_mut().dispatch(vec![Event::EnterSpace(None)]);
+    steps(&mut h, 3);
+    assert!(!h.state().worktrees.cleanup_open(), "'All' closes it too");
+
+    // In another group, its own window open: the answer is a toast about `shop`, not applied to
+    // `blog`'s window.
+    h.state_mut().dispatch(vec![Event::EnterSpace(Some(blog))]);
+    steps(&mut h, 3);
+    h.get_by_label(button).click();
+    steps(&mut h, 3);
+    let blog_title = if fr { "Nettoyer les worktrees - blog" } else { "Clean up worktrees - blog" };
+    assert!(h.query_by_label(blog_title).is_some());
+    h.state_mut().dispatch(vec![cleaned(removal, Some("taxes"), None)]);
+    steps(&mut h, 2);
+    let done = if fr { "✔ Supprimés : /home/me/shop-taxes et la branche taxes" } else { "✔ Removed /home/me/shop-taxes and branch taxes" };
+    assert_eq!(h.query_all_by_label(done).count(), 1, "in the toast only");
+    assert!(h.query_by_label(title).is_some(), "the toast names the group");
+    assert!(h.query_by_label(remove).is_some(), "blog's worktree still offered");
+}
+
+#[test]
+fn the_cleanup_window_follows_its_group_fr() {
+    the_cleanup_window_follows_its_group(Lang::Fr);
+}
+
+#[test]
+fn the_cleanup_window_follows_its_group_en() {
+    the_cleanup_window_follows_its_group(Lang::En);
+}
+
+#[test]
+fn a_branch_with_no_commit_of_its_own_says_so() {
+    for (lang, button, reason, not_merged) in [
+        (Lang::Fr, "♻ 1 à nettoyer", "pas encore de commit à elle (nouvelle branche)", "pas fusionnée dans main"),
+        (Lang::En, "♻ 1 to clean up", "no commit of its own yet (new branch)", "not merged into main"),
+    ] {
+        let dir = temp_dir(&format!("cleanup-new-branch-{lang:?}"));
+        let mut h = harness_in(&dir, lang);
+        let Event::Agent(AgentEvent::Worktrees(mut list)) = shop_worktrees("p-shop") else { unreachable!() };
+        list.worktrees.push(protocol::Worktree { merged: None, new_branch: true, ..worktree("/home/me/shop-fresh", false, "fresh") });
+        cleanup_window(&mut h, Event::Agent(AgentEvent::Worktrees(list)), button);
+        assert!(h.query_by_label(reason).is_some(), "{reason} missing");
+        assert_eq!(h.query_all_by_label(not_merged).count(), 1, "only invoices");
     }
 }

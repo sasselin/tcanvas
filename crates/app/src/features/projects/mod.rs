@@ -221,8 +221,13 @@ fn rows_dialog<R: Row>(ctx: &egui::Context, editor: &mut RowEditor<R>, group: &s
                 if ui.button(t().save).clicked() {
                     result = Some(true);
                 }
+                // Like Escape: unsaved changes are never thrown away without asking.
                 if ui.button(t().cancel).clicked() {
-                    result = Some(false);
+                    if clean_rows(&editor.rows) != editor.saved {
+                        editor.confirm_discard = true;
+                    } else {
+                        result = Some(false);
+                    }
                 }
             });
         }

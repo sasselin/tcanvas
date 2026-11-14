@@ -241,7 +241,9 @@ of files modified since tracking started, without diffs.
 
 **Worktree recipe**: a fresh worktree lacks what git does not check out (`.env`, installed
 dependencies, a local database). A repository describes what a new worktree needs in
-`.tcanvas.toml`, at the root of its main checkout (commit it to share it):
+`.tcanvas.toml`, at the root of its main checkout. The file is optional and read from the
+disk, not from git history: commit it to share it, or keep it to yourself with a line
+`.tcanvas.toml` in the repository's `.git/info/exclude`.
 
 ```toml
 [worktree]

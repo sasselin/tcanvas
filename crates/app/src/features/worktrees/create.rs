@@ -337,7 +337,8 @@ pub struct CreateDialog {
     pub folder_choice: Option<(String, String)>,
     /// The command template to start with (`None`: a plain shell).
     pub template: Option<usize>,
-    /// Add the location to `info/exclude` (off unless the user ticks it).
+    /// Add the location to `info/exclude` (on unless the user unticks it: a worktree folder the
+    /// main checkout lists as untracked is noise and an accident waiting to be committed).
     pub exclude: bool,
     /// The setup tick, as the user set it: (main checkout, command, ticked).
     pub setup_choice: Option<(String, String, bool)>,
@@ -365,7 +366,7 @@ impl CreateDialog {
             location: location.unwrap_or_else(|| DEFAULT_WORKTREE_LOCATION.to_string()),
             folder_choice: None,
             template: None,
-            exclude: false,
+            exclude: true,
             setup_choice: None,
             plan: None,
             asked: None,
@@ -844,6 +845,18 @@ mod tests {
     fn answer(d: &mut CreateDialog, folder: &str) {
         let id = d.asked.as_ref().unwrap().id;
         d.handle(&AgentEvent::WorktreePlan(Box::new(WorktreePlan { id, ..plan(folder, None) })));
+    }
+
+    #[test]
+    fn the_exclude_option_is_on_unless_unticked() {
+        let mut d = CreateDialog::new("p".into(), None);
+        assert!(d.exclude, "on by default");
+        let f = form("feat");
+        let mut p = plan(&f.folder, None);
+        p.exclude = Some("/.claude/worktrees/".into());
+        assert!(f.request(Some(&p), d.exclude).unwrap().exclude);
+        d.exclude = false;
+        assert!(!f.request(Some(&p), d.exclude).unwrap().exclude);
     }
 
     #[test]
