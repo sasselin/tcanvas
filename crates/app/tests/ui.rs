@@ -469,7 +469,7 @@ fn missing_tmux_is_shown_in_the_status_bar() {
 
 #[test]
 fn missing_shell_hooks_can_be_installed_from_the_status_bar() {
-    let hello = |hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks, send_text: true });
+    let hello = |hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true });
     let installs = |h: &Harness<'_, App>| h.state().agent_sent().iter().filter(|c| **c == protocol::AgentCmd::InstallHooks).count();
     for (lang, label, button) in [(Lang::Fr, "⚠ hooks", "Installer"), (Lang::En, "⚠ hooks", "Install")] {
         let dir = temp_dir("hooks");
@@ -2796,7 +2796,7 @@ fn group_with_messages(h: &mut Harness<'_, App>, messages: &[(&str, &str, bool)]
     let id = add_card(h, "srv", pos2(40.0, 40.0));
     let session = format!("tc_{id}");
     h.state_mut().dispatch(vec![
-        Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true }),
+        Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true }),
         Event::Agent(AgentEvent::Session(SessionInfo {
             session,
             status: TermStatus::Idle,
@@ -3652,6 +3652,453 @@ fn the_recipe_report_in_english() {
     for label in ["Worktree recipe", "Copied .env", "Not copied: data (copy limit reached (4.0 GB or 200000 entries in all): copies stopped)", "... and 2 more", "OK"] {
         assert!(h.query_by_label(label).is_some(), "{label} missing");
     }
+}
+
+// --- Tasks panel -----------------------------------------------------------------------------
+
+fn agent_task(id: &str, reference: &str, title: &str, status: protocol::TaskStatus) -> protocol::Task {
+    protocol::Task {
+        id: id.into(),
+        reference: reference.into(),
+        title: title.into(),
+        description: String::new(),
+        status,
+        priority: protocol::Priority::None,
+        depends_on: vec![],
+        notes: vec![],
+        created: 0,
+        updated: 0,
+        rev: 1,
+        content_rev: 1,
+        removed: None,
+        worktree: None,
+        branch: None,
+        session: None,
+        extra: protocol::Extra::new(),
+    }
+}
+
+fn task_board_with(key: &str, tasks: Vec<protocol::Task>, found: Vec<protocol::FoundList>) -> Event {
+    let list = protocol::TaskList { tasks, ..protocol::TaskList::empty("/home/me/shop") };
+    Event::Agent(AgentEvent::Tasks(Box::new(protocol::TaskBoard { key: key.into(), list: Some(list), read_only: false, problem: None, found })))
+}
+
+fn task_board(key: &str, tasks: Vec<protocol::Task>) -> Event {
+    task_board_with(key, tasks, vec![])
+}
+
+/// The shop's tasks: an urgent PDF with notes, the about page waiting for it, a search in the
+/// inbox, a done export and the changelog it held up.
+fn shop_tasks() -> Vec<protocol::Task> {
+    use protocol::{Priority, TaskNote, TaskStatus::*};
+    let mut pdf = agent_task("pdf", "k3f", "Invoice PDF", Todo);
+    pdf.priority = Priority::Urgent;
+    pdf.rev = 7;
+    pdf.content_rev = 3;
+    pdf.notes = vec![TaskNote::new("totals with taxes", 1, protocol::Author::Agent), TaskNote::new("asked Bob", 2, protocol::Author::User)];
+    let mut about = agent_task("about", "abt", "About page", Todo);
+    about.depends_on = vec!["pdf".into()];
+    let mut changelog = agent_task("log", "chg", "Changelog", Todo);
+    changelog.depends_on = vec!["export".into()];
+    vec![pdf, about, agent_task("search", "srh", "Customer search", Inbox), agent_task("export", "exp", "Tax export", Done), changelog]
+}
+
+fn agent_hello(h: &mut Harness<'_, App>) {
+    let hello = Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true });
+    h.state_mut().dispatch(vec![hello]);
+}
+
+/// Group `shop`, linked and opened, with an agent that keeps task lists.
+fn tasks_group(h: &mut Harness<'_, App>) -> String {
+    let id = add_project(h, "shop", Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 500.0)));
+    h.state_mut().world.projects[0].cwd = Some("/home/me/shop".into());
+    add_card(h, "front", pos2(40.0, 40.0));
+    agent_hello(h);
+    h.state_mut().dispatch(vec![Event::EnterSpace(Some(id.clone()))]);
+    steps(h, 3);
+    id
+}
+
+/// Task changes handed to the agent so far: (request, op, expect).
+fn task_edits(h: &Harness<'_, App>) -> Vec<(u64, protocol::TaskOp, Option<u64>)> {
+    h.state()
+        .agent_sent()
+        .iter()
+        .filter_map(|c| match c {
+            protocol::AgentCmd::EditTasks { id, op, expect, .. } => Some((*id, op.clone(), *expect)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn last_edit(h: &Harness<'_, App>) -> (u64, protocol::TaskOp, Option<u64>) {
+    task_edits(h).last().cloned().expect("a change sent")
+}
+
+fn adoptions(h: &Harness<'_, App>) -> Vec<(u64, String, bool)> {
+    h.state()
+        .agent_sent()
+        .iter()
+        .filter_map(|c| match c {
+            protocol::AgentCmd::AdoptTasks { id, from, merge, .. } => Some((*id, from.clone(), *merge)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn edited_rev(h: &mut Harness<'_, App>, id: u64, problem: Option<protocol::Problem>, content_rev: Option<u64>) {
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::TasksEdited { id, key: "p-shop".into(), task: None, problem, content_rev })]);
+    steps(h, 3);
+}
+
+fn edited(h: &mut Harness<'_, App>, id: u64, problem: Option<protocol::Problem>) {
+    edited_rev(h, id, problem, None);
+}
+
+fn task_menu(h: &mut Harness<'_, App>, title: &str) {
+    let at = h.get_by_label(title).rect().center();
+    right_click_at(h, at);
+}
+
+/// The quick add field (the one text field in the panel, on the left).
+fn quick_add_field<'a>(h: &'a Harness<'_, App>) -> egui_kittest::Node<'a> {
+    use egui::accesskit::Role;
+    h.get_all_by_role(Role::TextInput).find(|n| n.rect().min.x < 400.0 && n.rect().min.y > 60.0).expect("the quick add field")
+}
+
+#[test]
+fn the_tasks_panel_adds_moves_and_removes_tasks() {
+    use protocol::{TaskOp, TaskStatus};
+    let dir = temp_dir("tasks-panel");
+    let mut h = harness(&dir);
+    tasks_group(&mut h);
+    assert!(h.query_by_label("✔ Tâches (0)").is_some(), "the toolbar button, before the list arrives");
+    ctrl_shift(&h, Key::T);
+    steps(&mut h, 3);
+    assert!(h.state().world.tasks_open);
+    assert!(h.state().agent_sent().contains(&protocol::AgentCmd::WatchTasks { key: "p-shop".into(), path: "/home/me/shop".into() }));
+    assert!(h.query_by_label("En attente de l'agent…").is_some());
+    h.state_mut().dispatch(vec![task_board("p-shop", vec![])]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Aucune tâche pour l'instant. Écrivez-en une ci-dessus : elle arrive dans la boîte de réception.").is_some());
+
+    // Quick add: Enter sends an inbox task; the text leaves the field once the agent added it,
+    // and the field keeps the keyboard for the next one.
+    quick_add_field(&h).focus();
+    steps(&mut h, 2);
+    let add = |title: &str| TaskOp::Add { title: title.into(), description: String::new(), priority: protocol::Priority::None, status: TaskStatus::Inbox };
+    for title in ["Invoice PDF", "About page"] {
+        h.event(egui::Event::Text(title.into()));
+        steps(&mut h, 2);
+        h.key_press(Key::Enter);
+        steps(&mut h, 2);
+        let (id, op, _) = last_edit(&h);
+        assert_eq!(op, add(title));
+        assert_eq!(h.state().tasks.quick_text(), title, "kept until the agent answers");
+        edited(&mut h, id, None);
+        assert_eq!(h.state().tasks.quick_text(), "");
+    }
+    assert!(matches!(h.state().agent_sent().last(), Some(protocol::AgentCmd::EditTasks { list: Some(l), .. }) if l == "/home/me/shop"), "names the list it was shown");
+
+    // The list as the agent keeps it: sections in order, marks.
+    h.state_mut().dispatch(vec![task_board("p-shop", shop_tasks())]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("✔ Tâches (4)").is_some(), "open tasks only");
+    for label in ["À faire (3)", "Boîte de réception (1)", "Terminée (1)", "#k3f", "!!!", "attend #k3f", "prête", "2 notes"] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    assert!(h.query_by_label("Tax export").is_none(), "done: collapsed");
+    let y = |h: &Harness<'_, App>, label: &str| h.get_by_label(label).rect().center().y;
+    assert!(y(&h, "À faire (3)") < y(&h, "Boîte de réception (1)") && y(&h, "Boîte de réception (1)") < y(&h, "Terminée (1)"));
+    assert!(y(&h, "Invoice PDF") < y(&h, "About page"), "manual order");
+
+    // Reorder from the row's menu.
+    task_menu(&mut h, "About page");
+    h.get_by_label("Monter").click();
+    steps(&mut h, 3);
+    assert_eq!(last_edit(&h).1, TaskOp::Move { task: "about".into(), before: Some("pdf".into()) });
+    task_menu(&mut h, "Invoice PDF");
+    h.get_by_label("Descendre").click();
+    steps(&mut h, 3);
+    assert_eq!(last_edit(&h).1, TaskOp::Move { task: "pdf".into(), before: Some("log".into()) });
+
+    // Another status, from the row.
+    task_menu(&mut h, "Customer search");
+    h.get_by_label("Déplacer vers « En cours »").click();
+    steps(&mut h, 3);
+    assert_eq!(last_edit(&h).1, TaskOp::SetStatus { task: "search".into(), status: TaskStatus::Active });
+    // Refused: the panel says why.
+    let (id, ..) = last_edit(&h);
+    edited(&mut h, id, Some(protocol::Problem::TasksFailed { detail: "disk full".into() }));
+    assert!(h.query_by_label("Liste de tâches non enregistrée : disk full").is_some());
+
+    // Two removals, undone last first.
+    for title in ["Customer search", "Changelog"] {
+        task_menu(&mut h, title);
+        h.get_by_label("Supprimer").click();
+        steps(&mut h, 3);
+        let (id, ..) = last_edit(&h);
+        edited(&mut h, id, None);
+    }
+    assert!(h.query_by_label("« Changelog » supprimée (+1)").is_some());
+    h.get_by_label("Rétablir").click();
+    steps(&mut h, 3);
+    assert_eq!(last_edit(&h).1, TaskOp::Restore { task: "log".into() });
+    assert!(h.query_by_label("« Customer search » supprimée").is_some());
+    h.get_by_label("Rétablir").click();
+    steps(&mut h, 3);
+    assert_eq!(last_edit(&h).1, TaskOp::Restore { task: "search".into() });
+    assert!(h.query_by_label_contains("supprimée").is_none());
+
+    // Closed by its button.
+    h.get_by_label("✔ Tâches (4)").click();
+    steps(&mut h, 3);
+    assert!(!h.state().world.tasks_open && h.query_by_label("À faire (3)").is_none());
+}
+
+#[test]
+fn a_task_is_edited_and_a_dependency_loop_is_refused() {
+    use egui::accesskit::Role;
+    use protocol::{Priority, TaskOp};
+    let dir = temp_dir("tasks-editor");
+    let mut h = harness(&dir);
+    tasks_group(&mut h);
+    h.state_mut().dispatch(vec![Event::ToggleTasks, task_board("p-shop", shop_tasks())]);
+    steps(&mut h, 3);
+    h.get_by_label("Invoice PDF").click();
+    steps(&mut h, 3);
+    assert!(h.state().tasks.has_dialog());
+    for label in ["Tâche #k3f", "Rien : elle peut commencer quand vous voulez.", "totals with taxes", "asked Bob"] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+
+    // The PDF cannot wait for the about page, which waits for it: said before asking.
+    let before = task_edits(&h).len();
+    combo(&h, "Ajouter une tâche à attendre…").click();
+    steps(&mut h, 2);
+    h.get_by_label("#abt About page").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label("#k3f ne peut pas attendre #abt : #abt attend déjà #k3f, directement ou par d'autres tâches.").is_some());
+    assert_eq!(task_edits(&h).len(), before, "nothing sent");
+    // Another one is fine.
+    combo(&h, "Ajouter une tâche à attendre…").click();
+    steps(&mut h, 2);
+    h.get_by_label("#srh Customer search").click();
+    steps(&mut h, 3);
+    assert_eq!(last_edit(&h).1, TaskOp::AddDependency { task: "pdf".into(), on: "search".into() });
+    // The agent refuses a loop the same way (another writer made one meanwhile).
+    let (id, ..) = last_edit(&h);
+    edited(&mut h, id, Some(protocol::Problem::TaskCycle { task: "k3f".into(), on: "srh".into() }));
+    assert!(h.query_by_label("#k3f ne peut pas attendre #srh : #srh attend déjà #k3f, directement ou par d'autres tâches.").is_some());
+
+    // A note, appended; its text leaves the field once added.
+    let inputs = h.get_all_by_role(Role::MultilineTextInput).collect::<Vec<_>>();
+    assert_eq!(inputs.len(), 2, "description and note");
+    inputs[1].focus();
+    inputs[1].type_text("draft in invoices/");
+    steps(&mut h, 2);
+    h.get_by_label("Ajouter la note").click();
+    steps(&mut h, 3);
+    let (id, op, _) = last_edit(&h);
+    assert_eq!(op, TaskOp::AddNote { task: "pdf".into(), text: "draft in invoices/".into(), author: protocol::Author::User });
+    edited(&mut h, id, None);
+    assert!(h.state().tasks.editor().is_some_and(|e| e.note.is_empty()));
+
+    // Then description and priority, saved together: the note did not make them stale.
+    let description = h.get_all_by_role(Role::MultilineTextInput).next().unwrap();
+    description.focus();
+    description.type_text("Totals **with** taxes");
+    steps(&mut h, 2);
+    combo(&h, "Urgente").click();
+    steps(&mut h, 2);
+    h.get_by_label("Haute").click();
+    steps(&mut h, 2);
+    h.get_by_label("Enregistrer").click();
+    steps(&mut h, 3);
+    let (id, op, expect) = last_edit(&h);
+    assert_eq!(op, TaskOp::Edit { task: "pdf".into(), title: None, description: Some("Totals **with** taxes".into()), priority: Some(Priority::High) });
+    assert_eq!(expect, Some(3), "the content revision, untouched by the note");
+    assert!(h.query_by_label("Enregistrement…").is_some());
+
+    // Someone else changed the content meanwhile: the text stays, their version is offered.
+    let mut theirs = shop_tasks();
+    theirs[0].title = "Invoice PDF v2".into();
+    theirs[0].content_rev = 4;
+    h.state_mut().dispatch(vec![task_board("p-shop", theirs)]);
+    edited(&mut h, id, Some(protocol::Problem::TaskStale { task: "k3f".into() }));
+    assert!(h.state().tasks.editor().is_some_and(|e| e.conflict && e.description == "Totals **with** taxes"));
+    assert!(h.query_by_label_contains("Quelqu'un d'autre a changé").is_some());
+    assert!(h.query_by_label("Leur titre : « Invoice PDF v2 »").is_some() && h.query_by_label("Charger leur version").is_some());
+    // Keep mine: saved again, checked against their version.
+    h.get_by_label("Garder la mienne et écraser").click();
+    steps(&mut h, 3);
+    let (id, op, expect) = last_edit(&h);
+    assert_eq!(expect, Some(4));
+    assert!(matches!(op, TaskOp::Edit { title: Some(t), description: Some(_), .. } if t == "Invoice PDF"), "mine, title included");
+    edited_rev(&mut h, id, None, Some(5));
+    assert!(!h.state().tasks.has_dialog(), "saved: closed");
+}
+
+#[test]
+fn the_editor_never_drops_typed_text_by_accident() {
+    use egui::accesskit::Role;
+    let dir = temp_dir("tasks-editor-keep");
+    let mut h = harness(&dir);
+    tasks_group(&mut h);
+    h.state_mut().dispatch(vec![Event::ToggleTasks, task_board("p-shop", shop_tasks())]);
+    steps(&mut h, 3);
+    h.get_by_label("Invoice PDF").click();
+    steps(&mut h, 3);
+    let description = h.get_all_by_role(Role::MultilineTextInput).next().unwrap();
+    description.focus();
+    description.type_text("half a plan");
+    steps(&mut h, 2);
+    // A click outside: nothing.
+    h.event(egui::Event::PointerButton { pos: pos2(1300.0, 850.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.event(egui::Event::PointerButton { pos: pos2(1300.0, 850.0), button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    steps(&mut h, 3);
+    assert!(h.state().tasks.has_dialog());
+    // Escape asks first.
+    h.key_press(Key::Escape);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Abandonner vos modifications non enregistrées ?").is_some());
+    h.get_by_label("Continuer l'édition").click();
+    steps(&mut h, 3);
+    assert!(h.state().tasks.editor().is_some_and(|e| e.description == "half a plan"));
+    // The task removed by another writer: the editor stays, with its text and why.
+    let gone: Vec<protocol::Task> = shop_tasks().into_iter().filter(|t| t.id != "pdf").collect();
+    h.state_mut().dispatch(vec![task_board("p-shop", gone)]);
+    steps(&mut h, 3);
+    assert!(h.state().tasks.editor().is_some_and(|e| e.gone && e.description == "half a plan"));
+    assert!(h.query_by_label_contains("Cette tâche n'est plus dans la liste").is_some());
+    // Close asks too, then closes.
+    h.get_by_label("Fermer").click();
+    steps(&mut h, 3);
+    h.get_by_label("Abandonner").click();
+    steps(&mut h, 3);
+    assert!(!h.state().tasks.has_dialog());
+}
+
+#[test]
+fn opening_the_panel_never_takes_the_keyboard_later() {
+    let dir = temp_dir("tasks-focus");
+    let mut h = harness(&dir);
+    let id = add_project(&mut h, "shop", Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 500.0)));
+    h.state_mut().world.projects[0].cwd = Some("/home/me/shop".into());
+    agent_hello(&mut h);
+    // Opened in the "All" view: no panel to show, the focus request goes.
+    ctrl_shift(&h, Key::T);
+    steps(&mut h, 3);
+    h.state_mut().dispatch(vec![Event::EnterSpace(Some(id)), task_board("p-shop", vec![])]);
+    steps(&mut h, 3);
+    h.event(egui::Event::Text("ls -la".into()));
+    h.key_press(Key::Enter);
+    steps(&mut h, 3);
+    assert_eq!(h.state().tasks.quick_text(), "", "typing elsewhere does not land in the quick add");
+    assert!(task_edits(&h).is_empty(), "no task made of it");
+}
+
+#[test]
+fn without_the_agent_the_panel_is_read_only() {
+    let dir = temp_dir("tasks-offline");
+    let mut h = harness(&dir);
+    let id = add_project(&mut h, "shop", Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 500.0)));
+    h.state_mut().world.projects[0].cwd = Some("/home/me/shop".into());
+    // A list read before the agent went away.
+    h.state_mut().dispatch(vec![Event::EnterSpace(Some(id)), Event::ToggleTasks, task_board("p-shop", shop_tasks()), Event::AgentLost]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("L'agent n'est pas connecté : la liste est celle lue en dernier et ne peut pas changer avant son retour.").is_some());
+    assert!(h.query_by_label("Invoice PDF").is_some(), "still shown");
+    assert!(h.query_by_label("…").is_none(), "no actions");
+    use egui::accesskit::Role;
+    assert!(h.get_all_by_role(Role::TextInput).all(|n| n.rect().min.x > 400.0 || n.rect().min.y < 60.0), "no quick add");
+}
+
+#[test]
+fn another_list_of_the_project_is_brought_over() {
+    let dir = temp_dir("tasks-found");
+    let mut h = harness(&dir);
+    tasks_group(&mut h);
+    let found = vec![protocol::FoundList { key: "/home/me/notes".into(), tasks: 2, why: protocol::FoundWhy::OwnFolder }];
+    h.state_mut().dispatch(vec![Event::ToggleTasks, task_board_with("p-shop", vec![], found.clone())]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Une autre liste de tâches est peut-être celle de ce projet : /home/me/notes (2 tâches).").is_some());
+    h.get_by_label("Ramener ses tâches ici").click();
+    steps(&mut h, 3);
+    assert_eq!(adoptions(&h).last().map(|(_, from, merge)| (from.as_str(), *merge)), Some(("/home/me/notes", false)));
+    // This list has tasks: a merge, confirmed first.
+    h.state_mut().dispatch(vec![task_board_with("p-shop", shop_tasks(), found)]);
+    steps(&mut h, 3);
+    h.get_by_label("La fusionner avec cette liste…").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Fusionner les listes de tâches ?").is_some());
+    assert_eq!(adoptions(&h).len(), 1, "not before the confirmation");
+    h.get_by_label("Fusionner").click();
+    steps(&mut h, 3);
+    assert_eq!(adoptions(&h).last().map(|(_, from, merge)| (from.as_str(), *merge)), Some(("/home/me/notes", true)));
+    // A limit refused by the agent: translated.
+    let (id, ..) = adoptions(&h).last().cloned().unwrap();
+    edited(&mut h, id, Some(protocol::Problem::TasksTooMany { max: protocol::MAX_TASKS }));
+    assert!(h.query_by_label("Une liste a au plus 1000 tâches, hors supprimées.").is_some());
+    // The candidate no longer valid when the agent checks: refused, said so.
+    let first = adoptions(&h)[0].0;
+    edited(&mut h, first, Some(protocol::Problem::TasksNotAdoptable { from: "/home/me/notes".into() }));
+    assert!(h.query_by_label("/home/me/notes n'est plus une liste qui peut être celle de ce projet : rien n'a bougé.").is_some());
+}
+
+#[test]
+fn a_list_matched_only_by_its_history_is_always_confirmed() {
+    let dir = temp_dir("tasks-same-history");
+    let mut h = harness(&dir);
+    tasks_group(&mut h);
+    let found = vec![protocol::FoundList { key: "/home/me/old/shop".into(), tasks: 3, why: protocol::FoundWhy::SameHistory }];
+    // Even into an empty list: a confirmation naming both folders.
+    h.state_mut().dispatch(vec![Event::ToggleTasks, task_board_with("p-shop", vec![], found)]);
+    steps(&mut h, 3);
+    h.get_by_label("Ramener ses tâches ici").click();
+    steps(&mut h, 3);
+    assert!(adoptions(&h).is_empty(), "not before the confirmation");
+    assert!(h.query_by_label_contains("/home/me/old/shop est un autre dossier que /home/me/shop : il a le même historique").is_some());
+    h.get_by_label("Fusionner").click();
+    steps(&mut h, 3);
+    assert_eq!(adoptions(&h), vec![(adoptions(&h)[0].0, "/home/me/old/shop".to_string(), false)]);
+    assert!(h.state().agent_sent().iter().any(|c| matches!(c, protocol::AgentCmd::AdoptTasks { list: Some(l), .. } if l == "/home/me/shop")), "names the list shown");
+}
+
+#[test]
+fn a_group_without_a_folder_has_no_task_list() {
+    let dir = temp_dir("tasks-unlinked");
+    let mut h = harness(&dir);
+    let id = add_project(&mut h, "draft", Rect::from_min_size(Pos2::ZERO, Vec2::new(1400.0, 500.0)));
+    h.state_mut().dispatch(vec![Event::EnterSpace(Some(id)), Event::ToggleTasks]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Ce groupe n'est relié à aucun dossier : il n'a pas de liste de tâches. Reliez-le au dossier de son projet pour y garder des tâches.").is_some());
+    assert!(!h.state().agent_sent().iter().any(|c| matches!(c, protocol::AgentCmd::WatchTasks { .. })), "nothing to follow");
+}
+
+#[test]
+fn the_tasks_panel_in_english() {
+    let dir = temp_dir("tasks-english");
+    let mut h = harness_in(&dir, Lang::En);
+    tasks_group(&mut h);
+    let found = vec![protocol::FoundList { key: "/home/me/notes".into(), tasks: 1, why: protocol::FoundWhy::OwnFolder }];
+    h.state_mut().dispatch(vec![Event::ToggleTasks, task_board_with("p-shop", shop_tasks(), found)]);
+    steps(&mut h, 3);
+    for label in ["✔ Tasks (4)", "✔ Tasks · shop", "To do (3)", "Inbox (1)", "Done (1)", "waits for #k3f", "ready", "2 notes", "Another task list may be this project's: /home/me/notes (1 task)."]
+    {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    task_menu(&mut h, "About page");
+    for label in ["Move up", "Move down", "Move to Review", "Remove"] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    h.key_press(Key::Escape);
+    steps(&mut h, 2);
+    // An older agent: said so.
+    let hello = Event::Agent(AgentEvent::Hello { version: "0.1".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: false });
+    h.state_mut().dispatch(vec![hello]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("The agent is too old to keep task lists: restart tcanvas to update it.").is_some());
 }
 
 /// A second group, `blog`, with its own repository and a merged worktree.

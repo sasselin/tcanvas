@@ -206,6 +206,8 @@ pub struct World {
     pub dragging: Option<CardId>,
     /// "Changes" panel open (saved).
     pub changes_open: bool,
+    /// "Tasks" panel open (saved).
+    pub tasks_open: bool,
     /// Option "free grid" (saved): inside a group, the group is the whole canvas (no frame,
     /// a terminal can't be dragged out of it).
     pub free_grid: bool,

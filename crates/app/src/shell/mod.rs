@@ -25,6 +25,7 @@ use crate::features::projects::Projects;
 use crate::features::shortcuts::Shortcuts;
 use crate::features::shortcuts::keymap::{Shortcut, shortcut_of};
 use crate::features::spaces::Spaces;
+use crate::features::tasks::Tasks;
 use crate::features::terminal_card::{Launcher, TerminalCards};
 use crate::features::updates::Updates;
 use crate::features::wires::Wires;
@@ -53,6 +54,7 @@ pub struct App {
     canvas: Canvas,
     pub cards: TerminalCards,
     pub changes: Changes,
+    pub tasks: Tasks,
     pub worktrees: Worktrees,
     projects: Projects,
     spaces: Spaces,
@@ -84,6 +86,7 @@ impl App {
             canvas: Canvas::default(),
             cards: TerminalCards::new(ctx.clone(), config.launcher),
             changes: Changes::default(),
+            tasks: Tasks::default(),
             worktrees: Worktrees::new(&config.config_dir),
             projects: Projects::default(),
             spaces: Spaces::default(),
@@ -131,7 +134,13 @@ impl App {
     }
 
     fn typing_elsewhere(&self, ctx: &egui::Context) -> bool {
-        ctx.memory(|m| m.focused().is_some()) || self.jump.is_open() || self.shortcuts_help.is_open() || self.cards.has_dialog() || self.projects.has_dialog() || self.worktrees.has_dialog()
+        ctx.memory(|m| m.focused().is_some())
+            || self.jump.is_open()
+            || self.shortcuts_help.is_open()
+            || self.cards.has_dialog()
+            || self.projects.has_dialog()
+            || self.worktrees.has_dialog()
+            || self.tasks.has_dialog()
     }
 
     /// Removes global shortcuts, then gives the rest of the keyboard input to the focused terminal.
@@ -153,6 +162,7 @@ impl App {
             match s {
                 Shortcut::Jump => self.jump.open(),
                 Shortcut::Help => self.shortcuts_help.open(),
+                Shortcut::Tasks => events.push(Event::ToggleTasks),
                 Shortcut::NewCard => events.push(Event::NewCard { at: None, project: None, command: None, setup: None, cwd: None }),
                 Shortcut::Search => {
                     events.push(Event::Unfocus);
@@ -193,6 +203,7 @@ impl App {
         self.agent.poll(&mut events);
         self.cards.poll(&mut self.world, &mut events);
         self.changes.poll(&self.world, &mut events);
+        self.tasks.poll(&self.world, &mut events);
         self.worktrees.poll(&mut self.world);
         self.notifications.poll(&ctx, &mut events);
         self.notifications.acknowledge_watched(&mut self.world);
@@ -210,6 +221,7 @@ impl App {
                     self.shortcuts_help.toolbar_ui(ui);
                     self.agent.status_ui(ui);
                     self.changes.toolbar_ui(ui, &self.world, &mut events);
+                    self.tasks.toolbar_ui(ui, &self.world, &mut events);
                     if let Some(err) = &self.persistence.last_error {
                         ui.label(RichText::new(t().layout_warning).color(theme::status_color(Some(protocol::TermStatus::Exited(1))))).on_hover_text(err);
                     }
@@ -231,6 +243,7 @@ impl App {
         // Under the toolbar, full width: only when the open group's repository has worktrees.
         self.worktrees.ui(ui, &self.world, &mut events);
         self.changes.panel_ui(ui, &self.world, &mut events);
+        self.tasks.panel_ui(ui, &self.world, &mut events);
 
         CentralPanel::default().frame(Frame::NONE).show(ui, |ui| {
             self.world.refit_projects();
@@ -254,6 +267,7 @@ impl App {
         self.cards.dialogs(&ctx, &self.world, &mut events);
         self.projects.dialogs(&ctx, &self.world, &mut events);
         self.worktrees.dialogs(&ctx, &self.world, &mut events);
+        self.tasks.dialogs(&ctx, &mut events);
         self.notifications.ui(&ctx, &self.world, &mut events);
         self.updates.dialogs(&ctx);
         self.shortcuts_help.ui(&ctx);
@@ -283,6 +297,7 @@ impl App {
             self.cards.handle(&ev, w, &mut out);
             self.projects.handle(&ev, w, &mut out);
             self.changes.handle(&ev, w, &mut out);
+            self.tasks.handle(&ev, w, &mut out);
             self.worktrees.handle(&ev, w, &mut out);
             // Before the camera: going to a hidden terminal opens its space first.
             self.spaces.handle(&ev, w, &mut out);

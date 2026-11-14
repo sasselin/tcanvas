@@ -11,6 +11,10 @@ pub fn agent(args: &[&str]) -> Command {
         // Windows variables don't cross wsl.exe: pass the socket explicitly.
         let mut cmd = Command::new("wsl.exe");
         cmd.args(["-e", "env", &format!("TCANVAS_TMUX_SOCKET={}", protocol::tmux_socket())]);
+        // Test-only: the home the agent keeps its data under (task lists).
+        if let Some(home) = std::env::var("TCANVAS_TEST_HOME").ok().filter(|h| !h.is_empty()) {
+            cmd.arg(format!("TCANVAS_TEST_HOME={home}"));
+        }
         match custom {
             Some(path) => cmd.arg(path),
             // `sh -l` loads the profile; "$@" receives our arguments ($0 = displayed name).

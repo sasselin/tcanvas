@@ -192,6 +192,103 @@ pub enum Problem {
     RecipeNotAFile {
         file: String,
     },
+    /// Task list: no live task has this id (never existed, removed, or purged).
+    TaskNotFound {
+        task: String,
+    },
+    /// Task list: `task` waiting for `on` would close a loop (references, not ids).
+    TaskCycle {
+        task: String,
+        on: String,
+    },
+    /// Task list: the task (its reference) changed since the caller read it: the edit is refused
+    /// rather than overwriting someone else's change.
+    TaskStale {
+        task: String,
+    },
+    /// Task list: a title or a note cannot be empty.
+    TaskTextEmpty,
+    /// Task list: the file was written by a newer agent (`format`): shown read-only, never
+    /// rewritten.
+    TasksNewerFormat {
+        format: u32,
+    },
+    /// Task list: the file could not be read as a task list (the parser's message, not
+    /// translated); it was renamed to `path`, kept as is, and the list starts empty.
+    TasksSetAside {
+        path: String,
+        detail: String,
+    },
+    /// Task list: reading or writing failed (the system's message, not translated).
+    TasksFailed {
+        detail: String,
+    },
+    /// Task list: this key has no task list subscribed (`AgentCmd::WatchTasks`).
+    TasksNotWatched,
+    /// Task list: a text is longer than its limit (`TaskField`: which one; `max` in characters for
+    /// a title, in bytes otherwise).
+    TaskTooLong {
+        field: TaskField,
+        max: usize,
+    },
+    /// Task list: a task has as many notes as it may have.
+    TaskTooManyNotes {
+        max: usize,
+    },
+    /// Task list: the list has as many tasks as it may have (the trash included).
+    TasksTooMany {
+        max: usize,
+    },
+    /// Task list: `before` is not a task of the same status.
+    TaskMoveRefused,
+    /// Task list: the folder now belongs to another list than the one the app was shown (`shown`,
+    /// `now`: list keys): nothing changed, the new list follows.
+    TasksListChanged {
+        shown: String,
+        now: String,
+    },
+    /// Task list: which list the folder belongs to could not be told (git failed: its message, not
+    /// translated). Nothing is read from or written to another list.
+    TasksKeyUnknown {
+        detail: String,
+    },
+    /// Task list: the file holds values this version does not know (a newer writer of the same
+    /// format; the parser's message, not translated): shown read-only, never rewritten.
+    TasksUnknownValues {
+        detail: String,
+    },
+    /// Task list: two tasks of the file have the same id: shown read-only.
+    TasksDuplicateId {
+        id: String,
+    },
+    /// Task list: bringing another list here refused, this one is not empty (`tasks` live tasks)
+    /// and no merge was asked.
+    TasksNotEmpty {
+        tasks: usize,
+    },
+    /// Task list: `from` is not (or no longer) a list that may be this folder's: nothing moved.
+    TasksNotAdoptable {
+        from: String,
+    },
+    /// Task list: `from` has no file, or no task, to bring here: nothing changed.
+    TasksNothingToAdopt {
+        from: String,
+    },
+    /// Task list: a list cannot be brought into itself.
+    TasksSameList,
+    /// Task list: another program held the list's lock past `secs` seconds: nothing changed.
+    TasksLocked {
+        secs: u64,
+    },
+}
+
+/// Which text of a task a limit is about.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskField {
+    Title,
+    Description,
+    Note,
 }
 
 /// The file, at the root of a repository's main checkout, that says what a new worktree needs
@@ -987,6 +1084,317 @@ impl Ignored {
     }
 }
 
+// --- Tasks ---------------------------------------------------------------------------------------
+
+/// Format of a task list file. A file with a higher one is shown read-only and never rewritten.
+pub const TASKS_FORMAT: u32 = 1;
+
+/// Unknown fields of a task, a note or a list, kept as they are when an older writer rewrites the
+/// file.
+pub type Extra = serde_json::Map<String, serde_json::Value>;
+
+/// Longest task title, in characters.
+pub const MAX_TASK_TITLE: usize = 200;
+/// Longest task description, in bytes (32 KiB: a long plan, not a dump).
+pub const MAX_TASK_DESCRIPTION: usize = 32 * 1024;
+/// Longest note, in bytes.
+pub const MAX_TASK_NOTE: usize = 8 * 1024;
+/// Most notes on one task.
+pub const MAX_TASK_NOTES: usize = 200;
+/// Most live tasks in one list. With the text limits, a list stays well under a few tens of
+/// megabytes even at worst, and a few hundred kilobytes in practice.
+pub const MAX_TASKS: usize = 1000;
+/// Most removed tasks kept in a list's trash: past that, the oldest are purged early.
+pub const MAX_TRASH: usize = 1000;
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    #[default]
+    Inbox,
+    Todo,
+    Active,
+    Review,
+    Done,
+    Canceled,
+}
+
+impl TaskStatus {
+    pub const ALL: [TaskStatus; 6] = [TaskStatus::Inbox, TaskStatus::Todo, TaskStatus::Active, TaskStatus::Review, TaskStatus::Done, TaskStatus::Canceled];
+
+    /// Done or canceled: no longer holds up the tasks waiting for it.
+    pub fn finished(self) -> bool {
+        matches!(self, TaskStatus::Done | TaskStatus::Canceled)
+    }
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Hash, Default, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum Priority {
+    #[default]
+    None,
+    Low,
+    Medium,
+    High,
+    Urgent,
+}
+
+impl Priority {
+    pub const ALL: [Priority; 5] = [Priority::None, Priority::Low, Priority::Medium, Priority::High, Priority::Urgent];
+}
+
+/// Who wrote a note.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Author {
+    #[default]
+    User,
+    /// A coding agent.
+    Agent,
+}
+
+/// A note on a task: notes are only ever appended.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct TaskNote {
+    pub text: String,
+    /// Unix seconds.
+    pub at: u64,
+    #[serde(default)]
+    pub author: Author,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+impl TaskNote {
+    pub fn new(text: &str, at: u64, author: Author) -> Self {
+        TaskNote { text: text.into(), at, author, extra: Extra::new() }
+    }
+}
+
+/// One task of a list. The order of `TaskList::tasks` is the manual order: within a status, the
+/// tasks show in the order they have in the list.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct Task {
+    /// Stable, random: what dependencies and commands name.
+    pub id: String,
+    /// Short and readable (`k3f`), unique within its list.
+    pub reference: String,
+    pub title: String,
+    /// Markdown.
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub status: TaskStatus,
+    #[serde(default)]
+    pub priority: Priority,
+    /// Ids of the tasks of the same list this one waits for.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub notes: Vec<TaskNote>,
+    /// Unix seconds.
+    #[serde(default)]
+    pub created: u64,
+    #[serde(default)]
+    pub updated: u64,
+    /// Goes up by one on every change of the task (notes, moves, status... included).
+    #[serde(default)]
+    pub rev: u64,
+    /// Goes up by one only when its title, description or priority change: what a caller names
+    /// (`AgentCmd::EditTasks::expect`) to refuse an edit made on a stale copy of those fields.
+    #[serde(default)]
+    pub content_rev: u64,
+    /// In the trash since then (Unix seconds): hidden, restorable, purged after a while.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed: Option<u64>,
+    /// Where the task is being worked on (filled by later features).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+/// A task list, as stored in its file (and sent to the app).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct TaskList {
+    /// `TASKS_FORMAT` of the writer.
+    pub format: u32,
+    /// What the list belongs to: the main checkout of a repository, or a folder outside git
+    /// (resolved paths).
+    pub key: String,
+    /// Goes up by one on every write.
+    #[serde(default)]
+    pub revision: u64,
+    /// For a repository: its first root commit, which survives moving or renaming it (how a list
+    /// whose key folder is gone is found again).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+    #[serde(default)]
+    pub tasks: Vec<Task>,
+    /// References of purged tasks, never given again (the most recent ones, bounded).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired: Vec<String>,
+    #[serde(flatten)]
+    pub extra: Extra,
+}
+
+impl TaskList {
+    pub fn empty(key: &str) -> Self {
+        TaskList { format: TASKS_FORMAT, key: key.into(), revision: 0, repo_id: None, tasks: Vec::new(), retired: Vec::new(), extra: Extra::new() }
+    }
+
+    /// Tasks not in the trash.
+    pub fn live(&self) -> usize {
+        self.tasks.iter().filter(|t| t.removed.is_none()).count()
+    }
+}
+
+/// Another list with tasks that may be this folder's: the list of its previous key, of the folder
+/// itself (before it became part of a repository), or of the same repository whose folder is gone
+/// (moved or renamed). `AgentCmd::AdoptTasks` brings its tasks here.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct FoundList {
+    pub key: String,
+    /// Live tasks in it.
+    pub tasks: usize,
+    #[serde(default)]
+    pub why: FoundWhy,
+}
+
+/// Why another list may be this folder's.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FoundWhy {
+    /// The list of the folder's previous key (this session).
+    #[default]
+    PreviousKey,
+    /// The folder's own list, from before it was part of a repository.
+    OwnFolder,
+    /// A list of a repository with the same history (first root commit) whose folder is gone: a
+    /// moved or renamed repository, but maybe another clone. Always confirmed by the user.
+    SameHistory,
+}
+
+/// The task list of a key the app subscribed to (`AgentCmd::WatchTasks`), sent on subscribing
+/// and whenever it changes on disk, whoever wrote it.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct TaskBoard {
+    /// The app's key.
+    pub key: String,
+    /// `None`: no list (see `problem`).
+    #[serde(default)]
+    pub list: Option<TaskList>,
+    /// The list can be shown, not changed (see `problem`).
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default)]
+    pub problem: Option<Problem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub found: Vec<FoundList>,
+}
+
+/// A change to a task list: small and typed, never "replace the whole list". `task`, `on`,
+/// `before`: task ids.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum TaskOp {
+    /// A new task, last of its status.
+    Add {
+        title: String,
+        #[serde(default)]
+        description: String,
+        #[serde(default)]
+        priority: Priority,
+        #[serde(default)]
+        status: TaskStatus,
+    },
+    /// Changes the fields given.
+    Edit {
+        task: String,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        priority: Option<Priority>,
+    },
+    /// Moves the task to another status, last of it.
+    SetStatus {
+        task: String,
+        status: TaskStatus,
+    },
+    /// Moves the task just before `before` (a task of the same status), or last of its status.
+    Move {
+        task: String,
+        #[serde(default)]
+        before: Option<String>,
+    },
+    AddNote {
+        task: String,
+        text: String,
+        #[serde(default)]
+        author: Author,
+    },
+    /// `task` waits for `on` (refused if that closes a loop).
+    AddDependency {
+        task: String,
+        on: String,
+    },
+    RemoveDependency {
+        task: String,
+        on: String,
+    },
+    /// Into the trash (restorable).
+    Remove {
+        task: String,
+    },
+    /// Out of the trash.
+    Restore {
+        task: String,
+    },
+}
+
+impl TaskOp {
+    /// The existing task it changes (`None` for `Add`).
+    pub fn task(&self) -> Option<&str> {
+        match self {
+            TaskOp::Add { .. } => None,
+            TaskOp::Edit { task, .. }
+            | TaskOp::SetStatus { task, .. }
+            | TaskOp::Move { task, .. }
+            | TaskOp::AddNote { task, .. }
+            | TaskOp::AddDependency { task, .. }
+            | TaskOp::RemoveDependency { task, .. }
+            | TaskOp::Remove { task }
+            | TaskOp::Restore { task } => Some(task),
+        }
+    }
+}
+
+/// `task` waiting for `on` would close a loop: `on` is `task`, or already waits for it, directly
+/// or through other tasks (removed ones included: restoring them must not make a loop).
+pub fn task_cycle(tasks: &[Task], task: &str, on: &str) -> bool {
+    let mut stack = vec![on];
+    let mut seen: Vec<&str> = Vec::new();
+    while let Some(at) = stack.pop() {
+        if at == task {
+            return true;
+        }
+        if seen.contains(&at) {
+            continue;
+        }
+        seen.push(at);
+        if let Some(t) = tasks.iter().find(|t| t.id == at) {
+            stack.extend(t.depends_on.iter().map(String::as_str));
+        }
+    }
+    false
+}
+
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(tag = "type")]
 pub enum AgentEvent {
@@ -996,6 +1404,29 @@ pub enum AgentEvent {
         /// The agent takes `AgentCmd::SendText` (missing from older agents: they cannot).
         #[serde(default)]
         send_text: bool,
+        /// The agent keeps task lists (`AgentCmd::WatchTasks`, `EditTasks`).
+        #[serde(default)]
+        tasks: bool,
+    },
+    /// A subscribed task list, on subscribing and whenever it changes.
+    Tasks(Box<TaskBoard>),
+    /// Answer to `AgentCmd::EditTasks` with its `id`: `problem` is `None` when it was done; `task`:
+    /// the task changed (the new one for `TaskOp::Add`).
+    TasksEdited {
+        id: u64,
+        key: String,
+        #[serde(default)]
+        task: Option<String>,
+        #[serde(default)]
+        problem: Option<Problem>,
+        /// The task's `content_rev` after the change, when it is done.
+        #[serde(default)]
+        content_rev: Option<u64>,
+    },
+    /// Something the user should know about a subscribed list (`Problem::TasksSetAside`).
+    TasksNotice {
+        key: String,
+        problem: Problem,
     },
     /// Hooks state after `AgentCmd::InstallHooks`.
     HooksChanged {
@@ -1158,6 +1589,45 @@ pub enum AgentCmd {
         id: u64,
         key: String,
         request: CreateWorktree,
+    },
+    /// Subscribes `key` to the task list of `path`: its repository's (keyed by the main
+    /// checkout), or the folder's own outside git. Answered by `AgentEvent::Tasks`, then again
+    /// whenever the list changes on disk. Read only: nothing is created until a change.
+    WatchTasks {
+        key: String,
+        path: String,
+    },
+    UnwatchTasks {
+        key: String,
+    },
+    /// Changes the task list `key` is subscribed to. `expect`: the task's `content_rev` the caller
+    /// saw; when given and its title, description or priority changed since, refused with
+    /// `Problem::TaskStale`. `list`: the key of the list the caller was shown; when given and the
+    /// folder now belongs to another list, refused with `Problem::TasksListChanged`. Response:
+    /// `AgentEvent::TasksEdited` with the same `id`, then `AgentEvent::Tasks`.
+    EditTasks {
+        id: u64,
+        key: String,
+        op: TaskOp,
+        #[serde(default)]
+        expect: Option<u64>,
+        #[serde(default)]
+        list: Option<String>,
+    },
+    /// Brings the tasks of the list `from` (one of `TaskBoard::found`) into the list `key` is
+    /// subscribed to; refused with `Problem::TasksNotEmpty` when that one has live tasks, unless
+    /// `merge`. The old file is kept, renamed `.adopted-<unix time>`. Response:
+    /// `AgentEvent::TasksEdited` with the same `id`.
+    /// `list`: the key of the list the caller was shown, checked like `EditTasks::list`. `from`
+    /// must still be one of the lists the agent would name (checked again under the locks).
+    AdoptTasks {
+        id: u64,
+        key: String,
+        from: String,
+        #[serde(default)]
+        merge: bool,
+        #[serde(default)]
+        list: Option<String>,
     },
 }
 
@@ -1759,7 +2229,7 @@ mod tests {
     #[test]
     fn roundtrip_hooks() {
         for hooks in [Hooks::Installed, Hooks::Missing, Hooks::Unsupported] {
-            let ev = AgentEvent::Hello { version: "1".into(), hooks, send_text: true };
+            let ev = AgentEvent::Hello { version: "1".into(), hooks, send_text: true, tasks: true };
             assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
             let ev = AgentEvent::HooksChanged { hooks };
             assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
@@ -1796,5 +2266,165 @@ mod tests {
         // An older agent's hello: it cannot send text.
         let old = r#"{"type":"Hello","version":"0.1.7","hooks":"Installed"}"#;
         assert!(matches!(decode::<AgentEvent>(old).unwrap(), AgentEvent::Hello { send_text: false, .. }));
+    }
+
+    fn task(id: &str, depends_on: &[&str]) -> Task {
+        Task {
+            id: id.into(),
+            reference: format!("r{id}"),
+            title: format!("task {id}"),
+            description: String::new(),
+            status: TaskStatus::Todo,
+            priority: Priority::None,
+            depends_on: depends_on.iter().map(|d| d.to_string()).collect(),
+            notes: vec![],
+            created: 1,
+            updated: 1,
+            rev: 1,
+            content_rev: 1,
+            removed: None,
+            worktree: None,
+            branch: None,
+            session: None,
+            extra: Extra::new(),
+        }
+    }
+
+    #[test]
+    fn roundtrip_tasks() {
+        let mut full = task("a1", &["b2"]);
+        full.description = "## Steps\n- one \"quoted\"\n- caf\u{e9}".into();
+        full.status = TaskStatus::Review;
+        full.priority = Priority::Urgent;
+        full.notes = vec![TaskNote::new("started", 1_700_000_000, Author::Agent)];
+        full.removed = Some(1_700_000_100);
+        full.worktree = Some("/home/me/shop/.claude/worktrees/taxes".into());
+        full.branch = Some("taxes".into());
+        full.session = Some("tc_ab12".into());
+        let list = TaskList { revision: 7, repo_id: Some("a".repeat(40)), tasks: vec![full, task("b2", &[])], retired: vec!["old".into()], ..TaskList::empty("/home/me/shop") };
+        let found = vec![FoundList { key: "/home/me/old-shop".into(), tasks: 4, why: FoundWhy::SameHistory }];
+        let ev = AgentEvent::Tasks(Box::new(TaskBoard { key: "p1".into(), list: Some(list), read_only: false, problem: None, found }));
+        assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        let ev = AgentEvent::Tasks(Box::new(TaskBoard { key: "p1".into(), list: None, read_only: true, problem: Some(Problem::TasksNewerFormat { format: 9 }), found: vec![] }));
+        assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        let ops = [
+            TaskOp::Add { title: "Invoice PDF".into(), description: String::new(), priority: Priority::High, status: TaskStatus::Inbox },
+            TaskOp::Edit { task: "a1".into(), title: Some("x".into()), description: None, priority: Some(Priority::Low) },
+            TaskOp::SetStatus { task: "a1".into(), status: TaskStatus::Done },
+            TaskOp::Move { task: "a1".into(), before: Some("b2".into()) },
+            TaskOp::Move { task: "a1".into(), before: None },
+            TaskOp::AddNote { task: "a1".into(), text: "n".into(), author: Author::User },
+            TaskOp::AddDependency { task: "a1".into(), on: "b2".into() },
+            TaskOp::RemoveDependency { task: "a1".into(), on: "b2".into() },
+            TaskOp::Remove { task: "a1".into() },
+            TaskOp::Restore { task: "a1".into() },
+        ];
+        for op in ops {
+            let cmd = AgentCmd::EditTasks { id: 3, key: "p1".into(), op, expect: Some(4), list: Some("/home/me/shop".into()) };
+            assert_eq!(decode::<AgentCmd>(&encode(&cmd)).unwrap(), cmd);
+        }
+        for cmd in [
+            AgentCmd::WatchTasks { key: "p1".into(), path: "~/shop".into() },
+            AgentCmd::UnwatchTasks { key: "p1".into() },
+            AgentCmd::AdoptTasks { id: 4, key: "p1".into(), from: "/home/me/old-shop".into(), merge: true, list: Some("/home/me/shop".into()) },
+        ] {
+            assert_eq!(decode::<AgentCmd>(&encode(&cmd)).unwrap(), cmd);
+        }
+        let problems = [
+            Problem::TaskNotFound { task: "a1".into() },
+            Problem::TaskCycle { task: "k3f".into(), on: "x9z".into() },
+            Problem::TaskStale { task: "k3f".into() },
+            Problem::TaskTextEmpty,
+            Problem::TasksNewerFormat { format: 2 },
+            Problem::TasksSetAside { path: "/x.json.corrupt-1".into(), detail: "EOF".into() },
+            Problem::TasksFailed { detail: "disk full".into() },
+            Problem::TasksNotWatched,
+            Problem::TaskTooLong { field: TaskField::Description, max: MAX_TASK_DESCRIPTION },
+            Problem::TaskTooManyNotes { max: MAX_TASK_NOTES },
+            Problem::TasksTooMany { max: MAX_TASKS },
+            Problem::TaskMoveRefused,
+            Problem::TasksListChanged { shown: "/a".into(), now: "/b".into() },
+            Problem::TasksKeyUnknown { detail: "fatal".into() },
+            Problem::TasksUnknownValues { detail: "unknown variant".into() },
+            Problem::TasksDuplicateId { id: "a".into() },
+            Problem::TasksNotEmpty { tasks: 3 },
+            Problem::TasksNotAdoptable { from: "/a".into() },
+            Problem::TasksNothingToAdopt { from: "/a".into() },
+            Problem::TasksSameList,
+            Problem::TasksLocked { secs: 5 },
+        ];
+        for problem in problems {
+            let ev = AgentEvent::TasksEdited { id: 3, key: "p1".into(), task: Some("a1".into()), problem: Some(problem.clone()), content_rev: Some(2) };
+            assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+            let ev = AgentEvent::TasksNotice { key: "p1".into(), problem };
+            assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        }
+    }
+
+    #[test]
+    fn task_shapes_decode_across_versions() {
+        // The smallest task a writer may leave: everything else takes its default.
+        let old = r#"{"id":"a","reference":"k3f","title":"Old"}"#;
+        let t: Task = decode(old).unwrap();
+        assert_eq!((t.status, t.priority, t.rev, t.removed, t.notes.len(), t.worktree), (TaskStatus::Inbox, Priority::None, 0, None, 0, None));
+        // A note without its author: the user's.
+        let note: TaskNote = decode(r#"{"text":"x","at":5}"#).unwrap();
+        assert_eq!(note.author, Author::User);
+        // Fields a newer writer put in a note are kept too.
+        let note: TaskNote = decode(r#"{"text":"x","at":5,"model":"opus"}"#).unwrap();
+        assert!(encode(&note).contains(r#""model":"opus""#));
+        // Before content revisions and repository ids.
+        assert_eq!(t.content_rev, 0);
+        let list: TaskList = decode(r#"{"format":1,"key":"/k"}"#).unwrap();
+        assert_eq!((list.repo_id, list.retired.len(), list.tasks.len()), (None, 0, 0));
+        let board: TaskBoard = decode(r#"{"key":"p","list":null,"read_only":false,"problem":null}"#).unwrap();
+        assert!(board.found.is_empty());
+        let found: FoundList = decode(r#"{"key":"/k","tasks":1}"#).unwrap();
+        assert_eq!(found.why, FoundWhy::PreviousKey);
+        let adopt: AgentCmd = decode(r#"{"type":"AdoptTasks","id":1,"key":"p","from":"/k"}"#).unwrap();
+        assert!(matches!(adopt, AgentCmd::AdoptTasks { merge: false, list: None, .. }));
+        let edited: AgentEvent = decode(r#"{"type":"TasksEdited","id":1,"key":"p","task":null,"problem":null}"#).unwrap();
+        assert!(matches!(edited, AgentEvent::TasksEdited { content_rev: None, .. }));
+        // Fields a newer writer added (same format) are kept when the list is written again.
+        let newer = r#"{"format":1,"key":"/k","revision":2,"labels":["x"],"tasks":[{"id":"a","reference":"k3f","title":"T","due":"2027-01-01"}]}"#;
+        let list: TaskList = decode(newer).unwrap();
+        let again = encode(&list);
+        assert!(again.contains(r#""due":"2027-01-01""#) && again.contains(r#""labels":["x"]"#), "{again}");
+        // The optional links are left out when empty.
+        assert!(!encode(&task("a", &[])).contains("worktree"));
+        // An edit without `expect` (an older app); an add with only a title.
+        let cmd: AgentCmd = decode(r#"{"type":"EditTasks","id":1,"key":"p","op":{"op":"add","title":"T"}}"#).unwrap();
+        assert_eq!(
+            cmd,
+            AgentCmd::EditTasks {
+                id: 1,
+                key: "p".into(),
+                op: TaskOp::Add { title: "T".into(), description: String::new(), priority: Priority::None, status: TaskStatus::Inbox },
+                expect: None,
+                list: None
+            }
+        );
+        // An older agent's hello: no task lists.
+        let old = r#"{"type":"Hello","version":"0.1.7","hooks":"Installed","send_text":true}"#;
+        assert!(matches!(decode::<AgentEvent>(old).unwrap(), AgentEvent::Hello { tasks: false, send_text: true, .. }));
+        // Statuses and priorities are written as plain words.
+        assert_eq!(encode(&TaskStatus::Canceled).trim(), r#""canceled""#);
+        assert_eq!(encode(&Priority::Urgent).trim(), r#""urgent""#);
+    }
+
+    #[test]
+    fn dependency_cycles_are_found() {
+        // c waits for b, b waits for a.
+        let tasks = vec![task("a", &[]), task("b", &["a"]), task("c", &["b"])];
+        assert!(task_cycle(&tasks, "a", "a"), "itself");
+        assert!(task_cycle(&tasks, "a", "c"), "a -> c -> b -> a");
+        assert!(task_cycle(&tasks, "a", "b"));
+        assert!(!task_cycle(&tasks, "c", "a"), "already implied, but no loop");
+        assert!(!task_cycle(&tasks, "a", "zz"), "unknown task");
+        // A loop elsewhere does not hang the search.
+        let looped = vec![task("x", &["y"]), task("y", &["x"]), task("z", &[])];
+        assert!(!task_cycle(&looped, "z", "x"));
+        assert_eq!(TaskOp::Remove { task: "a".into() }.task(), Some("a"));
+        assert!(TaskStatus::Canceled.finished() && !TaskStatus::Review.finished());
     }
 }

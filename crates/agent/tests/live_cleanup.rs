@@ -66,7 +66,12 @@ struct Agent {
 
 impl Agent {
     fn spawn(socket: &str) -> Self {
-        let mut child = Command::new(AGENT).env("TCANVAS_TMUX_SOCKET", socket).envs(GIT_ENV).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        Self::spawn_with(socket, &[])
+    }
+
+    fn spawn_with(socket: &str, env: &[(&str, String)]) -> Self {
+        let mut child =
+            Command::new(AGENT).env("TCANVAS_TMUX_SOCKET", socket).envs(GIT_ENV).envs(env.iter().map(|(k, v)| (*k, v.as_str()))).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
         let (tx, events) = mpsc::channel();
@@ -456,6 +461,85 @@ fn removes_only_what_is_safe_and_refuses_the_rest() {
     for b in ["topic", "fresh", "main", "wip", "pushed", "pushed-away", "lost"] {
         assert!(branch_exists(&shop, b), "{b} kept");
     }
+}
+
+/// Every file under `dir` (links as their target), with its bytes, sorted by path.
+fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d).unwrap().flatten() {
+            let path = entry.path();
+            let ty = entry.file_type().unwrap();
+            let rel = path.strip_prefix(dir).unwrap().to_path_buf();
+            if ty.is_dir() {
+                out.push((rel, Vec::new()));
+                stack.push(path);
+            } else if ty.is_symlink() {
+                out.push((rel, std::fs::read_link(&path).unwrap().into_os_string().into_encoded_bytes()));
+            } else {
+                out.push((rel, std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn git_variables_in_the_environment_never_point_at_another_repository() {
+    if !has("git", "--version") {
+        eprintln!("git missing: test skipped");
+        return;
+    }
+    let tmp = TempDir::new("cleanup-git-env");
+    let shop = tmp.0.join("shop");
+    std::fs::create_dir_all(&shop).unwrap();
+    git(&shop, &["init", "-q", "-b", "main"]);
+    commit(&shop, ".gitignore", ".claude/\n");
+    let done = merged_worktree(&shop, "done");
+    // Another repository, with a worktree and a merged branch of its own, that every variable
+    // points at.
+    let decoy = tmp.0.join("decoy");
+    std::fs::create_dir_all(&decoy).unwrap();
+    git(&decoy, &["init", "-q", "-b", "main"]);
+    commit(&decoy, "a.txt", "decoy");
+    let decoy_wt = merged_worktree(&decoy, "decoy-done");
+    let before = (snapshot(&decoy), snapshot(&decoy_wt));
+    let env = [
+        ("GIT_DIR", decoy.join(".git").display().to_string()),
+        ("GIT_WORK_TREE", decoy.display().to_string()),
+        ("GIT_COMMON_DIR", decoy.join(".git").display().to_string()),
+        ("GIT_CEILING_DIRECTORIES", tmp.0.display().to_string()),
+        ("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1".to_string()),
+    ];
+    let mut agent = Agent::spawn_with(&format!("tcanvas-cleanup-env-{}", std::process::id()), &env);
+    agent.send(&AgentCmd::Watch { key: "shop".into(), path: shop.display().to_string() });
+    // Lists the watched repository's worktrees only.
+    let (shop_s, done_s) = (shop.display().to_string(), done.display().to_string());
+    let list = agent.wait_list("shop", "the shop's worktrees", |l| l.worktrees.len() == 2 && l.worktrees.iter().any(|w| w.path == done_s && w.merged == Some(true) && w.dirty == Some(false)));
+    assert_eq!(list.repo.as_deref(), Some(shop_s.as_str()));
+
+    // Creates one there.
+    let request = protocol::CreateWorktree { branch: protocol::WorktreeBranch::New { name: "feat".into(), base: "main".into() }, folder: "feat".into(), location: None, exclude: false };
+    agent.send(&AgentCmd::CreateWorktree { id: 1, key: "shop".into(), request });
+    let created = agent.wait("the creation", |e| match e {
+        AgentEvent::WorktreeCreated { id: 1, path, problem, .. } => Some((path.clone(), problem.clone())),
+        _ => None,
+    });
+    let feat = shop.join(".claude/worktrees/feat");
+    assert_eq!(created, (Some(feat.display().to_string()), None));
+    assert!(feat.join(".gitignore").exists() && branch_exists(&shop, "feat"));
+
+    // Removes one there, with its branch.
+    assert_eq!(agent.cleanup("shop", remove(&done, Some("done"))), (Some("done".into()), None));
+    assert!(!done.exists() && !branch_exists(&shop, "done"));
+    let feat_s = feat.display().to_string();
+    agent.wait_list("shop", "the new list", |l| l.worktrees.len() == 2 && l.worktrees.iter().any(|w| w.path == feat_s));
+
+    // The other repository is untouched, byte for byte.
+    assert_eq!((snapshot(&decoy), snapshot(&decoy_wt)), before);
+    assert!(branch_exists(&decoy, "decoy-done"));
 }
 
 #[test]

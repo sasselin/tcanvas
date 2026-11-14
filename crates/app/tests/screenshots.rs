@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use egui::{Key, Modifiers, Pos2, Rect, Vec2, pos2, vec2};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use protocol::{AgentEvent, ChangeKind, ChangeSet, CommitInfo, FileChange, SessionInfo, TermStatus};
+use protocol::{AgentEvent, Author, ChangeKind, ChangeSet, CommitInfo, Extra, FileChange, Priority, SessionInfo, Task, TaskBoard, TaskList, TaskNote, TaskStatus, TermStatus};
 use tcanvas::features::agent_link::AgentMode;
 use tcanvas::features::terminal_card::Launcher;
 use tcanvas::shell::event::Event;
@@ -465,6 +465,72 @@ fn changes() {
     let diff = "@@ -12,9 +12,13 @@ use crate::middleware::RateLimit;\n pub fn router(state: AppState) -> Router {\n+    let limit = RateLimit::per_minute(10);\n     Router::new()\n         .route(\"/health\", get(health))\n-        .route(\"/login\", post(login))\n+        .route(\"/login\", post(login).layer(limit))\n         .route(\"/logout\", post(logout))\n-        .with_state(state)\n+        .with_state(state.clone())\n+        .layer(TraceLayer::new_for_http())\n }\n";
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Diff { key: "p-shop-api".into(), file: "src/routes/auth.rs".into(), text: diff.into(), truncated: false, problem: None })]);
     save(&mut h, "changes");
+}
+
+/// The shop API's task list: something to review, one in progress, a few to do (one waiting for
+/// another), ideas in the inbox, and what is already done.
+fn api_tasks() -> TaskList {
+    let now = unix_now();
+    let task = |id: &str, reference: &str, title: &str, status: TaskStatus, priority: Priority| Task {
+        id: id.into(),
+        reference: reference.into(),
+        title: title.into(),
+        description: String::new(),
+        status,
+        priority,
+        depends_on: vec![],
+        notes: vec![],
+        created: now - 86_400,
+        updated: now - 3_600,
+        rev: 1,
+        content_rev: 1,
+        removed: None,
+        worktree: None,
+        branch: None,
+        session: None,
+        extra: Extra::new(),
+    };
+    let note = |text: &str, author| TaskNote::new(text, now - 1_800, author);
+    let mut limit = task("rl", "q7m", "Rate limit the login route", TaskStatus::Review, Priority::High);
+    limit.notes = vec![note("10 per minute per IP, 429 with Retry-After", Author::Agent), note("check the proxy forwards the client IP", Author::User)];
+    let mut refresh = task("rt", "h4c", "Refresh tokens", TaskStatus::Active, Priority::Medium);
+    refresh.notes = vec![note("rotation on every use", Author::User)];
+    let mut revoke = task("rv", "w2x", "Revoke sessions on password change", TaskStatus::Todo, Priority::None);
+    revoke.depends_on = vec!["rt".into()];
+    let mut pagination = task("pg", "f8n", "Cursor pagination for /orders", TaskStatus::Todo, Priority::None);
+    pagination.depends_on = vec!["ix".into()];
+    let tasks = vec![
+        limit,
+        refresh,
+        task("pdf", "k3f", "Invoice PDF with taxes", TaskStatus::Todo, Priority::Urgent),
+        revoke,
+        pagination,
+        task("oa", "m9p", "OpenAPI docs for the auth routes", TaskStatus::Inbox, Priority::Low),
+        task("hc", "t6b", "Health check reports the database", TaskStatus::Inbox, Priority::None),
+        task("ix", "c3d", "Index sessions by user", TaskStatus::Done, Priority::None),
+        task("ar", "e5g", "Hash passwords with argon2", TaskStatus::Done, Priority::None),
+    ];
+    TaskList { tasks, ..TaskList::empty("/home/me/code/shop-api") }
+}
+
+#[test]
+#[ignore = "renders README screenshots; run ./scripts/screenshots.sh"]
+fn tasks() {
+    let mut h = harness("tasks");
+    demo_canvas(&mut h);
+    ctrl_shift(&h, Key::Num1);
+    steps(&mut h, 45);
+    let board = TaskBoard { key: "p-shop-api".into(), list: Some(api_tasks()), read_only: false, problem: None, found: vec![] };
+    let hello = AgentEvent::Hello { version: "X.X.X".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true };
+    h.state_mut().dispatch(vec![Event::Agent(hello), Event::Agent(AgentEvent::Tasks(Box::new(board)))]);
+    ctrl_shift(&h, Key::T);
+    steps(&mut h, 3);
+    // The panel takes room on the left: frame the group again in what is left.
+    ctrl_shift(&h, Key::Num0);
+    steps(&mut h, 45);
+    assert!(h.query_by_label("waits for #h4c").is_some() && h.query_by_label("ready").is_some(), "blocked and ready marks shown");
+    h.event(egui::Event::PointerGone);
+    save(&mut h, "tasks");
 }
 
 #[test]

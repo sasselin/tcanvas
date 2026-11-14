@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protocol::{AgentCmd, AgentEvent, DEFAULT_STALL_SECS, Problem, SessionInfo, TermStatus};
 
-use super::{agent_hooks, changes, hooks, kill, send as send_text, status, timing, tmux};
+use super::{agent_hooks, changes, hooks, kill, send as send_text, status, tasks, timing, tmux};
 
 const POLL: Duration = Duration::from_secs(1);
 const TAIL_LINES: usize = 3;
@@ -43,8 +43,13 @@ pub fn run() -> io::Result<()> {
             std::process::exit(0);
         }
     });
-    let cmds = spawn_stdin_reader(watcher, sender);
-    send(&AgentEvent::Hello { version: env!("CARGO_PKG_VERSION").into(), hooks: hooks::state(), send_text: true })?;
+    let lists = tasks::spawn(|ev| {
+        if send(ev).is_err() {
+            std::process::exit(0);
+        }
+    });
+    let cmds = spawn_stdin_reader(watcher, sender, lists);
+    send(&AgentEvent::Hello { version: env!("CARGO_PKG_VERSION").into(), hooks: hooks::state(), send_text: true, tasks: true })?;
 
     let mut tracked: HashMap<String, Tracked> = HashMap::new();
     let mut clock = timing::ClockLog::default();
@@ -69,7 +74,11 @@ pub fn run() -> io::Result<()> {
                 | AgentCmd::WorktreeSizes { .. }
                 | AgentCmd::PlanWorktree { .. }
                 | AgentCmd::CreateWorktree { .. }
-                | AgentCmd::SendText { .. } => {}
+                | AgentCmd::SendText { .. }
+                | AgentCmd::WatchTasks { .. }
+                | AgentCmd::UnwatchTasks { .. }
+                | AgentCmd::EditTasks { .. }
+                | AgentCmd::AdoptTasks { .. } => {}
             }
         }
 
@@ -175,9 +184,9 @@ fn send(ev: &AgentEvent) -> io::Result<()> {
 }
 
 /// Reads the app's commands. End of stdin (app closed) stops the agent.
-/// Change-tracking commands go straight to their thread (no waiting for diffs), and so does text
-/// to send (no waiting for the next poll).
-fn spawn_stdin_reader(watcher: Sender<changes::Cmd>, sender: Sender<send_text::Request>) -> Receiver<AgentCmd> {
+/// Change-tracking commands go straight to their thread (no waiting for diffs), and so do text
+/// to send (no waiting for the next poll) and task list commands.
+fn spawn_stdin_reader(watcher: Sender<changes::Cmd>, sender: Sender<send_text::Request>, lists: Sender<tasks::Cmd>) -> Receiver<AgentCmd> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         for line in io::stdin().lock().lines() {
@@ -218,17 +227,47 @@ fn spawn_stdin_reader(watcher: Sender<changes::Cmd>, sender: Sender<send_text::R
                     let deadline = limit_ms.map(|ms| std::time::Instant::now() + Duration::from_millis(ms));
                     let _ = sender.send(send_text::Request { id, session, text, enter, deadline });
                 }
+                Ok(AgentCmd::WatchTasks { key, path }) => {
+                    let _ = lists.send(tasks::Cmd::Watch { key, path });
+                }
+                Ok(AgentCmd::UnwatchTasks { key }) => {
+                    let _ = lists.send(tasks::Cmd::Unwatch { key });
+                }
+                Ok(AgentCmd::EditTasks { id, key, op, expect, list }) => {
+                    if lists.send(tasks::Cmd::Edit { id, key: key.clone(), op, expect, list }).is_err() {
+                        tasks_gone(id, key);
+                    }
+                }
+                Ok(AgentCmd::AdoptTasks { id, key, from, merge, list }) => {
+                    if lists.send(tasks::Cmd::Adopt { id, key: key.clone(), from, merge, list }).is_err() {
+                        tasks_gone(id, key);
+                    }
+                }
                 Ok(cmd) => {
                     if tx.send(cmd).is_err() {
                         break;
                     }
                 }
-                Err(e) => eprintln!("ignored command ({e}): {line}"),
+                // The type only: the rest may hold task text.
+                Err(e) => eprintln!("ignored command ({e}): type {}", command_type(&line)),
             }
         }
         std::process::exit(0);
     });
     rx
+}
+
+/// The `type` of a command line that did not decode, for the log.
+fn command_type(line: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(line).ok().and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from)).unwrap_or_else(|| "unknown".into())
+}
+
+/// The task lists' thread stopped: changes are answered with a failure rather than never.
+fn tasks_gone(id: u64, key: String) {
+    let problem = Problem::TasksFailed { detail: "the task list thread stopped".into() };
+    if send(&AgentEvent::TasksEdited { id, key, task: None, problem: Some(problem), content_rev: None }).is_err() {
+        std::process::exit(0);
+    }
 }
 
 /// The shell running as `pid` (a pane's first process), from its process name.
