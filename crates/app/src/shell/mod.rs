@@ -153,7 +153,7 @@ impl App {
             match s {
                 Shortcut::Jump => self.jump.open(),
                 Shortcut::Help => self.shortcuts_help.open(),
-                Shortcut::NewCard => events.push(Event::NewCard { at: None, project: None }),
+                Shortcut::NewCard => events.push(Event::NewCard { at: None, project: None, command: None }),
                 Shortcut::Search => {
                     events.push(Event::Unfocus);
                     ctx.memory_mut(|m| m.request_focus(Id::unique(filters::SEARCH_ID)));
@@ -314,5 +314,6 @@ impl eframe::App for App {
 
     fn on_exit(&mut self) {
         self.save_now();
+        self.cards.discard_unattached(&self.world);
     }
 }

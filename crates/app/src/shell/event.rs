@@ -3,7 +3,7 @@
 use egui::{Pos2, Rect};
 use protocol::{AgentCmd, AgentEvent};
 
-use super::world::{Camera, CardId, ProjectId};
+use super::world::{Camera, CardId, CommandTemplate, ProjectId};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Notice {
@@ -22,11 +22,16 @@ pub enum Notice {
 
 #[derive(Clone, Debug)]
 pub enum Event {
-    /// New terminal; `at` in world coordinates (otherwise at the view center).
+    /// New terminal; `at` in world coordinates (otherwise at the view center). `command`: a
+    /// command line its shell runs once, in its folder, when its session is created (`None`:
+    /// just the shell).
     NewCard {
         at: Option<Pos2>,
         project: Option<ProjectId>,
+        command: Option<String>,
     },
+    /// Replaces a group's command templates.
+    SetProjectTemplates(ProjectId, Vec<CommandTemplate>),
     FocusCard(CardId),
     Unfocus,
     /// Smoothly moves the camera to the card, then focuses it.

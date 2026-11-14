@@ -7,6 +7,8 @@ mod pty;
 mod render;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use alacritty_terminal::event::Event as TermEvent;
@@ -41,6 +43,32 @@ const DEFAULT_ROWS: f32 = 34.0;
 /// Below this font size (pixels), draw a preview instead of the grid.
 const LOD_FONT_PX: f32 = 5.5;
 
+/// Where a new card's command stands.
+enum CommandRun {
+    /// To be staged on the Linux side before the first attach.
+    Pending(String),
+    /// Being staged (background process).
+    /// Being staged (background process); the flag, set when the card goes meanwhile, makes the
+    /// staging job delete what it staged.
+    Staging(String, Receiver<Result<(), String>>, Arc<AtomicBool>),
+    /// Given to the first attach; kept until its shell has taken it (`true`) or it never will
+    /// (`false`), as `pty::confirm_command` tells (`None`: cannot tell).
+    Launched(String, Receiver<Option<bool>>),
+}
+
+/// After a staging job: when its card went meanwhile, delete what it staged.
+fn finish_staging(cancelled: &AtomicBool, discard: impl FnOnce()) {
+    if cancelled.load(Ordering::SeqCst) {
+        discard();
+    }
+}
+
+fn discard_in_background(session: String) {
+    std::thread::spawn(move || {
+        pty::discard_command(&session);
+    });
+}
+
 /// Launch real terminals, or nothing (UI tests without a PTY).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Launcher {
@@ -69,6 +97,12 @@ pub struct TerminalCards {
     launcher: Launcher,
     runtimes: HashMap<CardId, TermRuntime>,
     spawn_errors: HashMap<CardId, String>,
+    /// Command a new card runs, until its session is seen: it goes with the first attach only
+    /// (which creates the session) and is never saved, so neither a reattach, a respawn nor an
+    /// app restart can run it again.
+    commands: HashMap<CardId, CommandRun>,
+    /// Command of a card whose session never started (it did not run): offered for copying.
+    lost_commands: HashMap<CardId, String>,
     tx: Sender<(CardId, TermEvent)>,
     rx: Receiver<(CardId, TermEvent)>,
     /// Keyboard captured for the focused card, with the frame's modifiers.
@@ -97,6 +131,8 @@ impl TerminalCards {
             launcher,
             runtimes: HashMap::new(),
             spawn_errors: HashMap::new(),
+            commands: HashMap::new(),
+            lost_commands: HashMap::new(),
             tx,
             rx,
             keys: Vec::new(),
@@ -207,8 +243,74 @@ impl TerminalCards {
         self.runtimes.contains_key(id)
     }
 
+    /// Command a card will run when its terminal starts (tests: nothing starts without a launcher).
+    pub fn pending_command(&self, id: &str) -> Option<&str> {
+        match self.commands.get(id)? {
+            CommandRun::Pending(text) | CommandRun::Staging(text, ..) => Some(text),
+            CommandRun::Launched(..) => None,
+        }
+    }
+
+    /// The card goes: a command not yet taken by its shell is deleted on the Linux side (a staging
+    /// still running deletes what it stages). Returns whether a staged file may exist.
+    fn forget_command(&mut self, id: &str, session: &str) -> bool {
+        let staged = match self.commands.remove(id) {
+            None | Some(CommandRun::Pending(_)) => false,
+            Some(CommandRun::Staging(_, _, cancelled)) => {
+                cancelled.store(true, Ordering::SeqCst);
+                true
+            }
+            Some(CommandRun::Launched(..)) => true,
+        };
+        if staged && self.launcher == Launcher::Tmux {
+            discard_in_background(session.to_string());
+        }
+        staged
+    }
+
+    /// The app quits: commands staged but never attached would never run, delete them now (those
+    /// already attached are settled by their confirmation process, which outlives the app).
+    pub fn discard_unattached(&mut self, world: &World) {
+        let staging: Vec<CardId> = self.commands.iter().filter(|(_, run)| matches!(run, CommandRun::Staging(..))).map(|(id, _)| id.clone()).collect();
+        for id in staging {
+            if let Some(CommandRun::Staging(_, _, cancelled)) = self.commands.remove(&id) {
+                cancelled.store(true, Ordering::SeqCst);
+                if let Some(card) = world.card(&id).filter(|_| self.launcher == Launcher::Tmux) {
+                    pty::discard_command(&card.session());
+                }
+            }
+        }
+    }
+
+    /// A card's command went to tmux, and its session has not shown up yet.
+    pub fn awaiting_session(&self, id: &str) -> bool {
+        matches!(self.commands.get(id), Some(CommandRun::Launched(..)))
+    }
+
+    /// Command of a card that did not run because its session never started.
+    pub fn lost_command(&self, id: &str) -> Option<&str> {
+        self.lost_commands.get(id).map(String::as_str)
+    }
+
+    /// Settles launched commands: taken by their shell, or reported as not run (with their text).
+    fn confirm_launches(&mut self) {
+        let lost = &mut self.lost_commands;
+        self.commands.retain(|id, run| {
+            let CommandRun::Launched(text, rx) = run else { return true };
+            match rx.try_recv() {
+                Err(mpsc::TryRecvError::Empty) => true,
+                Ok(Some(false)) => {
+                    lost.insert(id.clone(), text.clone());
+                    false
+                }
+                _ => false,
+            }
+        });
+    }
+
     /// PTY events: replies to the terminal, clipboard, process exit.
     pub fn poll(&mut self, world: &mut World, events: &mut Vec<Event>) {
+        self.confirm_launches();
         while let Ok((id, ev)) = self.rx.try_recv() {
             let Some(rt) = self.runtimes.get(&id) else { continue };
             match ev {
@@ -276,14 +378,67 @@ impl TerminalCards {
             if self.runtimes.contains_key(&card.id) || self.spawn_errors.contains_key(&card.id) {
                 continue;
             }
-            let launch = attach_command(&card.session(), card.cwd.as_deref());
             let size = grid_for(card.rect, cell);
+            // A card with a command attaches once it is staged on the Linux side.
+            let staged = match self.commands.remove(&card.id) {
+                None => None,
+                Some(CommandRun::Pending(text)) => {
+                    let (tx, rx) = mpsc::channel();
+                    let cancelled = Arc::new(AtomicBool::new(false));
+                    let (session, staged, ctx, flag) = (card.session(), text.clone(), self.ctx.clone(), cancelled.clone());
+                    std::thread::spawn(move || {
+                        let result = pty::stage_command(&session, &staged).map_err(|e| e.to_string());
+                        finish_staging(&flag, || {
+                            pty::discard_command(&session);
+                        });
+                        let _ = tx.send(result);
+                        ctx.request_repaint();
+                    });
+                    self.commands.insert(card.id.clone(), CommandRun::Staging(text, rx, cancelled));
+                    continue;
+                }
+                Some(CommandRun::Staging(text, rx, cancelled)) => match rx.try_recv() {
+                    Ok(Ok(())) => Some(text),
+                    Err(mpsc::TryRecvError::Empty) => {
+                        self.commands.insert(card.id.clone(), CommandRun::Staging(text, rx, cancelled));
+                        continue;
+                    }
+                    failed => {
+                        let e = match failed {
+                            Ok(Err(e)) => e,
+                            _ => "?".into(),
+                        };
+                        self.spawn_errors.insert(card.id.clone(), (t().command_not_staged)(&e));
+                        self.lost_commands.insert(card.id.clone(), text);
+                        discard_in_background(card.session());
+                        continue;
+                    }
+                },
+                // Already attached once with it: a respawn attaches plainly.
+                Some(CommandRun::Launched(..)) => None,
+            };
+            let launch = attach_command(&card.session(), card.cwd.as_deref(), staged.as_ref().map(|_| size));
             match TermRuntime::spawn(&card.id, &launch, size, cell_px(cell), self.tx.clone(), self.ctx.clone()) {
                 Ok(rt) => {
+                    // Handed to tmux: from now on, attaching never passes it again. Kept until
+                    // the session shows up, to tell the user if it never does.
+                    if let Some(text) = staged {
+                        let (tx, rx) = mpsc::channel();
+                        let (session, ctx) = (card.session(), self.ctx.clone());
+                        std::thread::spawn(move || {
+                            let _ = tx.send(pty::confirm_command(&session));
+                            ctx.request_repaint();
+                        });
+                        self.commands.insert(card.id.clone(), CommandRun::Launched(text, rx));
+                    }
                     self.runtimes.insert(card.id.clone(), rt);
                 }
                 Err(e) => {
                     self.spawn_errors.insert(card.id.clone(), (t().spawn_failed)(&launch.program, &e.to_string()));
+                    if let Some(text) = staged {
+                        self.lost_commands.insert(card.id.clone(), text);
+                        discard_in_background(card.session());
+                    }
                 }
             }
         }
@@ -486,6 +641,9 @@ impl TerminalCards {
             // focused terminal, or to the one it targets (the first drag already selects).
             self.forward_mouse(ui, &id, &body_r, body_inner.min, cell_screen, focused);
         }
+        if !is_preview(zoom) {
+            self.lost_banner(ui, body, &id);
+        }
         // A readable terminal under the pointer keeps the whole wheel, including the tail of
         // smoothed scrolling in later frames: the canvas doesn't move behind it.
         if !is_preview(zoom) && body_r.contains_pointer() {
@@ -569,6 +727,27 @@ impl TerminalCards {
         }
         if ui.put(right, egui::Button::new(t().remove)).clicked() {
             events.push(Event::RemoveCard(id.clone()));
+        }
+    }
+
+    /// The card's command never ran: a strip at the bottom of the card says so and keeps its text
+    /// at hand (a long prompt), until dismissed.
+    fn lost_banner(&mut self, ui: &mut Ui, body: Rect, id: &CardId) {
+        let Some(text) = self.lost_commands.get(id).cloned() else { return };
+        let strip = Rect::from_min_max(pos2(body.min.x, body.max.y - 34.0), body.max).intersect(body);
+        ui.painter_at(strip).rect_filled(strip, CornerRadius::ZERO, Color32::from_rgb(110, 40, 40));
+        let mut dismiss = false;
+        ui.scope_builder(egui::UiBuilder::new().max_rect(strip.shrink2(vec2(10.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
+            ui.label(egui::RichText::new(t().command_not_run).color(Color32::WHITE));
+            if ui.button(t().copy_command).clicked() {
+                self.ctx.copy_text(text);
+            }
+            if ui.small_button("×").clicked() {
+                dismiss = true;
+            }
+        });
+        if dismiss {
+            self.lost_commands.remove(id);
         }
     }
 
@@ -696,7 +875,7 @@ impl TerminalCards {
 
     pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
         match ev {
-            Event::NewCard { at, project } => {
+            Event::NewCard { at, project, command } => {
                 let cell = base_cell(&self.ctx);
                 let size = card_size(cell, DEFAULT_COLS, DEFAULT_ROWS);
                 // With no project given, the terminal is born in the open space.
@@ -712,6 +891,9 @@ impl TerminalCards {
                 let mut card = Card::new(rect, project.and_then(|p| p.cwd.clone()));
                 card.project = project.map(|p| p.id.clone());
                 let id = card.id.clone();
+                if let Some(text) = command.as_deref().and_then(pty::staged_text) {
+                    self.commands.insert(id.clone(), CommandRun::Pending(text));
+                }
                 world.add_card(card);
                 // Always fly to the new terminal: visible and large enough to type in.
                 // First make room (nothing overlaps), then fly there.
@@ -748,6 +930,8 @@ impl TerminalCards {
                     let session = card.session();
                     self.killed.insert(session.clone());
                     self.runtimes.remove(id);
+                    self.forget_command(id, &session);
+                    self.lost_commands.remove(id);
                     if self.launcher == Launcher::Tmux {
                         pty::kill_session_in_background(session);
                     }
@@ -757,10 +941,16 @@ impl TerminalCards {
             Event::RemoveCard(id) => {
                 self.runtimes.remove(id);
                 self.spawn_errors.remove(id);
+                if let Some(card) = world.card(id) {
+                    let session = card.session();
+                    self.forget_command(id, &session);
+                }
+                self.lost_commands.remove(id);
                 world.remove_card(id);
             }
             Event::RespawnCard(id) => {
                 self.spawn_errors.remove(id);
+                self.lost_commands.remove(id);
                 if let Some(card) = world.card_mut(id) {
                     card.pty_dead = false;
                 }
@@ -928,6 +1118,36 @@ mod tests {
     use super::*;
 
     const CELL: Vec2 = Vec2::new(8.0, 16.0);
+
+    #[test]
+    fn a_card_closed_while_its_command_is_staged_deletes_it() {
+        let mut cards = TerminalCards::new(egui::Context::default(), Launcher::Disabled);
+        // Not staged yet: nothing to delete on the Linux side.
+        cards.commands.insert("a".into(), CommandRun::Pending("echo a".into()));
+        assert!(!cards.forget_command("a", "tc_a"));
+        assert!(cards.commands.is_empty());
+        // Staging: the job is told to delete what it staged.
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (_tx, rx) = mpsc::channel();
+        cards.commands.insert("b".into(), CommandRun::Staging("echo b".into(), rx, cancelled.clone()));
+        assert!(cards.forget_command("b", "tc_b"), "a staged file may exist: discarded");
+        assert!(cancelled.load(Ordering::SeqCst));
+        assert_eq!(cards.pending_command("b"), None);
+        // Attached, not yet taken: discarded too.
+        let (_tx, rx) = mpsc::channel();
+        cards.commands.insert("c".into(), CommandRun::Launched("echo c".into(), rx));
+        assert!(cards.forget_command("c", "tc_c"));
+        assert!(!cards.forget_command("none", "tc_none"));
+    }
+
+    #[test]
+    fn a_staging_job_deletes_what_it_staged_once_its_card_is_gone() {
+        let mut discarded = false;
+        finish_staging(&AtomicBool::new(false), || discarded = true);
+        assert!(!discarded, "card still there: the command waits for its attach");
+        finish_staging(&AtomicBool::new(true), || discarded = true);
+        assert!(discarded);
+    }
 
     #[test]
     fn default_card_holds_default_grid() {

@@ -153,12 +153,17 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shell::world::CommandTemplate;
     use egui::{Pos2, Rect, Vec2, pos2};
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("tcanvas-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    fn sample_templates() -> Vec<CommandTemplate> {
+        vec![CommandTemplate { name: "Review".into(), command: "claude \"review it's $HOME\"\nnpm test".into() }, CommandTemplate { name: "Logs".into(), command: "tail -f log/*.log".into() }]
     }
 
     fn sample_world() -> World {
@@ -170,8 +175,15 @@ mod tests {
         a.attention = true;
         a.project = Some("p1".into());
         let b = Card::new(Rect::from_min_size(pos2(400.0, 0.0), Vec2::new(300.0, 200.0)), None);
-        w.projects.push(Project { id: "p1".into(), name: "API".into(), color: [1, 2, 3], rect: Rect::from_min_size(pos2(-50.0, -50.0), Vec2::splat(900.0)), cwd: Some("~/api".into()) });
-        w.projects.push(Project { id: "p2".into(), name: "Web".into(), color: [4, 5, 6], rect: Rect::from_min_size(pos2(2000.0, 0.0), Vec2::splat(400.0)), cwd: None });
+        w.projects.push(Project {
+            id: "p1".into(),
+            name: "API".into(),
+            color: [1, 2, 3],
+            rect: Rect::from_min_size(pos2(-50.0, -50.0), Vec2::splat(900.0)),
+            cwd: Some("~/api".into()),
+            templates: sample_templates(),
+        });
+        w.projects.push(Project { id: "p2".into(), name: "Web".into(), color: [4, 5, 6], rect: Rect::from_min_size(pos2(2000.0, 0.0), Vec2::splat(400.0)), cwd: None, templates: Vec::new() });
         w.wires.push(Wire { from: "p1".into(), to: "p2".into() });
         w.add_card(a);
         w.add_card(b);
@@ -193,6 +205,7 @@ mod tests {
         assert_eq!(p.last_error, None);
         assert_eq!(loaded.camera, w.camera);
         assert_eq!(loaded.projects, w.projects);
+        assert_eq!(loaded.projects[0].templates, sample_templates(), "command templates are kept as typed");
         assert_eq!(loaded.wires, w.wires);
         assert_eq!(loaded.cards.len(), 2);
         let a = &loaded.cards[0];
@@ -241,6 +254,28 @@ mod tests {
         assert_eq!(w.card("inside").unwrap().project.as_deref(), Some("p"));
         assert_eq!(w.card("outside").unwrap().project, None);
         assert!(w.projects[0].rect.width() < 1000.0, "the frame fits its only member: {:?}", w.projects[0].rect);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A layout written before command templates: groups load without any, and a group without
+    /// templates is saved as before (no new field).
+    #[test]
+    fn layouts_from_before_templates_still_load() {
+        let dir = temp_dir("before-templates");
+        fs::create_dir_all(&dir).unwrap();
+        let json = r#"{"version":2,"camera":{"center":{"x":0.0,"y":0.0},"zoom":1.0},
+            "cards":[{"id":"c1","name":null,"rect":{"min":{"x":0.0,"y":0.0},"max":{"x":100.0,"y":100.0}},"cwd":"~/api","stall_secs":60,"project":"p"}],
+            "projects":[{"id":"p","name":"API","color":[1,2,3],"rect":{"min":{"x":-10.0,"y":-10.0},"max":{"x":500.0,"y":500.0}},"cwd":"~/api"}],
+            "wires":[],"space":null,"space_cameras":{},"changes_open":false,"free_grid":false}"#;
+        fs::write(dir.join("layout.json"), json).unwrap();
+        let mut w = World::default();
+        let mut p = Persistence::new(&dir);
+        p.load(&mut w);
+        assert_eq!(p.last_error, None);
+        assert_eq!((w.projects.len(), w.cards.len()), (1, 1));
+        assert!(w.projects[0].templates.is_empty());
+        p.save_now(&w);
+        assert!(!fs::read_to_string(dir.join("layout.json")).unwrap().contains("templates"));
         fs::remove_dir_all(dir).unwrap();
     }
 

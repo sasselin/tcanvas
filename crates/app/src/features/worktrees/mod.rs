@@ -317,7 +317,7 @@ mod tests {
 
     fn world_with_cards(cwds: &[&str]) -> (World, Vec<String>) {
         let mut w = World::default();
-        w.projects.push(Project { id: "p".into(), name: "shop".into(), color: [0; 3], rect: Rect::ZERO, cwd: Some("~/shop".into()) });
+        w.projects.push(Project { id: "p".into(), name: "shop".into(), color: [0; 3], rect: Rect::ZERO, cwd: Some("~/shop".into()), templates: Vec::new() });
         let mut ids = vec![];
         for cwd in cwds {
             let card = Card::new(Rect::from_min_size(Pos2::ZERO, Vec2::splat(10.0)), Some(cwd.to_string()));

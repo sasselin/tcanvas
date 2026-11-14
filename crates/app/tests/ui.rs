@@ -583,7 +583,7 @@ fn clicking_a_preview_zooms_in_on_it() {
 
 fn add_project(h: &mut Harness<'_, App>, name: &str, rect: Rect) -> String {
     let id = format!("p-{name}");
-    h.state_mut().world.projects.push(tcanvas::shell::world::Project { id: id.clone(), name: name.into(), color: [94, 129, 244], rect, cwd: None });
+    h.state_mut().world.projects.push(tcanvas::shell::world::Project { id: id.clone(), name: name.into(), color: [94, 129, 244], rect, cwd: None, templates: Vec::new() });
     id
 }
 
@@ -2591,6 +2591,189 @@ fn the_cleanup_window_in_english() {
     h.state_mut().dispatch(vec![cleaned(removal, None, Some(refusal))]);
     steps(&mut h, 2);
     assert!(h.query_by_label("⚠ /home/me/shop-taxes kept: uncommitted or untracked changes").is_some());
+}
+
+/// Group "api" (linked to `/home/me/api`), open, with the given command templates.
+fn group_with_templates(h: &mut Harness<'_, App>, templates: &[(&str, &str)]) {
+    linked_groups(h);
+    let p = h.state_mut().world.projects.iter_mut().find(|p| p.id == "p-api").unwrap();
+    p.templates = templates.iter().map(|(name, command)| tcanvas::shell::world::CommandTemplate { name: (*name).into(), command: (*command).into() }).collect();
+    steps(h, 2);
+    h.get_by_label("● api").click();
+    steps(h, 45);
+}
+
+fn newest_in_api(h: &Harness<'_, App>) -> Card {
+    h.state().world.members("p-api").last().unwrap().clone()
+}
+
+#[test]
+fn the_group_button_still_opens_a_plain_shell_in_one_click() {
+    let dir = temp_dir("plain-card");
+    let mut h = harness(&dir);
+    group_with_templates(&mut h, &[("Revue", "claude \"relis\"")]);
+    h.get_by_label("Nouveau terminal dans le groupe api").click();
+    steps(&mut h, 3);
+    let card = newest_in_api(&h);
+    assert_eq!(card.cwd.as_deref(), Some("/home/me/api"));
+    assert_eq!(h.state().cards.pending_command(&card.id), None, "no command: the plain shell, as before");
+    assert!(h.query_by_label("Revue").is_none(), "the templates stay out of the way");
+}
+
+#[test]
+fn the_arrow_starts_a_terminal_from_a_template_or_a_plain_shell() {
+    let dir = temp_dir("template-menu");
+    let mut h = harness(&dir);
+    let command = "claude \"relis l'API\"\necho $HOME";
+    group_with_templates(&mut h, &[("Revue", command), ("Logs", "tail -f log/app.log")]);
+    h.get_by_label("Modèles de terminal du groupe api").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Shell").is_some());
+    assert!(h.query_by_label("Logs").is_some());
+    assert!(h.query_by_label("Modifier les modèles…").is_some());
+    h.get_by_label("Revue").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Logs").is_none(), "the menu closes");
+    let card = newest_in_api(&h);
+    assert_eq!(card.cwd.as_deref(), Some("/home/me/api"), "in the group's folder");
+    assert_eq!(h.state().cards.pending_command(&card.id), Some(command), "the template's command, as typed");
+
+    h.get_by_label("Modèles de terminal du groupe api").click();
+    steps(&mut h, 2);
+    h.get_by_label("Shell").click();
+    steps(&mut h, 3);
+    let plain = newest_in_api(&h);
+    assert_ne!(plain.id, card.id);
+    assert_eq!(h.state().cards.pending_command(&plain.id), None);
+    assert_eq!(h.state().world.members("p-api").count(), 2);
+
+    // Closing the card forgets its command.
+    h.state_mut().dispatch(vec![Event::RemoveCard(card.id.clone())]);
+    assert_eq!(h.state().cards.pending_command(&card.id), None);
+}
+
+#[test]
+fn templates_are_added_edited_and_removed_in_their_dialog() {
+    use egui::accesskit::Role;
+    let dir = temp_dir("template-editor");
+    let mut h = harness(&dir);
+    group_with_templates(&mut h, &[("Vieux", "echo vieux")]);
+    h.get_by_label("Modèles de terminal du groupe api").click();
+    steps(&mut h, 2);
+    h.get_by_label("Modifier les modèles…").click();
+    steps(&mut h, 2);
+    assert!(h.state().projects_editing(), "the dialog keeps the keyboard");
+    assert!(h.query_by_label("Modèles de commande · api").is_some());
+    // Remove the old one, add a new one.
+    h.get_by_label("Retirer").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Retirer").is_none(), "removed");
+    // The dialog shrank: let it settle in its new place before clicking.
+    steps(&mut h, 4);
+    h.get_by_label("+ Ajouter un modèle").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Retirer").is_some(), "added");
+    // The search box of the toolbar comes first.
+    let name = h.get_all_by_role(Role::TextInput).last().unwrap();
+    name.focus();
+    name.type_text("Tests");
+    steps(&mut h, 2);
+    let command = h.get_by_role(Role::MultilineTextInput);
+    command.focus();
+    command.type_text("cargo test 'it''s' \"$X\"");
+    steps(&mut h, 2);
+    h.get_by_label("Enregistrer").click();
+    steps(&mut h, 2);
+    assert!(!h.state().projects_editing());
+    let templates = &h.state().world.project("p-api").unwrap().templates;
+    assert_eq!(templates.len(), 1, "{templates:?}");
+    assert_eq!((templates[0].name.as_str(), templates[0].command.as_str()), ("Tests", "cargo test 'it''s' \"$X\""));
+
+    // Cancel changes nothing.
+    h.get_by_label("Modèles de terminal du groupe api").click();
+    steps(&mut h, 2);
+    h.get_by_label("Modifier les modèles…").click();
+    steps(&mut h, 2);
+    h.get_by_label("Retirer").click();
+    steps(&mut h, 2);
+    h.get_by_label("Annuler").click();
+    steps(&mut h, 2);
+    assert_eq!(h.state().world.project("p-api").unwrap().templates.len(), 1);
+}
+
+#[test]
+fn the_template_editor_never_loses_typed_text_by_accident() {
+    use egui::accesskit::Role;
+    let dir = temp_dir("template-editor-keep");
+    let mut h = harness(&dir);
+    group_with_templates(&mut h, &[]);
+    h.get_by_label("Modèles de terminal du groupe api").click();
+    steps(&mut h, 2);
+    h.get_by_label("Modifier les modèles…").click();
+    steps(&mut h, 2);
+    // Unchanged: Escape just closes.
+    h.key_press(Key::Escape);
+    steps(&mut h, 2);
+    assert!(!h.state().projects_editing());
+
+    h.get_by_label("Modèles de terminal du groupe api").click();
+    steps(&mut h, 2);
+    h.get_by_label("Modifier les modèles…").click();
+    steps(&mut h, 2);
+    let command = h.get_by_role(Role::MultilineTextInput);
+    command.focus();
+    command.type_text("claude \"un long prompt\"");
+    steps(&mut h, 2);
+    // A click outside the dialog keeps it.
+    h.event(egui::Event::PointerButton { pos: pos2(5.0, 890.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+    h.event(egui::Event::PointerButton { pos: pos2(5.0, 890.0), button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+    steps(&mut h, 3);
+    assert!(h.state().projects_editing(), "still open after a click outside");
+    // Escape asks first; "Continuer" goes back to the text.
+    h.key_press(Key::Escape);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Abandonner les modifications de ces modèles ?").is_some());
+    h.get_by_label("Continuer").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Abandonner les modifications de ces modèles ?").is_none());
+    assert_eq!(h.get_by_role(Role::MultilineTextInput).value().as_deref(), Some("claude \"un long prompt\""));
+    // The Cancel button asks too, exactly as Escape does.
+    h.get_by_label("Annuler").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Abandonner les modifications de ces modèles ?").is_some());
+    h.get_by_label("Continuer").click();
+    steps(&mut h, 2);
+    assert!(h.state().projects_editing(), "Continuer keeps the editor open");
+    assert_eq!(h.get_by_role(Role::MultilineTextInput).value().as_deref(), Some("claude \"un long prompt\""));
+    h.get_by_label("Annuler").click();
+    steps(&mut h, 2);
+    h.get_by_label("Abandonner").click();
+    steps(&mut h, 2);
+    assert!(!h.state().projects_editing());
+    assert!(h.state().world.project("p-api").unwrap().templates.is_empty());
+    // Nothing typed: Cancel closes at once.
+    h.get_by_label("Modèles de terminal du groupe api").click();
+    steps(&mut h, 2);
+    h.get_by_label("Modifier les modèles…").click();
+    steps(&mut h, 2);
+    h.get_by_label("Annuler").click();
+    steps(&mut h, 2);
+    assert!(!h.state().projects_editing(), "Cancel with nothing typed closes directly");
+}
+
+#[test]
+fn the_template_menu_in_english() {
+    let dir = temp_dir("template-menu-en");
+    let mut h = harness_in(&dir, Lang::En);
+    group_with_templates(&mut h, &[]);
+    h.get_by_label("Terminal templates of group api").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Shell").is_some());
+    assert!(h.query_by_label("No template yet").is_some());
+    h.get_by_label("Edit templates…").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Command templates · api").is_some());
+    assert!(h.query_by_label("Save").is_some());
 }
 
 /// A second group, `blog`, with its own repository and a merged worktree.
