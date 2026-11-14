@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.9](https://github.com/sasselin/tcanvas/compare/v0.1.8...v0.1.9) - 2026-11-14
+
+### Added
+
+- Add a tasks panel per project ([#50](https://github.com/sasselin/tcanvas/pull/50))
+- Set up a new worktree from a recipe in the repository ([#48](https://github.com/sasselin/tcanvas/pull/48))
+- Create a worktree from a group ([#47](https://github.com/sasselin/tcanvas/pull/47))
+- Send text to a session from the app ([#46](https://github.com/sasselin/tcanvas/pull/46))
+- Start a card with a command ([#45](https://github.com/sasselin/tcanvas/pull/45))
+- Clean up merged worktrees and branches ([#42](https://github.com/sasselin/tcanvas/pull/42))
+- Show a repository's worktrees and the branch of each card ([#36](https://github.com/sasselin/tcanvas/pull/36))
+- Show the coding agent's last prompt on its card ([#34](https://github.com/sasselin/tcanvas/pull/34))
+
+### Fixed
+
+- *(agent)* Keep exit codes and durations right when the wall clock steps ([#43](https://github.com/sasselin/tcanvas/pull/43))
+
 ## [0.1.8](https://github.com/sasselin/tcanvas/compare/v0.1.7...v0.1.8) - 2026-11-12
 
 ### Fixed
