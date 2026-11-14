@@ -583,7 +583,16 @@ fn clicking_a_preview_zooms_in_on_it() {
 
 fn add_project(h: &mut Harness<'_, App>, name: &str, rect: Rect) -> String {
     let id = format!("p-{name}");
-    h.state_mut().world.projects.push(tcanvas::shell::world::Project { id: id.clone(), name: name.into(), color: [94, 129, 244], rect, cwd: None, templates: Vec::new(), messages: Vec::new() });
+    h.state_mut().world.projects.push(tcanvas::shell::world::Project {
+        id: id.clone(),
+        name: name.into(),
+        color: [94, 129, 244],
+        rect,
+        cwd: None,
+        templates: Vec::new(),
+        messages: Vec::new(),
+        worktree_location: None,
+    });
     id
 }
 
@@ -2917,7 +2926,7 @@ fn a_card_that_cannot_take_a_message_says_so_and_keeps_the_text() {
     assert!(h.query_by_label("Texte tapé dans « srv » mais pas validé : son volet affiche un écran tmux (clock-mode) : fermez-le d'abord.").is_some());
 
     // Still starting (its start command not handed over yet): refused too.
-    h.state_mut().dispatch(vec![Event::NewCard { at: None, project: Some("p-api".into()), command: Some("claude".into()) }]);
+    h.state_mut().dispatch(vec![Event::NewCard { at: None, project: Some("p-api".into()), command: Some("claude".into()), cwd: None }]);
     steps(&mut h, 45);
     let starting = h.state().world.members("p-api").last().unwrap().id.clone();
     h.state_mut().dispatch(vec![Event::SendText { card: starting.clone(), text: "go".into(), enter: true }]);
@@ -3066,6 +3075,388 @@ fn keys_and_clicks_still_do_what_they_did() {
     right_click_at(&mut h, body);
     assert_eq!(h.state().cards.written(&id), b"\x03a\rbclip", "right-click: paste");
     assert!(h.query_by_label("Envoyer un message").is_none(), "no menu in the terminal");
+}
+
+// --- New worktree ----------------------------------------------------------------------------
+
+/// The repository of group `shop` with only its main checkout: the strip is hidden.
+fn only_main(key: &str) -> Event {
+    let list = protocol::WorktreeList {
+        key: key.into(),
+        repo: Some("/home/me/shop".into()),
+        default_branch: Some("main".into()),
+        worktrees: vec![worktree("/home/me/shop", true, "main")],
+        merged_branches: vec![],
+    };
+    Event::Agent(AgentEvent::Worktrees(list))
+}
+
+/// The plan requests sent so far: (id, folder, location).
+fn sent_plans(h: &Harness<'_, App>) -> Vec<(u64, String, Option<String>)> {
+    h.state()
+        .agent_sent()
+        .iter()
+        .filter_map(|c| match c {
+            protocol::AgentCmd::PlanWorktree { id, key, folder, location } if key == "p-shop" => Some((*id, folder.clone(), location.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn sent_creations(h: &Harness<'_, App>) -> Vec<(u64, protocol::CreateWorktree)> {
+    h.state()
+        .agent_sent()
+        .iter()
+        .filter_map(|c| match c {
+            protocol::AgentCmd::CreateWorktree { id, key, request } if key == "p-shop" => Some((*id, request.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The agent's answer to the last plan request: `main` checked out in the main checkout, `topic`
+/// free, the folder free; `change` adjusts it.
+fn answer_plan(h: &mut Harness<'_, App>, change: impl FnOnce(&mut protocol::WorktreePlan)) {
+    settle(h);
+    let (id, folder, location) = sent_plans(h).pop().expect("a plan was asked");
+    let mut plan = protocol::WorktreePlan {
+        id,
+        key: "p-shop".into(),
+        branches: vec![protocol::LocalBranch { name: "main".into(), checked_out: Some("/home/me/shop".into()) }, protocol::LocalBranch { name: "topic".into(), checked_out: None }],
+        current_branch: Some("main".into()),
+        default_branch: Some("main".into()),
+        path: Some(format!("/home/me/shop/.claude/worktrees/{folder}")),
+        folder,
+        location,
+        problem: None,
+        free_folder: None,
+        exclude: None,
+    };
+    change(&mut plan);
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreePlan(Box::new(plan)))]);
+    steps(h, 2);
+}
+
+/// Group `shop` open, its repository with only the main checkout, the dialog opened from the
+/// arrow next to "+ Terminal".
+fn new_worktree_dialog(h: &mut Harness<'_, App>, menu: &str, item: &str) {
+    shop_group(h);
+    h.state_mut().dispatch(vec![only_main("p-shop")]);
+    steps(h, 3);
+    assert!(h.query_by_label_contains("worktrees").is_none(), "no strip with only the main checkout");
+    h.get_by_label(menu).click();
+    steps(h, 2);
+    h.get_by_label(item).click();
+    steps(h, 3);
+    assert!(h.state().worktrees.create_open());
+    h.event(egui::Event::PointerGone);
+    steps(h, 1);
+}
+
+/// The branch name field: the toolbar's search box comes first, the location field last.
+fn type_branch(h: &mut Harness<'_, App>, text: &str) {
+    use egui::accesskit::Role;
+    let inputs = h.get_all_by_role(Role::TextInput).collect::<Vec<_>>();
+    let branch = &inputs[inputs.len() - 2];
+    branch.focus();
+    branch.type_text(text);
+    steps(h, 3);
+    settle(h);
+}
+
+/// Lets the dialog's pause after a change pass, so it asks the agent about the new folder.
+fn settle(h: &mut Harness<'_, App>) {
+    steps(h, 2);
+    std::thread::sleep(tcanvas::features::worktrees::create::PLAN_DEBOUNCE + std::time::Duration::from_millis(50));
+    steps(h, 3);
+}
+
+/// The drop-down list showing `value`.
+fn combo<'a>(h: &'a Harness<'_, App>, value: &str) -> egui_kittest::Node<'a> {
+    use egui::accesskit::Role;
+    h.get_all_by_role(Role::ComboBox).find(|n| n.value().as_deref() == Some(value)).unwrap_or_else(|| panic!("no list showing {value}"))
+}
+
+/// Empties the branch name field.
+fn clear_branch(h: &mut Harness<'_, App>) {
+    use egui::accesskit::Role;
+    let inputs = h.get_all_by_role(Role::TextInput).collect::<Vec<_>>();
+    inputs[inputs.len() - 2].focus();
+    h.step();
+    h.key_press_modifiers(Modifiers::COMMAND, Key::A);
+    h.step();
+    h.key_press(Key::Backspace);
+    steps(h, 3);
+}
+
+#[test]
+fn a_worktree_is_created_from_the_group_and_a_card_opens_in_it() {
+    let dir = temp_dir("new-worktree");
+    let mut h = harness(&dir);
+    new_worktree_dialog(&mut h, "Modèles de terminal du groupe shop", "⎇ Nouveau worktree…");
+    assert!(h.query_by_label("Nouveau worktree dans shop").is_some());
+    assert!(h.state().worktrees.has_dialog(), "the dialog keeps the keyboard");
+    // The agent is asked right away (branches, folder), for the default location.
+    assert_eq!(sent_plans(&h).iter().map(|(_, f, l)| (f.as_str(), l.clone())).collect::<Vec<_>>(), vec![("worktree", None)]);
+    assert!(h.query_by_label("Interrogation de l'agent…").is_some());
+    answer_plan(&mut h, |_| {});
+    combo(&h, "main (par défaut)");
+    // Nothing typed: nothing to create, nothing said.
+    h.get_by_label("Créer").click();
+    steps(&mut h, 2);
+    assert!(sent_creations(&h).is_empty());
+    assert!(h.query_by_label("Obligatoire").is_none());
+
+    // An invalid name is said next to the field, and nothing can be sent.
+    type_branch(&mut h, "-x");
+    assert!(h.query_by_label("Nom de branche invalide : -x").is_some());
+    h.get_by_label("Créer").click();
+    steps(&mut h, 2);
+    assert!(sent_creations(&h).is_empty());
+    clear_branch(&mut h);
+    type_branch(&mut h, "feat/factures");
+    assert_eq!(h.state().worktrees.create_form().map(|f| f.folder), Some("feat-factures".into()));
+    // The agent's answer for that folder: free, but git does not ignore it.
+    assert_eq!(sent_plans(&h).last().map(|(_, f, _)| f.clone()), Some("feat-factures".into()));
+    answer_plan(&mut h, |p| p.exclude = Some("/.claude/worktrees/".into()));
+    assert!(h.query_by_label("/home/me/shop/.claude/worktrees/feat-factures").is_some());
+    assert!(h.query_by_label("⚠ git n'ignore pas ce dossier : la copie principale le listerait comme non suivi.").is_some());
+    // Ticked by default: nothing to click, the request carries it.
+    let exclude = "Ajouter /.claude/worktrees/ au .git/info/exclude du dépôt (propre à ce clone, jamais commité)";
+    assert!(h.query_by_label(exclude).is_some());
+
+    h.get_by_label("Créer").click();
+    steps(&mut h, 2);
+    let creations = sent_creations(&h);
+    let expected =
+        protocol::CreateWorktree { branch: protocol::WorktreeBranch::New { name: "feat/factures".into(), base: "main".into() }, folder: "feat-factures".into(), location: None, exclude: true };
+    assert_eq!(creations.iter().map(|(_, r)| r.clone()).collect::<Vec<_>>(), vec![expected.clone()]);
+    assert!(h.query_by_label("Création…").is_some());
+    h.get_by_label("Créer").click();
+    steps(&mut h, 2);
+    assert_eq!(sent_creations(&h).len(), 1, "sent once");
+
+    // Refused by the agent: said next to the branch, nothing created.
+    let cards = h.state().world.cards.len();
+    let problem = protocol::Problem::BranchExists { branch: "feat/factures".into() };
+    let refused = Event::Agent(AgentEvent::WorktreeCreated { id: creations[0].0, key: "p-shop".into(), path: None, problem: Some(problem), excluded: false });
+    h.state_mut().dispatch(vec![refused]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("La branche feat/factures existe déjà : choisir « Branche existante » pour l'utiliser").is_some());
+    assert_eq!(h.state().world.cards.len(), cards);
+    assert!(h.state().worktrees.create_open());
+
+    // Created: the card opens in the new folder, in the group, next to the others.
+    answer_plan(&mut h, |p| p.exclude = Some("/.claude/worktrees/".into()));
+    h.get_by_label("Créer").click();
+    steps(&mut h, 2);
+    let (id, request) = sent_creations(&h).pop().unwrap();
+    assert_eq!(request, expected, "the same request, sent again");
+    let path = "/home/me/shop/.claude/worktrees/feat-factures";
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: Some(path.into()), problem: None, excluded: true })]);
+    steps(&mut h, 3);
+    assert!(!h.state().worktrees.create_open(), "closed");
+    let world = &h.state().world;
+    assert_eq!(world.cards.len(), cards + 1);
+    let card = world.cards.iter().find(|c| c.cwd.as_deref() == Some(path)).expect("a card in the new worktree");
+    assert_eq!(card.project.as_deref(), Some("p-shop"));
+    let others = world.members("p-shop").filter(|c| c.id != card.id).map(|c| c.rect).reduce(|a, b| a.union(b)).unwrap();
+    assert!(card.rect.min.x >= others.max.x, "right of the group's other cards: {:?} / {others:?}", card.rect);
+    assert_eq!(h.state().cards.pending_command(&card.id), None, "a plain shell");
+    let card = card.id.clone();
+
+    // The agent's next scan lists it: the strip shows, with the card under it.
+    let Event::Agent(AgentEvent::Worktrees(mut list)) = only_main("p-shop") else { unreachable!() };
+    list.worktrees.push(worktree(path, false, "feat/factures"));
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::Worktrees(list))]);
+    steps(&mut h, 3);
+    assert!(h.query_by_label("⎇ 2 worktrees").is_some());
+    assert_eq!(h.state().world.card_worktrees.get(&card).map(|w| w.path.as_str()), Some(path));
+    assert!(h.query_all_by_label("feat-factures").count() >= 2, "the worktree in the strip, and its terminal (named after its folder) under it");
+}
+
+#[test]
+fn the_dialog_offers_a_free_folder_an_existing_branch_and_refuses_a_bad_location() {
+    use egui::accesskit::Role;
+    let dir = temp_dir("new-worktree-errors");
+    let mut h = harness(&dir);
+    // From the strip this time: the repository has linked worktrees.
+    shop_group(&mut h);
+    h.state_mut().world.projects[0].templates = vec![tcanvas::shell::world::CommandTemplate { name: "Claude".into(), command: "claude".into() }];
+    h.state_mut().dispatch(vec![shop_worktrees("p-shop")]);
+    steps(&mut h, 3);
+    h.get_by_label("+ Worktree").click();
+    steps(&mut h, 3);
+    assert!(h.state().worktrees.create_open());
+    h.event(egui::Event::PointerGone);
+    answer_plan(&mut h, |_| {});
+
+    // The folder exists: a free one is proposed.
+    type_branch(&mut h, "invoices");
+    answer_plan(&mut h, |p| {
+        p.path = None;
+        p.problem = Some(protocol::Problem::DestinationExists { path: "/home/me/shop/.claude/worktrees/invoices".into() });
+        p.free_folder = Some("invoices-2".into());
+    });
+    assert!(h.query_by_label("/home/me/shop/.claude/worktrees/invoices existe déjà").is_some());
+    h.get_by_label("Créer").click();
+    steps(&mut h, 2);
+    assert!(sent_creations(&h).is_empty(), "nothing created while the folder is taken");
+    h.get_by_label("Utiliser invoices-2").click();
+    settle(&mut h);
+    assert_eq!(sent_plans(&h).last().map(|(_, f, _)| f.clone()), Some("invoices-2".into()));
+    answer_plan(&mut h, |_| {});
+    assert!(h.query_by_label("/home/me/shop/.claude/worktrees/invoices-2").is_some());
+
+    // A location that breaks the rules: said next to it, nothing asked for it.
+    let asked = sent_plans(&h).len();
+    let location = h.get_all_by_role(Role::TextInput).last().unwrap();
+    location.focus();
+    location.type_text("/..");
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Emplacement refusé : un seul ../ permis, au début, et ni ./ ni partie vide").is_some());
+    assert_eq!(sent_plans(&h).len(), asked);
+    h.get_by_label("Par défaut").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label_contains("Emplacement refusé").is_none());
+
+    // An existing branch: only the free ones are offered; a template to start with.
+    h.get_by_label("Branche existante").click();
+    steps(&mut h, 2);
+    answer_plan(&mut h, |_| {});
+    combo(&h, "Choisir une branche").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("main").is_none(), "checked out: not offered");
+    h.get_by_label("topic").click();
+    steps(&mut h, 3);
+    answer_plan(&mut h, |_| {});
+    combo(&h, "Shell").click();
+    steps(&mut h, 2);
+    h.get_by_label("Claude").click();
+    steps(&mut h, 2);
+    h.get_by_label("Créer").click();
+    steps(&mut h, 2);
+    let (id, request) = sent_creations(&h).pop().expect("sent");
+    assert_eq!(request.branch, protocol::WorktreeBranch::Existing { name: "topic".into() });
+    assert_eq!((request.folder.as_str(), request.exclude), ("topic", false));
+    // Checked out elsewhere meanwhile: the agent's refusal, next to the branch.
+    let problem = protocol::Problem::BranchCheckedOut { branch: "topic".into(), path: "/home/me/shop-topic".into() };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: None, problem: Some(problem), excluded: false })]);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("La branche topic est déjà utilisée dans /home/me/shop-topic").is_some());
+    // Escape closes it.
+    h.key_press(Key::Escape);
+    steps(&mut h, 2);
+    assert!(!h.state().worktrees.create_open());
+}
+
+#[test]
+fn the_new_worktree_dialog_in_english() {
+    let dir = temp_dir("new-worktree-en");
+    let mut h = harness_in(&dir, Lang::En);
+    new_worktree_dialog(&mut h, "Terminal templates of group shop", "⎇ New worktree…");
+    answer_plan(&mut h, |p| p.exclude = Some("/.claude/worktrees/".into()));
+    for label in ["New worktree in shop", "New branch", "Existing branch", "Branch", "From", "Location", "Folder", "Start with", "Create", "Cancel"] {
+        assert!(h.query_by_label(label).is_some(), "{label} missing");
+    }
+    combo(&h, "main (default)");
+    assert!(h.query_by_label("⚠ git does not ignore this folder: the main checkout would list it as untracked.").is_some());
+    type_branch(&mut h, "a..b");
+    assert!(h.query_by_label("Not a valid branch name: a..b").is_some());
+    h.get_by_label("Cancel").click();
+    steps(&mut h, 2);
+    assert!(!h.state().worktrees.create_open());
+}
+
+#[test]
+fn the_group_menus_offer_a_worktree_only_in_a_git_repository() {
+    let dir = temp_dir("new-worktree-menu");
+    let mut h = harness(&dir);
+    shop_group(&mut h);
+    h.get_by_label("Modèles de terminal du groupe shop").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("⎇ Nouveau worktree…").is_none(), "not known to be in git yet");
+    h.key_press(Key::Escape);
+    steps(&mut h, 2);
+    h.state_mut().dispatch(vec![only_main("p-shop")]);
+    steps(&mut h, 2);
+    // Right-click on the group's name.
+    let arrow = h.get_by_label("Modèles de terminal du groupe shop").rect();
+    let folder = h.get_by_label("Dossier du groupe shop").rect();
+    right_click_at(&mut h, pos2(folder.min.x - 40.0, arrow.center().y));
+    h.get_by_label("⎇ Nouveau worktree…").click();
+    steps(&mut h, 2);
+    assert!(h.state().worktrees.create_open());
+}
+
+#[test]
+fn closing_the_dialog_does_not_stop_a_creation_and_escape_closes_a_list_first() {
+    let dir = temp_dir("new-worktree-close");
+    let mut h = harness(&dir);
+    new_worktree_dialog(&mut h, "Modèles de terminal du groupe shop", "⎇ Nouveau worktree…");
+    answer_plan(&mut h, |_| {});
+    // Escape with the base list open: the list closes, the dialog stays.
+    combo(&h, "main (par défaut)").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("topic").is_some(), "the list is open");
+    h.key_press(Key::Escape);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("topic").is_none() && h.state().worktrees.create_open(), "only the list closed");
+
+    type_branch(&mut h, "lent");
+    answer_plan(&mut h, |_| {});
+    h.get_by_label("Créer").click();
+    steps(&mut h, 2);
+    let (id, _) = sent_creations(&h).pop().expect("sent");
+    assert!(h.query_by_label("Fermer cette fenêtre ne l'arrête pas : le terminal s'ouvre quand le worktree est prêt.").is_some());
+    // The agent says git takes long: said, and the dialog keeps waiting.
+    let still = Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: None, problem: Some(protocol::Problem::GitStillRunning { secs: 60 }), excluded: false });
+    h.state_mut().dispatch(vec![still]);
+    steps(&mut h, 2);
+    assert!(h.query_by_label_contains("git travaille encore après").is_some());
+    // Closed while it runs: the creation goes on.
+    h.get_by_label("Annuler").click();
+    steps(&mut h, 2);
+    assert!(!h.state().worktrees.create_open());
+    assert_eq!(h.state().worktrees.creations_waiting(), 1);
+    let cards = h.state().world.cards.len();
+    let path = "/home/me/shop/.claude/worktrees/lent";
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreeCreated { id, key: "p-shop".into(), path: Some(path.into()), problem: None, excluded: false })]);
+    steps(&mut h, 3);
+    let world = &h.state().world;
+    assert_eq!(world.cards.len(), cards + 1);
+    assert!(world.cards.iter().any(|c| c.cwd.as_deref() == Some(path) && c.project.as_deref() == Some("p-shop")), "its card opened anyway");
+    assert_eq!(h.state().worktrees.creations_waiting(), 0);
+}
+
+#[test]
+fn without_a_default_branch_the_dialog_says_to_pick_a_base() {
+    let dir = temp_dir("new-worktree-no-base");
+    let mut h = harness(&dir);
+    new_worktree_dialog(&mut h, "Modèles de terminal du groupe shop", "⎇ Nouveau worktree…");
+    // A detached main checkout with no main/master: no default branch.
+    answer_plan(&mut h, |p| {
+        p.default_branch = None;
+        p.current_branch = None;
+    });
+    let text = "Pas de branche par défaut d'où partir (dépôt sans commit, ou copie principale détachée) : choisir une base.";
+    assert!(h.query_by_label(text).is_some());
+    type_branch(&mut h, "x");
+    answer_plan(&mut h, |p| {
+        p.default_branch = None;
+        p.current_branch = None;
+    });
+    combo(&h, "").click();
+    steps(&mut h, 2);
+    h.get_by_label("topic").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label(text).is_none(), "a base picked");
+    h.event(egui::Event::PointerGone);
+    steps(&mut h, 2);
+    h.get_by_label("Créer").click();
+    steps(&mut h, 2);
+    let (_, request) = sent_creations(&h).pop().expect("sent");
+    assert_eq!(request.branch, protocol::WorktreeBranch::New { name: "x".into(), base: "topic".into() });
 }
 
 /// A second group, `blog`, with its own repository and a merged worktree.

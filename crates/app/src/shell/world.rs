@@ -124,6 +124,10 @@ pub struct Project {
     /// Texts offered in the menu of the group's terminals (missing from older layouts).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub messages: Vec<QuickMessage>,
+    /// Where the group's new worktrees go: a template (`protocol::parse_location`); `None`:
+    /// `protocol::DEFAULT_WORKTREE_LOCATION` (missing from older layouts).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_location: Option<String>,
 }
 
 /// A named command line a group's new terminal can start with.
@@ -211,6 +215,9 @@ pub struct World {
     pub change_counts: BTreeMap<ProjectId, usize>,
     /// The git worktree each card's folder is in (kept by the `worktrees` slice).
     pub card_worktrees: BTreeMap<CardId, CardWorktree>,
+    /// Groups whose folder is in a git repository (kept by the `worktrees` slice): they offer
+    /// to create a worktree.
+    pub git_groups: std::collections::BTreeSet<ProjectId>,
     pub window_focused: bool,
     /// Incremented on every change that needs saving.
     pub revision: u64,
@@ -584,7 +591,7 @@ mod tests {
     fn linked_groups_follow_the_whole_chain_sorted_by_name() {
         let mut w = World::default();
         for (id, name) in [("s", "shop"), ("w", "Wordpress"), ("o", "outils"), ("x", "alone")] {
-            w.projects.push(Project { id: id.into(), name: name.into(), color: [0; 3], rect: Rect::ZERO, cwd: None, templates: Vec::new(), messages: Vec::new() });
+            w.projects.push(Project { id: id.into(), name: name.into(), color: [0; 3], rect: Rect::ZERO, cwd: None, templates: Vec::new(), messages: Vec::new(), worktree_location: None });
         }
         let wire = |a: &str, b: &str| Wire { from: a.into(), to: b.into() };
         w.wires = vec![wire("s", "w"), wire("w", "o"), wire("o", "gone")];
@@ -627,7 +634,7 @@ mod tests {
     }
 
     fn project(id: &str, rect: Rect) -> Project {
-        Project { id: id.into(), name: id.into(), color: [0; 3], rect, cwd: None, templates: Vec::new(), messages: Vec::new() }
+        Project { id: id.into(), name: id.into(), color: [0; 3], rect, cwd: None, templates: Vec::new(), messages: Vec::new(), worktree_location: None }
     }
 
     fn member(x: f32, y: f32, project: &str) -> Card {

@@ -1,7 +1,7 @@
 //! Modified files of the folders linked to projects: list (with +/− relative to HEAD) and diffs.
 //! Runs on its own thread: `git` never delays watching the terminals.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protocol::{AgentEvent, ChangeKind, ChangeSet, CommitInfo, DirEntry, DirListing, FileChange, Problem, WorktreeList};
 
-use super::{cleanup, tmux, worktrees};
+use super::{cleanup, create, tmux, worktrees};
 
 const SCAN_EVERY: Duration = Duration::from_secs(2);
 const MAX_FILES: usize = 500;
@@ -56,15 +56,25 @@ pub enum Cmd {
         key: String,
         paths: Vec<String>,
     },
+    PlanWorktree {
+        id: u64,
+        key: String,
+        folder: String,
+        location: Option<String>,
+    },
+    CreateWorktree {
+        id: u64,
+        key: String,
+        request: protocol::CreateWorktree,
+    },
     /// Scan again now (a cleanup just changed the repository).
     Rescan,
 }
 
-/// A cleanup to run on the cleanup thread.
-struct Job {
-    key: String,
-    dir: PathBuf,
-    action: protocol::Cleanup,
+/// A command that writes, run on the cleanup thread (one at a time).
+enum Job {
+    Cleanup { key: String, dir: PathBuf, action: protocol::Cleanup },
+    Create { id: u64, key: String, dir: PathBuf, request: protocol::CreateWorktree },
 }
 
 /// A worktree to measure on the size thread.
@@ -125,36 +135,76 @@ fn spawn_measurer(send: Sink, measuring: Measuring) -> Sender<SizeJob> {
     tx
 }
 
-/// Cleanups run one at a time on their own thread (deleting a big folder takes a while; diffs
-/// and scans go on meanwhile), then ask for a scan so the lists follow right away. What uses the
-/// folders (panes, processes, watched folders) is read by `cleanup::run` right before it writes,
-/// after its slow checks.
+/// Cleanups and worktree creations run one at a time on their own thread (deleting a big folder,
+/// or checking out a big one, takes a while; diffs and scans go on meanwhile), then ask for a scan
+/// so the lists follow right away. What uses the folders (panes, processes, watched folders) is
+/// read by `cleanup::run` right before it writes, after its slow checks.
 fn spawn_cleaner(send: Sink, rescan: Sender<Cmd>, paths: WatchedPaths) -> Sender<Job> {
     let (tx, rx) = mpsc::channel::<Job>();
     thread::spawn(move || {
         for job in rx {
-            let in_use = || {
-                let raw = paths.lock().map(|p| p.clone()).unwrap_or_default();
-                let watched = raw.iter().filter_map(|p| resolve(p).ok()).map(|d| d.to_string_lossy().into_owned()).collect();
-                cleanup::InUse { panes: tmux::pane_paths(), processes: cleanup::process_cwds(), watched }
-            };
-            let (deleted_branch, problem) = match cleanup::run(&job.dir, &job.action, &in_use) {
-                Ok(branch) => (branch, None),
-                Err(p) => (None, Some(p)),
-            };
-            send(&AgentEvent::Cleaned { key: job.key, action: job.action, deleted_branch, problem });
+            match job {
+                Job::Cleanup { key, dir, action } => {
+                    let in_use = || {
+                        let raw = paths.lock().map(|p| p.clone()).unwrap_or_default();
+                        let watched = raw.iter().filter_map(|p| resolve(p).ok()).map(|d| d.to_string_lossy().into_owned()).collect();
+                        cleanup::InUse { panes: tmux::pane_paths(), processes: cleanup::process_cwds(), watched }
+                    };
+                    let (deleted_branch, problem) = match cleanup::run(&dir, &action, &in_use) {
+                        Ok(branch) => (branch, None),
+                        Err(p) => (None, Some(p)),
+                    };
+                    send(&AgentEvent::Cleaned { key, action, deleted_branch, problem });
+                }
+                Job::Create { id, key, dir, request } => {
+                    // Still running past the time limit: the final answer, with the same id,
+                    // follows when git ends, from another thread (the next jobs do not wait).
+                    let (late_send, late_rescan, late_key) = (send.clone(), rescan.clone(), key.clone());
+                    let late = move |result| {
+                        late_send(&created_event(id, late_key, result));
+                        let _ = late_rescan.send(Cmd::Rescan);
+                    };
+                    send(&created_event(id, key, create::run(&dir, &request, late)));
+                }
+            }
             let _ = rescan.send(Cmd::Rescan);
         }
     });
     tx
 }
 
+fn created_event(id: u64, key: String, result: create::Created) -> AgentEvent {
+    match result {
+        Ok((path, excluded)) => AgentEvent::WorktreeCreated { id, key, path: Some(path), problem: None, excluded },
+        Err(problem) => AgentEvent::WorktreeCreated { id, key, path: None, problem: Some(problem), excluded: false },
+    }
+}
+
+/// A plan request for which a newer one of the same key is already waiting: its answer would be
+/// stale before it is sent, so it is dropped (the app only takes the answer to its last one).
+fn superseded(cmd: &Cmd, waiting: &VecDeque<Cmd>) -> bool {
+    let Cmd::PlanWorktree { key, .. } = cmd else { return false };
+    waiting.iter().any(|c| matches!(c, Cmd::PlanWorktree { key: k, .. } if k == key))
+}
+
 fn run(rx: Receiver<Cmd>, send: Sink, workers: Workers) {
     let mut watched: HashMap<String, Watched> = HashMap::new();
     let mut cache = worktrees::Cache::default();
     let mut next_scan = Instant::now();
+    // Commands taken from the channel early, to look for newer plan requests.
+    let mut waiting: VecDeque<Cmd> = VecDeque::new();
     loop {
-        match rx.recv_timeout(next_scan.saturating_duration_since(Instant::now())) {
+        let received = match waiting.pop_front() {
+            Some(cmd) => Ok(cmd),
+            None => rx.recv_timeout(next_scan.saturating_duration_since(Instant::now())),
+        };
+        if let Ok(cmd @ Cmd::PlanWorktree { .. }) = &received {
+            waiting.extend(rx.try_iter());
+            if superseded(cmd, &waiting) {
+                continue;
+            }
+        }
+        match received {
             Ok(Cmd::Watch { key, path }) => {
                 if watched.get(&key).is_none_or(|w| w.path != path) {
                     watched.insert(key.clone(), Watched { path, since: unix_now(), last_sent: None, last_worktrees: None });
@@ -180,7 +230,7 @@ fn run(rx: Receiver<Cmd>, send: Sink, workers: Workers) {
             Ok(Cmd::List { path }) => send(&AgentEvent::DirListing(list_dir(&path))),
             Ok(Cmd::Cleanup { key, action }) => match watched.get(&key).map(|w| resolve(&w.path)) {
                 Some(Ok(dir)) => {
-                    let _ = workers.jobs.send(Job { key, dir, action });
+                    let _ = workers.jobs.send(Job::Cleanup { key, dir, action });
                 }
                 Some(Err(problem)) => send(&AgentEvent::Cleaned { key, action, deleted_branch: None, problem: Some(problem) }),
                 None => send(&AgentEvent::Cleaned { key, action, deleted_branch: None, problem: Some(Problem::NotAGitRepo) }),
@@ -196,6 +246,22 @@ fn run(rx: Receiver<Cmd>, send: Sink, workers: Workers) {
                     }
                 }
             }
+            Ok(Cmd::PlanWorktree { id, key, folder, location }) => {
+                // A few quick read-only git calls: answered right here.
+                let plan = match watched.get(&key).map(|w| resolve(&w.path)) {
+                    Some(Ok(dir)) => create::plan(&dir, id, &key, &folder, location.as_deref()),
+                    Some(Err(problem)) => create::refused_plan(id, &key, &folder, location.as_deref(), problem),
+                    None => create::refused_plan(id, &key, &folder, location.as_deref(), Problem::NotAGitRepo),
+                };
+                send(&AgentEvent::WorktreePlan(Box::new(plan)));
+            }
+            Ok(Cmd::CreateWorktree { id, key, request }) => match watched.get(&key).map(|w| resolve(&w.path)) {
+                Some(Ok(dir)) => {
+                    let _ = workers.jobs.send(Job::Create { id, key, dir, request });
+                }
+                Some(Err(problem)) => send(&AgentEvent::WorktreeCreated { id, key, path: None, problem: Some(problem), excluded: false }),
+                None => send(&AgentEvent::WorktreeCreated { id, key, path: None, problem: Some(Problem::NotAGitRepo), excluded: false }),
+            },
             Ok(Cmd::Rescan) => next_scan = Instant::now(),
             Err(RecvTimeoutError::Timeout) => {
                 let mut inputs = Vec::new();
@@ -663,6 +729,16 @@ mod tests {
         let file = root.join("file.txt").display().to_string();
         assert_eq!(list_dir(&file).error, Some(Problem::NotADir { path: file }));
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_plan_request_is_dropped_when_a_newer_one_waits() {
+        let plan = |id: u64, key: &str| Cmd::PlanWorktree { id, key: key.into(), folder: "f".into(), location: None };
+        let waiting: VecDeque<Cmd> = VecDeque::from([plan(2, "shop"), Cmd::Rescan, plan(3, "blog")]);
+        assert!(superseded(&plan(1, "shop"), &waiting), "a newer one for the same group");
+        assert!(!superseded(&plan(1, "other"), &waiting), "another group's");
+        assert!(!superseded(&plan(3, "shop"), &VecDeque::from([Cmd::Rescan])), "the last one is answered");
+        assert!(!superseded(&Cmd::Rescan, &waiting), "only plans are dropped");
     }
 
     #[test]

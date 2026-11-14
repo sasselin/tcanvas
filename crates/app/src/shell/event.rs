@@ -71,11 +71,21 @@ pub enum SendOutcome {
 pub enum Event {
     /// New terminal; `at` in world coordinates (otherwise at the view center). `command`: a
     /// command line its shell runs once, in its folder, when its session is created (`None`:
-    /// just the shell).
+    /// just the shell). `cwd`: its folder (`None`: the group's linked folder).
     NewCard {
         at: Option<Pos2>,
         project: Option<ProjectId>,
         command: Option<String>,
+        cwd: Option<String>,
+    },
+    /// Sets where a group's new worktrees go (`None`: the default location).
+    SetProjectWorktreeLocation(ProjectId, Option<String>),
+    /// Opens the new-worktree dialog of a group.
+    NewWorktree(ProjectId),
+    /// A toast about nothing on the canvas (texts already translated).
+    Inform {
+        title: String,
+        body: String,
     },
     /// Replaces a group's command templates.
     SetProjectTemplates(ProjectId, Vec<CommandTemplate>),

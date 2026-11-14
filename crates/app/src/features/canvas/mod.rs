@@ -73,7 +73,7 @@ impl Canvas {
             if let Some(p) = bg.interact_pointer_pos() {
                 let at = world.camera.to_world(p, vp);
                 let project = project_at(&world.projects, at).filter(|p| world.shows_project(p)).map(|p| p.id.clone()).or(world.space.clone());
-                events.push(Event::NewCard { at: Some(at), project, command: None });
+                events.push(Event::NewCard { at: Some(at), project, command: None, cwd: None });
             }
         } else if bg.clicked() {
             events.push(Event::Unfocus);

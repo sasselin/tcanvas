@@ -215,10 +215,11 @@ fn scenario(dir: &Path, folder: &str, home: &str, socket: &str, strict: bool) {
         cwd: Some(folder.into()),
         templates: Vec::new(),
         messages: Vec::new(),
+        worktree_location: None,
     };
     h.state_mut().world.projects.push(group);
     wait(&mut h, "agent connected", 30, |app| matches!(app.agent_state(), tcanvas::features::agent_link::LinkState::Connected { .. }));
-    h.state_mut().dispatch(vec![Event::NewCard { at: None, project: Some("send".into()), command: None }]);
+    h.state_mut().dispatch(vec![Event::NewCard { at: None, project: Some("send".into()), command: None, cwd: None }]);
     let id = h.state().world.cards[0].id.clone();
     // 0. Not up yet (no shell shown, session not seen): refused, kept.
     assert_eq!(send(&mut h, &id, "echo too-early > early.txt", true), SendOutcome::Refused(SendRefusal::Starting));

@@ -190,6 +190,7 @@ mod tests {
             cwd: Some("~/api".into()),
             templates: sample_templates(),
             messages: sample_messages(),
+            worktree_location: Some("../{repo}-{name}".into()),
         });
         w.projects.push(Project {
             id: "p2".into(),
@@ -199,6 +200,7 @@ mod tests {
             cwd: None,
             templates: Vec::new(),
             messages: Vec::new(),
+            worktree_location: None,
         });
         w.wires.push(Wire { from: "p1".into(), to: "p2".into() });
         w.add_card(a);
@@ -223,6 +225,7 @@ mod tests {
         assert_eq!(loaded.projects, w.projects);
         assert_eq!(loaded.projects[0].templates, sample_templates(), "command templates are kept as typed");
         assert_eq!(loaded.projects[0].messages, sample_messages(), "quick messages too, with their Enter flag");
+        assert_eq!(loaded.projects[0].worktree_location.as_deref(), Some("../{repo}-{name}"), "and where its worktrees go");
         assert_eq!(loaded.wires, w.wires);
         assert_eq!(loaded.cards.len(), 2);
         let a = &loaded.cards[0];
@@ -292,9 +295,10 @@ mod tests {
         assert_eq!((w.projects.len(), w.cards.len()), (1, 1));
         assert!(w.projects[0].templates.is_empty());
         assert!(w.projects[0].messages.is_empty());
+        assert_eq!(w.projects[0].worktree_location, None, "worktrees go to the default location");
         p.save_now(&w);
         let saved = fs::read_to_string(dir.join("layout.json")).unwrap();
-        assert!(!saved.contains("templates") && !saved.contains("messages"), "{saved}");
+        assert!(!saved.contains("templates") && !saved.contains("messages") && !saved.contains("worktree_location"), "{saved}");
         fs::remove_dir_all(dir).unwrap();
     }
 
