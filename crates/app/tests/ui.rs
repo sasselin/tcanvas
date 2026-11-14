@@ -3221,9 +3221,9 @@ fn a_worktree_is_created_from_the_group_and_a_card_opens_in_it() {
     answer_plan(&mut h, |p| p.exclude = Some("/.claude/worktrees/".into()));
     assert!(h.query_by_label("/home/me/shop/.claude/worktrees/feat-factures").is_some());
     assert!(h.query_by_label("⚠ git n'ignore pas ce dossier : la copie principale le listerait comme non suivi.").is_some());
+    // Ticked by default: nothing to click, the request carries it.
     let exclude = "Ajouter /.claude/worktrees/ au .git/info/exclude du dépôt (propre à ce clone, jamais commité)";
-    h.get_by_label(exclude).click();
-    steps(&mut h, 2);
+    assert!(h.query_by_label(exclude).is_some());
 
     h.get_by_label("Créer").click();
     steps(&mut h, 2);
