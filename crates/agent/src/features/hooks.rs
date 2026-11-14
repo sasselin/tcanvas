@@ -6,9 +6,10 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use protocol::Hooks;
+use protocol::{Hooks, TaskHooks};
 
-use super::agent_hooks;
+use super::agent_hooks::{self, Part};
+use super::task_skill::SkillChange;
 
 pub const ZSH_HOOKS: &str = r#"# tcanvas: command status (installed by `tcanvas-agent install-hooks`)
 if [[ -n "$TMUX" && "$TMUX" == *tcanvas* ]]; then
@@ -162,11 +163,12 @@ pub fn install_in(home: &Path, shell: Shell) -> io::Result<(PathBuf, PathBuf, bo
 pub struct Installed {
     /// Hooks file, rc file, whether the rc file changed; `None` for an unsupported shell.
     pub shell: Option<(PathBuf, PathBuf, bool)>,
-    /// Coding agents whose config changed.
-    pub agents: Vec<&'static str>,
+    /// What was done for each coding agent found (each on its own).
+    pub agents: Vec<agent_hooks::Outcome>,
 }
 
-/// Installs the hooks of the current user's shell and of every coding agent found.
+/// Installs the status hooks of the current user's shell and of every coding agent found (not
+/// the task integration: `install_tasks`).
 pub fn install() -> io::Result<Installed> {
     let home = home();
     let path = user_shell_path().unwrap_or_default();
@@ -175,12 +177,64 @@ pub fn install() -> io::Result<Installed> {
         return Err(io::Error::new(io::ErrorKind::Unsupported, format!("unsupported shell: {path} (bash or zsh only)")));
     }
     let shell = shell.map(|s| install_in(&home, s)).transpose()?;
-    let agents = agent_hooks::install_all(&home, &agent_hooks::current_exe())?;
+    let agents = agent_hooks::install_all(&home, &agent_hooks::current_exe());
     Ok(Installed { shell, agents })
 }
 
-/// `tcanvas-agent install-hooks`.
-pub fn install_cli() -> io::Result<()> {
+/// The task integration's state for the current user.
+pub fn task_state() -> TaskHooks {
+    agent_hooks::tasks_state(&home())
+}
+
+/// Installs (`enabled`) or removes the task integration for every coding agent found.
+pub fn set_tasks(enabled: bool) -> Vec<agent_hooks::Outcome> {
+    if enabled { agent_hooks::install_tasks_all(&home(), &agent_hooks::current_exe()) } else { agent_hooks::uninstall_all(&home(), Some(Part::Tasks)) }
+}
+
+/// Prints what was done for each agent, and each failure on stderr; whether all went well.
+fn report(outcomes: &[agent_hooks::Outcome], installing: bool) -> bool {
+    let (settings, skill_done) =
+        if installing { ("Hooks added to the {} settings.", "The tcanvas-tasks skill written for {}.") } else { ("Hooks removed from the {} settings.", "The tcanvas-tasks skill removed for {}.") };
+    let mut ok = true;
+    for (agent, result) in outcomes {
+        match result {
+            Ok(c) => {
+                if c.settings {
+                    println!("{}", settings.replace("{}", agent));
+                }
+                match c.skill {
+                    Some(SkillChange::Changed) => println!("{}", skill_done.replace("{}", agent)),
+                    Some(SkillChange::KeptEdited) => println!("The tcanvas-tasks skill of {agent} was edited: kept as it is."),
+                    _ => {}
+                }
+            }
+            Err(e) => {
+                eprintln!("{agent}: {e}");
+                ok = false;
+            }
+        }
+    }
+    ok
+}
+
+/// Exit code 1 when an agent failed (the others were still done).
+fn exit_if_failed(ok: bool) {
+    if !ok {
+        std::process::exit(1);
+    }
+}
+
+/// `tcanvas-agent install-hooks [--tasks]`: the status hooks, or with `--tasks` the task
+/// integration only.
+pub fn install_cli(tasks: bool) -> io::Result<()> {
+    if tasks {
+        let outcomes = set_tasks(true);
+        if outcomes.is_empty() {
+            println!("No coding agent found.");
+        }
+        exit_if_failed(report(&outcomes, true));
+        return Ok(());
+    }
     let done = install()?;
     if let Some((hooks, rc, changed)) = done.shell {
         println!("Hooks written to {}", hooks.display());
@@ -190,25 +244,21 @@ pub fn install_cli() -> io::Result<()> {
             println!("{} already sources the hooks.", rc.display());
         }
     }
-    for agent in done.agents {
-        println!("Hooks added to the {agent} settings.");
-    }
+    exit_if_failed(report(&done.agents, true));
     Ok(())
 }
 
-/// `tcanvas-agent uninstall-hooks`: removes the coding agents' hooks (the shell hooks only
-/// act inside tcanvas and stay).
-pub fn uninstall_cli() -> io::Result<()> {
-    let removed = agent_hooks::uninstall_all(&home())?;
-    if removed.is_empty() {
+/// `tcanvas-agent uninstall-hooks [--tasks]`: removes everything of ours from the coding agents
+/// (hooks and the tcanvas-tasks skill), or with `--tasks` the task integration only. The shell
+/// hooks only act inside tcanvas and stay.
+pub fn uninstall_cli(tasks: bool) -> io::Result<()> {
+    let outcomes = agent_hooks::uninstall_all(&home(), tasks.then_some(Part::Tasks));
+    if agent_hooks::changed(&outcomes).is_empty() && agent_hooks::failures(&outcomes).is_none() {
         println!("No coding agent hooks to remove.");
     }
-    for agent in removed {
-        println!("Hooks removed from the {agent} settings.");
-    }
+    exit_if_failed(report(&outcomes, false));
     Ok(())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

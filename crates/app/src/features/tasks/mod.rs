@@ -19,7 +19,7 @@ pub mod logic;
 use std::collections::{BTreeMap, HashMap};
 
 use egui::{Button, CollapsingHeader, Color32, ComboBox, Id, Key, Modal, Panel, RichText, ScrollArea, Sides, TextEdit, Ui};
-use protocol::{AgentCmd, AgentEvent, Author, FoundList, FoundWhy, Priority, Problem, Task, TaskBoard, TaskOp, TaskStatus};
+use protocol::{AgentCmd, AgentEvent, Author, FoundList, FoundWhy, Priority, Problem, Task, TaskBoard, TaskHooks, TaskOp, TaskStatus};
 
 use crate::features::changes::age_label;
 use crate::features::shortcuts::keymap::tasks_combo;
@@ -159,6 +159,13 @@ pub struct Tasks {
     shown: Option<ProjectId>,
     /// Merging another list into a group's, waiting for confirmation.
     merge: Option<(ProjectId, FoundList)>,
+    /// Whether coding agents get these tasks (a session start hook, a skill): `None` while no
+    /// agent able to say is connected.
+    task_hooks: Option<TaskHooks>,
+    /// Enabling or disabling it, not answered yet.
+    task_hooks_pending: bool,
+    /// What failed last time, translated.
+    task_hooks_error: Option<String>,
 }
 
 impl Tasks {
@@ -358,14 +365,20 @@ impl Tasks {
 
     pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
         match ev {
-            Event::Agent(AgentEvent::Hello { tasks, .. }) => {
+            Event::Agent(AgentEvent::Hello { tasks, task_hooks, .. }) => {
                 // A new agent: it follows nothing yet, and what the last one was asked is lost.
                 self.capable = Some(*tasks);
+                (self.task_hooks, self.task_hooks_pending, self.task_hooks_error) = (*task_hooks, false, None);
                 self.watched.clear();
                 self.lost();
             }
+            Event::Agent(AgentEvent::TaskHooksChanged { task_hooks, problem }) => {
+                (self.task_hooks, self.task_hooks_pending) = (Some(*task_hooks), false);
+                self.task_hooks_error = problem.as_ref().map(|p| t().problem(p));
+            }
             Event::AgentLost => {
                 self.capable = None;
+                (self.task_hooks, self.task_hooks_pending) = (None, false);
                 self.watched.clear();
                 self.lost();
             }
@@ -469,6 +482,7 @@ impl Tasks {
         if self.capable.is_none() {
             ui.label(RichText::new(t().tasks_agent_offline).color(theme::TEXT_DIM));
         }
+        self.task_hooks_bar(ui, events);
         let Some(board) = board else {
             ui.label(RichText::new(t().waiting_for_agent).color(theme::TEXT_DIM));
             return;
@@ -508,6 +522,27 @@ impl Tasks {
                 });
             }
         });
+    }
+
+    /// Whether coding agents see these tasks, and the action that changes it (opt-in, separate
+    /// from the status bar's hooks). Nothing to offer without a coding agent, or an older agent.
+    fn task_hooks_bar(&mut self, ui: &mut Ui, events: &mut Vec<Event>) {
+        let (text, action, enabled) = match self.task_hooks {
+            Some(TaskHooks::Missing) => (t().task_hooks_missing, t().task_hooks_enable, true),
+            Some(TaskHooks::Installed) => (t().task_hooks_on, t().task_hooks_disable, false),
+            Some(TaskHooks::Unsupported) | None => return,
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(text).small().color(theme::TEXT_DIM)).on_hover_text(t().task_hooks_hint);
+            if ui.add_enabled(!self.task_hooks_pending, Button::new(RichText::new(action).small())).on_hover_text(t().task_hooks_hint).clicked() {
+                self.task_hooks_pending = true;
+                self.task_hooks_error = None;
+                events.push(Event::ToAgent(AgentCmd::SetTaskHooks { enabled }));
+            }
+        });
+        if let Some(e) = &self.task_hooks_error {
+            ui.label(RichText::new(e).small().color(ERROR));
+        }
     }
 
     /// Another list that may be this project's: bring its tasks here. A merge asks first, and so
@@ -877,7 +912,7 @@ mod tests {
     }
 
     fn hello(tasks: bool) -> Event {
-        Event::Agent(AgentEvent::Hello { version: "x".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks })
+        Event::Agent(AgentEvent::Hello { version: "x".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks, task_hooks: None })
     }
 
     fn task(id: &str) -> Task {

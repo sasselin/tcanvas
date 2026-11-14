@@ -49,7 +49,7 @@ pub fn run() -> io::Result<()> {
         }
     });
     let cmds = spawn_stdin_reader(watcher, sender, lists);
-    send(&AgentEvent::Hello { version: env!("CARGO_PKG_VERSION").into(), hooks: hooks::state(), send_text: true, tasks: true })?;
+    send(&AgentEvent::Hello { version: env!("CARGO_PKG_VERSION").into(), hooks: hooks::state(), send_text: true, tasks: true, task_hooks: Some(hooks::task_state()) })?;
 
     let mut tracked: HashMap<String, Tracked> = HashMap::new();
     let mut clock = timing::ClockLog::default();
@@ -62,9 +62,20 @@ pub fn run() -> io::Result<()> {
                 }
                 // Forwarded straight to the changes thread by the stdin reader.
                 AgentCmd::InstallHooks => match hooks::install() {
-                    Ok(_) => send(&AgentEvent::HooksChanged { hooks: hooks::state() })?,
+                    Ok(done) => {
+                        send(&AgentEvent::HooksChanged { hooks: hooks::state() })?;
+                        // The agents that failed, while the others were done.
+                        if let Some(detail) = agent_hooks::failures(&done.agents) {
+                            send(&AgentEvent::Error { problem: Problem::HooksFailed { detail } })?;
+                        }
+                    }
                     Err(e) => send(&AgentEvent::Error { problem: Problem::HooksFailed { detail: e.to_string() } })?,
                 },
+                AgentCmd::SetTaskHooks { enabled } => {
+                    let done = hooks::set_tasks(enabled);
+                    let problem = agent_hooks::failures(&done).map(|detail| Problem::HooksFailed { detail });
+                    send(&AgentEvent::TaskHooksChanged { task_hooks: hooks::task_state(), problem })?;
+                }
                 AgentCmd::Watch { .. }
                 | AgentCmd::Unwatch { .. }
                 | AgentCmd::Diff { .. }

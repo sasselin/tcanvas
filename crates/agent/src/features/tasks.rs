@@ -141,17 +141,28 @@ fn repo_id(key: &Path) -> Option<String> {
 
 /// Resolves a watched folder: its list's key, and the repository's id.
 pub fn resolve_folder(path: &str) -> Result<Resolved, Problem> {
+    let mut r = resolve_key(path)?;
+    r.repo_id = repo_id_of(&r);
+    Ok(r)
+}
+
+/// Resolves a watched folder's key only (`repo_id` left `None`): what a read needs. The
+/// repository's id walks its history, so it is computed only before a write (`repo_id_of`).
+pub fn resolve_key(path: &str) -> Result<Resolved, Problem> {
     let dir = resolve(path)?;
     let key = classify_key(&dir, git(&dir, &["worktree", "list", "--porcelain"]))?;
-    let dir = dir.to_string_lossy().into_owned();
-    let repo_id = if key != dir || Path::new(&key).join(".git").exists() { repo_id(Path::new(&key)) } else { None };
-    Ok(Resolved { key, dir, repo_id })
+    Ok(Resolved { key, dir: dir.to_string_lossy().into_owned(), repo_id: None })
+}
+
+/// The repository's id for a resolved folder (`None` outside git).
+pub fn repo_id_of(r: &Resolved) -> Option<String> {
+    if r.key != r.dir || Path::new(&r.key).join(".git").exists() { repo_id(Path::new(&r.key)) } else { None }
 }
 
 // --- Files ---------------------------------------------------------------------------------------
 
 /// FNV-1a, 64 bits: stable across builds and machines (unlike the standard hasher).
-fn fnv1a(text: &str) -> u64 {
+pub fn fnv1a(text: &str) -> u64 {
     text.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3))
 }
 
@@ -307,6 +318,11 @@ pub struct Done {
     pub content_rev: Option<u64>,
 }
 
+/// A list that does not read, left as it is.
+fn unreadable(files: &Files, detail: &str) -> Problem {
+    Problem::TasksFailed { detail: format!("{} does not read ({detail}); tcanvas sets it aside when its Tasks panel shows this project", files.path.display()) }
+}
+
 fn failed(e: io::Error) -> Problem {
     Problem::TasksFailed { detail: e.to_string() }
 }
@@ -325,16 +341,25 @@ fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>, Problem> {
 pub struct Store {
     dir: PathBuf,
     lock_wait: Duration,
+    /// Content that does not read is set aside (the app's agent, which tells the user). Without
+    /// it (the command line), such a list is refused instead and left as it is.
+    repair: bool,
 }
 
 impl Store {
     pub fn new(dir: PathBuf) -> Self {
-        Store { dir, lock_wait: LOCK_WAIT }
+        Store { dir, lock_wait: LOCK_WAIT, repair: true }
+    }
+
+    /// A store that never sets a list aside (the command line): a list that does not read is
+    /// refused (`TasksFailed`) and left for the app to set aside, and tell the user.
+    pub fn without_repair(dir: PathBuf) -> Self {
+        Store { dir, lock_wait: LOCK_WAIT, repair: false }
     }
 
     #[cfg(test)]
     pub fn with_lock_wait(dir: PathBuf, lock_wait: Duration) -> Self {
-        Store { dir, lock_wait }
+        Store { dir, lock_wait, repair: true }
     }
 
     #[cfg(test)]
@@ -381,6 +406,13 @@ impl Store {
         }
     }
 
+    /// Reads a list without ever setting it aside nor taking its lock (the command line: the app
+    /// stays the one that sets a list aside, and tells the user). Content that does not read is
+    /// `TasksFailed`.
+    pub fn peek(&self, files: &Files, key: &str) -> Result<Loaded, Problem> {
+        self.settled(files, key)?.ok_or_else(|| unreadable(files, "not a task list"))
+    }
+
     /// The list if it reads now or a moment later; `None` when it still does not.
     fn settled(&self, files: &Files, key: &str) -> Result<Option<Loaded>, Problem> {
         for attempt in 0..2 {
@@ -407,6 +439,7 @@ impl Store {
         match parse(&bytes, key) {
             Parsed::List(list) => Ok(Loaded { list, read_only: None, set_aside: None }),
             Parsed::ReadOnly(list, why) => Ok(Loaded { list, read_only: Some(why), set_aside: None }),
+            Parsed::Corrupt(detail) if !self.repair => Err(unreadable(files, &detail)),
             Parsed::Corrupt(detail) => {
                 let aside = rename_aside(&files.path, "corrupt").map_err(failed)?;
                 let problem = Problem::TasksSetAside { path: aside.to_string_lossy().into_owned(), detail };
@@ -1130,7 +1163,7 @@ fn publish(store: &Store, key: &str, sub: &mut Sub, send: &impl Fn(&AgentEvent))
     }
 }
 
-fn unix_now() -> u64 {
+pub fn unix_now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 

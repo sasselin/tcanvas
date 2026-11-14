@@ -521,7 +521,7 @@ fn tasks() {
     ctrl_shift(&h, Key::Num1);
     steps(&mut h, 45);
     let board = TaskBoard { key: "p-shop-api".into(), list: Some(api_tasks()), read_only: false, problem: None, found: vec![] };
-    let hello = AgentEvent::Hello { version: "X.X.X".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true };
+    let hello = AgentEvent::Hello { version: "X.X.X".into(), hooks: protocol::Hooks::Installed, send_text: true, tasks: true, task_hooks: None };
     h.state_mut().dispatch(vec![Event::Agent(hello), Event::Agent(AgentEvent::Tasks(Box::new(board)))]);
     ctrl_shift(&h, Key::T);
     steps(&mut h, 3);
