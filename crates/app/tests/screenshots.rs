@@ -666,6 +666,7 @@ fn worktrees_canvas(h: &mut Harness<'_, App>, cleanup: bool) {
         last_commit: Some(now - age),
         branch_deletable: true,
         reflog_commits: false,
+        new_branch: false,
     };
     let mut list = protocol::WorktreeList {
         key: "p-shop-api".into(),

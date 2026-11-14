@@ -457,3 +457,45 @@ fn removes_only_what_is_safe_and_refuses_the_rest() {
         assert!(branch_exists(&shop, b), "{b} kept");
     }
 }
+
+#[test]
+fn a_branch_with_no_commit_of_its_own_is_kept_until_it_has_one_merged() {
+    if !has("git", "--version") {
+        eprintln!("git missing: test skipped");
+        return;
+    }
+    let tmp = TempDir::new("cleanup-new-branch");
+    let shop = tmp.0.join("shop");
+    std::fs::create_dir_all(&shop).unwrap();
+    git(&shop, &["init", "-q", "-b", "main"]);
+    commit(&shop, "a.txt", "a");
+    // A worktree on a branch just created on main's commit: nothing ahead, a single reflog entry.
+    let fresh = tmp.0.join("fresh");
+    git(&shop, &["worktree", "add", "-q", "-b", "fresh", fresh.to_str().unwrap()]);
+    let path = fresh.display().to_string();
+
+    let tmux = Tmux { socket: format!("tcanvas-cleanup-new-test-{}", std::process::id()) };
+    if has("tmux", "-V") {
+        tmux.run(&["new-session", "-d", "-s", "tc_idle", "-c", tmp.0.to_str().unwrap()]);
+    }
+    let mut agent = Agent::spawn(&tmux.socket);
+    agent.send(&AgentCmd::Watch { key: "shop".into(), path: shop.display().to_string() });
+    let list = agent.wait_list("shop", "the new worktree", |l| l.worktrees.iter().any(|w| w.path == path));
+    let wt = list.worktrees.iter().find(|w| w.path == path).unwrap();
+    assert_eq!((wt.ahead, wt.merged, wt.new_branch), (Some(0), None, true));
+    assert_eq!(protocol::keep_reason(wt, &protocol::Usage::default()), Some(KeepReason::NewBranch), "shown with its own reason");
+    // The agent's own check refuses it, for the same reason.
+    assert_eq!(agent.cleanup("shop", remove(&fresh, Some("fresh"))), (None, kept(&fresh, KeepReason::NewBranch)));
+    assert!(fresh.is_dir() && branch_exists(&shop, "fresh"));
+
+    // A commit of its own: not merged.
+    commit(&fresh, "work.txt", "work");
+    assert_eq!(agent.cleanup("shop", remove(&fresh, None)), (None, kept(&fresh, KeepReason::NotMerged)));
+    // Merged: removable, branch included.
+    git(&shop, &["merge", "-q", "--ff-only", "fresh"]);
+    let list = agent.wait_list("shop", "merged", |l| l.worktrees.iter().any(|w| w.path == path && w.merged == Some(true)));
+    let wt = list.worktrees.iter().find(|w| w.path == path).unwrap();
+    assert!(!wt.new_branch && !wt.reflog_commits && wt.branch_deletable, "{wt:?}");
+    assert_eq!(agent.cleanup("shop", remove(&fresh, Some("fresh"))), (Some("fresh".into()), None));
+    assert!(!fresh.exists() && !branch_exists(&shop, "fresh"));
+}

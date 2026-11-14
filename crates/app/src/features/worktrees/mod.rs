@@ -3,11 +3,13 @@
 //! keeps the lists, tells which worktree each card's folder is in (`World::card_worktrees`, read
 //! by the card's branch badge) and draws a one-line strip under the toolbar when the open group's
 //! repository has more than its main checkout. The strip opens the cleanup window (`cleanup`),
-//! the only place that asks the agent to delete anything, always after a confirmation, and the
-//! new-worktree dialog (`create`), also opened from the group's menus (`Event::NewWorktree`) since
-//! the strip is hidden while the repository has only its main checkout. What the repository's
-//! recipe did to a worktree this app created is shown once it is there (`report_lines`); the
-//! recipe setup commands the user accepted are remembered in the app's config (`trust`).
+//! the only place that asks the agent to delete anything, always after a confirmation. The
+//! window follows the shown group (`World::space`): showing another one closes it. The
+//! new-worktree dialog (`create`) is also opened from the group's menus (`Event::NewWorktree`)
+//! since the strip is hidden while the repository has only its main checkout. What the
+//! repository's recipe did to a worktree this app created is shown once it is there
+//! (`report_lines`); the recipe setup commands the user accepted are remembered in the app's
+//! config (`trust`).
 
 pub mod cleanup;
 pub mod create;
@@ -19,7 +21,7 @@ use std::path::Path;
 use egui::{Color32, Panel, RichText, ScrollArea, Ui};
 use protocol::{AgentEvent, RecipeAction, RecipeReport, Worktree, WorktreeList};
 
-use cleanup::CleanupWindow;
+use cleanup::{CleanupWindow, Unattended};
 use create::CreateDialog;
 use trust::Trust;
 
@@ -105,6 +107,8 @@ pub struct Worktrees {
     applying: Vec<(u64, Option<create::Sent>)>,
     /// The recipe setup commands accepted.
     trust: Trust,
+    /// What closed windows still wait for from the agent.
+    unattended: Unattended,
 }
 
 impl Worktrees {
@@ -153,9 +157,21 @@ impl Worktrees {
         }
     }
 
-    pub fn open_cleanup(&mut self, project: &str) {
+    pub fn open_cleanup(&mut self, project: &str, world: &World) {
         if self.cleanup.as_ref().is_none_or(|c| c.project != project) {
-            self.cleanup = Some(CleanupWindow::new(project.to_string()));
+            self.close_cleanup(world);
+            let mut window = CleanupWindow::new(project.to_string());
+            window.pending = self.unattended.take(project);
+            self.cleanup = Some(window);
+        }
+    }
+
+    /// Closes the cleanup window (and its confirmation: nothing more is sent). What it sent and
+    /// still waits for is answered by toasts.
+    fn close_cleanup(&mut self, world: &World) {
+        if let Some(window) = self.cleanup.take() {
+            let group = cleanup::group_name(world, &window.project);
+            self.unattended.adopt(window, group);
         }
     }
 
@@ -169,14 +185,20 @@ impl Worktrees {
             }
         }
         self.report_ui(ctx);
+        if !self.unattended.is_empty() {
+            events.extend(self.unattended.expire(std::time::Instant::now()));
+            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+        }
         let Some(window) = self.cleanup.as_mut() else { return };
         let open = match self.lists.get(&window.project) {
+            // Another group (or "All") is shown: this one's window goes.
+            Some(_) if !cleanup::stays_open(&window.project, world.space.as_deref()) => false,
             Some((_, list)) => window.ui(ctx, list, world, events),
             // The group went, or left git.
             None => false,
         };
         if !open {
-            self.cleanup = None;
+            self.close_cleanup(world);
         }
     }
 
@@ -235,7 +257,16 @@ impl Worktrees {
                     }
                 }
             }
-            Event::Agent(ev @ (AgentEvent::Cleaned { .. } | AgentEvent::WorktreeSizes { .. })) => {
+            // The answer to an action of a closed window: a toast about its group.
+            Event::Agent(ev @ AgentEvent::Cleaned { .. }) => match self.unattended.answer(ev) {
+                Some(notice) => out.push(notice),
+                None => {
+                    if let Some(window) = self.cleanup.as_mut() {
+                        window.handle(ev);
+                    }
+                }
+            },
+            Event::Agent(ev @ AgentEvent::WorktreeSizes { .. }) => {
                 if let Some(window) = self.cleanup.as_mut() {
                     window.handle(ev);
                 }
@@ -336,7 +367,7 @@ impl Worktrees {
         });
         let project = list.key.clone();
         if open_cleanup {
-            self.open_cleanup(&project);
+            self.open_cleanup(&project, world);
         }
         if open_create {
             self.open_create(world, &project);
@@ -410,6 +441,7 @@ mod tests {
             last_commit: Some(1),
             branch_deletable: false,
             reflog_commits: false,
+            new_branch: false,
         }
     }
 

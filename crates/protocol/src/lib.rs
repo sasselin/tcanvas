@@ -547,9 +547,12 @@ pub enum KeepReason {
     /// Its folder is missing right now: prune it instead.
     Missing,
     Locked,
-    /// Not fully merged into the default branch (or unknown: detached head, a branch that never
-    /// moved since it was created, no default branch).
+    /// Not fully merged into the default branch (or unknown: detached head, no default branch).
     NotMerged,
+    /// Its branch has no commit of its own yet: created on a commit the default branch already
+    /// has, and never moved since (`Worktree::new_branch`). git would call it merged, but it is
+    /// most likely a worktree just made for work that has not started.
+    NewBranch,
     /// Its branch's reflog, or its own HEAD reflog, names commits the default branch does not
     /// have: removing it (or deleting the branch) would drop the last reference to them.
     ReflogCommits,
@@ -631,6 +634,8 @@ pub fn keep_reason(wt: &Worktree, usage: &Usage) -> Option<KeepReason> {
         KeepReason::Missing
     } else if wt.locked {
         KeepReason::Locked
+    } else if wt.merged != Some(true) && wt.new_branch {
+        KeepReason::NewBranch
     } else if wt.merged != Some(true) {
         KeepReason::NotMerged
     } else if wt.reflog_commits {
@@ -825,6 +830,11 @@ pub struct Worktree {
     /// when that could not be checked.
     #[serde(default)]
     pub reflog_commits: bool,
+    /// Its branch has no commit of its own (nothing ahead of the default branch) and has not
+    /// moved since it was created (a single entry in its reflog): just created on a commit the
+    /// default branch already has. `merged` is then `None`. `false` from an older agent.
+    #[serde(default)]
+    pub new_branch: bool,
 }
 
 /// The worktrees of the repository holding a watched folder, sent when they change.
@@ -1289,6 +1299,7 @@ mod tests {
             last_commit: Some(1_700_000_000),
             reflog_commits: false,
             branch_deletable: false,
+            new_branch: false,
         }
     }
 
@@ -1325,6 +1336,12 @@ mod tests {
         // ... and no `branch_deletable`.
         let old = r#"{"path":"/x","head":null,"branch":null,"detached":false,"main":true,"bare":false,"locked":false,"lock_reason":null,"prunable":false,"dirty":null,"ahead":null,"behind":null,"merged":null,"last_commit":null}"#;
         assert!(!decode::<Worktree>(old).unwrap().branch_deletable);
+        // ... and no `new_branch`: such a worktree is kept as not merged, as before.
+        let old = decode::<Worktree>(&old.replace(r#""main":true"#, r#""main":false"#).replace(r#""branch":null"#, r#""branch":"fresh""#).replace(r#""ahead":null"#, r#""ahead":0"#)).unwrap();
+        assert!(!old.new_branch);
+        assert_eq!(keep_reason(&old, &Usage::default()), Some(KeepReason::NotMerged));
+        let fresh = Worktree { main: false, branch: Some("fresh".into()), new_branch: true, ..worktree("/home/me/shop-fresh") };
+        assert_eq!(decode::<Worktree>(&encode(&fresh)).unwrap(), fresh);
     }
 
     #[test]
@@ -1365,6 +1382,7 @@ mod tests {
             KeepReason::Missing,
             KeepReason::Locked,
             KeepReason::NotMerged,
+            KeepReason::NewBranch,
             KeepReason::Dirty,
             KeepReason::NotChecked,
             KeepReason::ReflogCommits,
@@ -1397,6 +1415,12 @@ mod tests {
             let ev = AgentEvent::Error { problem };
             assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
         }
+        // The new reason travels by name; a refusal from an older agent (which says "not
+        // merged" for a branch with no commit of its own) still decodes.
+        let new = encode(&AgentEvent::Error { problem: Problem::WorktreeKept { path: "/w".into(), reason: KeepReason::NewBranch } });
+        assert!(new.contains(r#""reason":"NewBranch""#), "{new}");
+        let old = new.replace("NewBranch", "NotMerged");
+        assert_eq!(decode::<AgentEvent>(&old).unwrap(), AgentEvent::Error { problem: Problem::WorktreeKept { path: "/w".into(), reason: KeepReason::NotMerged } });
     }
 
     #[test]
@@ -1411,6 +1435,10 @@ mod tests {
             (Worktree { locked: true, ..safe.clone() }, KeepReason::Locked),
             (Worktree { merged: Some(false), ..safe.clone() }, KeepReason::NotMerged),
             (Worktree { merged: None, ..safe.clone() }, KeepReason::NotMerged),
+            // Nothing ahead, never moved: no commit of its own yet, whatever else holds it.
+            (Worktree { merged: None, new_branch: true, ..safe.clone() }, KeepReason::NewBranch),
+            (Worktree { merged: None, new_branch: true, dirty: Some(true), ..safe.clone() }, KeepReason::NewBranch),
+            (Worktree { merged: None, new_branch: true, locked: true, ..safe.clone() }, KeepReason::Locked),
             (Worktree { dirty: Some(true), ..safe.clone() }, KeepReason::Dirty),
             (Worktree { reflog_commits: true, ..safe.clone() }, KeepReason::ReflogCommits),
             (Worktree { dirty: None, ..safe.clone() }, KeepReason::NotChecked),

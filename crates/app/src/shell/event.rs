@@ -171,6 +171,13 @@ pub enum Event {
     /// A card's tmux client stopped without being asked to.
     PtyExited(CardId),
     Notify(CardId, Notice),
+    /// Information about a group, shown as a toast that opens the group when clicked: e.g. the
+    /// answer to a worktree cleanup whose window was closed meanwhile.
+    GroupNotice {
+        project: ProjectId,
+        title: String,
+        body: String,
+    },
     /// A newer release is out (version without the `v`): warn once.
     UpdateAvailable(String),
     /// Opens the release notes of the pending update, with its "Update" button.
