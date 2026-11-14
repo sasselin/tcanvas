@@ -3,7 +3,7 @@
 use egui::{Pos2, Rect};
 use protocol::{AgentCmd, AgentEvent};
 
-use super::world::{Camera, CardId, CommandTemplate, ProjectId};
+use super::world::{Camera, CardId, CommandTemplate, ProjectId, QuickMessage};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Notice {
@@ -18,6 +18,53 @@ pub enum Notice {
     Moved(Option<String>),
     /// Text copied to the clipboard from this terminal (tmux selection).
     Copied,
+    /// Text sent to this terminal by the app did not arrive, for this reason (kept on the card).
+    NotSent(SendRefusal),
+    /// Text sent to this terminal by the app was typed in but not submitted, for this reason.
+    NotSubmitted(SendRefusal),
+}
+
+/// Why a card did not take the text sent to it (`Event::SendText`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SendRefusal {
+    /// No such card (closed meanwhile).
+    NoCard,
+    /// Its session is not up yet: terminal still starting, its shell not shown yet, or its start
+    /// command not taken yet.
+    Starting,
+    /// Its terminal could not start.
+    NotStarted,
+    /// Its session ended (or its tmux client stopped).
+    Ended,
+    /// The agent, which delivers text through tmux, is not connected (or stopped meanwhile).
+    NoAgent,
+    /// The agent is too old to deliver text.
+    AgentTooOld,
+    /// The agent did not answer in time: the text may or may not have arrived.
+    NoAnswer,
+    /// tmux knows no such session.
+    NoSession,
+    /// Its pane shows a tmux screen (tmux's mode name: `clock-mode`, `tree-mode`...) that would
+    /// take the keys.
+    Busy(String),
+    /// The agent could not get to it within its time limit: never sent.
+    Expired,
+    /// tmux refused it (its message).
+    Failed(String),
+}
+
+/// What became of an `Event::SendText`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SendOutcome {
+    /// tmux pasted it into the card's session (and pressed Enter, when asked).
+    Sent,
+    /// Empty text: nothing to send, nothing sent.
+    Empty,
+    /// Not sent: the card says why, with the text kept for copying.
+    Refused(SendRefusal),
+    /// Pasted, but the Enter could not be pressed, for this reason: the text waits in the input
+    /// line (not offered again: sending it again would type it twice).
+    PastedNotSubmitted(SendRefusal),
 }
 
 #[derive(Clone, Debug)]
@@ -32,6 +79,23 @@ pub enum Event {
     },
     /// Replaces a group's command templates.
     SetProjectTemplates(ProjectId, Vec<CommandTemplate>),
+    /// Replaces a group's quick messages.
+    SetProjectMessages(ProjectId, Vec<QuickMessage>),
+    /// Opens the editor of a group's quick messages.
+    EditQuickMessages(ProjectId),
+    /// Sends text to this card's session, and to no other: one paste through tmux (bracketed when
+    /// the application asked for it), then Enter as its own key when `enter` is set. The only way
+    /// for a slice to type into a terminal; answered by `TextSendOutcome`, once tmux took it.
+    SendText {
+        card: CardId,
+        text: String,
+        enter: bool,
+    },
+    /// What became of a `SendText` to this card.
+    TextSendOutcome {
+        card: CardId,
+        outcome: SendOutcome,
+    },
     FocusCard(CardId),
     Unfocus,
     /// Smoothly moves the camera to the card, then focuses it.
@@ -89,6 +153,8 @@ pub enum Event {
     ShowChanges(ProjectId),
     /// Command to forward to the agent.
     ToAgent(AgentCmd),
+    /// The link to the agent closed: whatever it was asked and has not answered never will be.
+    AgentLost,
     /// A card's tmux client stopped without being asked to.
     PtyExited(CardId),
     Notify(CardId, Notice),

@@ -10,14 +10,15 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::Event as TermEvent;
 use alacritty_terminal::term::TermMode;
 use alacritty_terminal::vte::ansi::Rgb;
 use egui::{Align2, Color32, CornerRadius, CursorIcon, FontId, Id, Key, Modifiers, MouseWheelUnit, PointerButton, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
-use protocol::{AgentEvent, SESSION_PREFIX};
+use protocol::{AgentCmd, AgentEvent, Problem, SESSION_PREFIX};
 
-use crate::shell::event::Event;
+use crate::shell::event::{Event, Notice, SendOutcome, SendRefusal};
 use crate::shell::i18n::t;
 use crate::shell::theme;
 use crate::shell::widgets::{confirm, text_prompt};
@@ -42,6 +43,51 @@ const DEFAULT_COLS: f32 = 120.0;
 const DEFAULT_ROWS: f32 = 34.0;
 /// Below this font size (pixels), draw a preview instead of the grid.
 const LOD_FONT_PX: f32 = 5.5;
+
+/// How long the agent gets to answer a `SendText` (it pastes, waits a moment, presses Enter: a
+/// fraction of a second). Past that, the text is reported as maybe not sent, and the keys held
+/// for the card go.
+const SEND_ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The agent never pastes a text this long after it got it (answered as expired): shorter than
+/// `SEND_ANSWER_TIMEOUT`, so a text the app gave up on can never arrive later.
+const SEND_LIMIT: Duration = Duration::from_secs(8);
+
+/// How far a text the agent answered for got.
+enum Sent {
+    /// Not pasted.
+    Not(SendRefusal),
+    /// Pasted, but the Enter could not be pressed.
+    Pasted(SendRefusal),
+}
+
+/// The app's reading of a problem the agent reports for a text.
+fn refusal_of(problem: &Problem) -> SendRefusal {
+    match problem {
+        Problem::SessionNotFound { .. } => SendRefusal::NoSession,
+        Problem::PaneDead { .. } => SendRefusal::Ended,
+        Problem::PaneBusy { mode, .. } => SendRefusal::Busy(mode.clone()),
+        Problem::Expired => SendRefusal::Expired,
+        Problem::SendFailed { detail } => SendRefusal::Failed(detail.clone()),
+        other => SendRefusal::Failed(t().problem(other)),
+    }
+}
+
+/// Whether the agent can deliver text (`AgentCmd::SendText`), from its last hello.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AgentSupport {
+    /// Not connected (yet, or any more).
+    Down,
+    TooOld,
+    Ready,
+}
+
+/// Text handed to the agent, waiting for its answer.
+struct InFlight {
+    card: CardId,
+    text: String,
+    since: Instant,
+}
 
 /// Where a new card's command stands.
 enum CommandRun {
@@ -103,6 +149,19 @@ pub struct TerminalCards {
     commands: HashMap<CardId, CommandRun>,
     /// Command of a card whose session never started (it did not run): offered for copying.
     lost_commands: HashMap<CardId, String>,
+    /// Text sent by the app that a card did not take, and why: offered for copying.
+    unsent: HashMap<CardId, (String, SendRefusal)>,
+    agent: AgentSupport,
+    /// Text handed to the agent, by request id.
+    in_flight: HashMap<u64, InFlight>,
+    next_send: u64,
+    /// The user's keys for a card while text sent to it is in flight: written once it is done, so
+    /// they never land between the paste and its Enter.
+    held: HashMap<CardId, Vec<u8>>,
+    /// The last outcome of text sent to each card.
+    outcomes: HashMap<CardId, SendOutcome>,
+    /// Cards whose terminal has shown something since it was attached: their shell is up.
+    shown: HashSet<CardId>,
     tx: Sender<(CardId, TermEvent)>,
     rx: Receiver<(CardId, TermEvent)>,
     /// Keyboard captured for the focused card, with the frame's modifiers.
@@ -133,6 +192,13 @@ impl TerminalCards {
             spawn_errors: HashMap::new(),
             commands: HashMap::new(),
             lost_commands: HashMap::new(),
+            unsent: HashMap::new(),
+            agent: AgentSupport::Down,
+            in_flight: HashMap::new(),
+            next_send: 0,
+            held: HashMap::new(),
+            outcomes: HashMap::new(),
+            shown: HashSet::new(),
             tx,
             rx,
             keys: Vec::new(),
@@ -209,7 +275,143 @@ impl TerminalCards {
     fn paste_clipboard(&mut self, id: &str) {
         let bracketed = self.mode_of(id).contains(TermMode::BRACKETED_PASTE);
         let bytes = self.clipboard_paste(bracketed);
-        self.send_to(id, bytes);
+        self.type_into(id, bytes);
+    }
+
+    /// The user's input to a card. While text sent by the app to it is in flight, held until it
+    /// is done (the user's keys never land between that paste and its Enter, and the Enter never
+    /// submits what the user was typing). Ctrl+C is never held: it goes at once, with what was
+    /// held before it.
+    fn type_into(&mut self, id: &str, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        if !self.in_flight.values().any(|f| f.card == id) {
+            return self.send_to(id, bytes);
+        }
+        let held = self.held.entry(id.to_string()).or_default();
+        held.extend(bytes);
+        if held.contains(&0x03) {
+            let held = self.held.remove(id).unwrap_or_default();
+            self.send_to(id, held);
+        }
+    }
+
+    /// Writes the keys held for a card once nothing sent to it is in flight any more.
+    fn release_held(&mut self, id: &str) {
+        if !self.in_flight.values().any(|f| f.card == id)
+            && let Some(bytes) = self.held.remove(id)
+        {
+            self.send_to(id, bytes);
+        }
+    }
+
+    /// Why a card cannot take text now (`None`: its session is up and shows its shell).
+    fn refusal(&self, card: &Card) -> Option<SendRefusal> {
+        // Up: the agent saw its session, and its terminal has shown something (the shell's
+        // prompt) since it was attached: text pasted into a shell still reading its rc files
+        // would go plain, line by line. Once shown, a blank screen (`clear`) does not count.
+        let shown = self.launcher == Launcher::Disabled || self.shown.contains(&card.id);
+        // A dead pane (its program exited, the pane kept by `remain-on-exit`): the agent says so.
+        if card.status() == Some(protocol::TermStatus::Dead) {
+            Some(SendRefusal::Ended)
+        } else if self.spawn_errors.contains_key(&card.id) {
+            Some(SendRefusal::NotStarted)
+        } else if self.commands.contains_key(&card.id) || card.info.is_none() || !shown {
+            // A start command not taken yet: text sent now would land in front of it.
+            Some(SendRefusal::Starting)
+        } else {
+            None
+        }
+    }
+
+    /// `Event::SendText`: handed to the agent, which has tmux paste it into this card's session
+    /// only (then Enter). A card that cannot take it keeps the text, with why, for the user to
+    /// copy. `None`: in flight, the outcome comes with the agent's answer.
+    fn send_text(&mut self, world: &World, id: &str, text: &str, enter: bool, out: &mut Vec<Event>) -> Option<SendOutcome> {
+        let Some(card) = world.card(id) else { return Some(SendOutcome::Refused(SendRefusal::NoCard)) };
+        let refused = self.refusal(card).or(match self.agent {
+            AgentSupport::Ready => None,
+            AgentSupport::Down => Some(SendRefusal::NoAgent),
+            AgentSupport::TooOld => Some(SendRefusal::AgentTooOld),
+        });
+        if let Some(why) = refused {
+            return Some(self.refuse(id, text.to_string(), why, out));
+        }
+        let Some(message) = input::message_text(text, enter) else { return Some(SendOutcome::Empty) };
+        let request = self.next_send;
+        self.next_send += 1;
+        self.outcomes.remove(id);
+        self.in_flight.insert(request, InFlight { card: id.to_string(), text: text.to_string(), since: Instant::now() });
+        let limit_ms = Some(SEND_LIMIT.as_millis() as u64);
+        out.push(Event::ToAgent(AgentCmd::SendText { id: request, session: card.session(), text: message, enter, limit_ms }));
+        self.ctx.request_repaint_after(Duration::from_secs(1));
+        None
+    }
+
+    /// Keeps the text on the card, says why with a notice naming it; the outcome for the sender.
+    fn refuse(&mut self, id: &str, text: String, why: SendRefusal, out: &mut Vec<Event>) -> SendOutcome {
+        self.unsent.insert(id.to_string(), (text, why.clone()));
+        out.push(Event::Notify(id.to_string(), Notice::NotSent(why.clone())));
+        SendOutcome::Refused(why)
+    }
+
+    /// The end of a text in flight: its outcome, then the keys held for its card.
+    fn settle_send(&mut self, request: u64, result: Result<(), Sent>, out: &mut Vec<Event>) {
+        let Some(f) = self.in_flight.remove(&request) else { return };
+        let outcome = match result {
+            Ok(()) => {
+                // A refusal kept from before is stale now.
+                self.unsent.remove(&f.card);
+                SendOutcome::Sent
+            }
+            // The text is in the input line: told, but not offered again (a retry would type it
+            // twice).
+            Err(Sent::Pasted(why)) => {
+                self.unsent.remove(&f.card);
+                out.push(Event::Notify(f.card.clone(), Notice::NotSubmitted(why.clone())));
+                SendOutcome::PastedNotSubmitted(why)
+            }
+            Err(Sent::Not(why)) => self.refuse(&f.card, f.text, why, out),
+        };
+        self.outcomes.insert(f.card.clone(), outcome.clone());
+        out.push(Event::TextSendOutcome { card: f.card.clone(), outcome });
+        self.release_held(&f.card);
+    }
+
+    /// Cards whose terminal shows something for the first time since it was attached.
+    fn note_shown(&mut self) {
+        let fresh: Vec<CardId> = self.runtimes.iter().filter(|(id, rt)| !self.shown.contains(*id) && !rt.screen_text().trim().is_empty()).map(|(id, _)| id.clone()).collect();
+        self.shown.extend(fresh);
+    }
+
+    /// Settles the texts in flight: all of them as `gone` (the agent went), or else those past
+    /// their time, as maybe not sent.
+    fn settle_all(&mut self, gone: Option<SendRefusal>, out: &mut Vec<Event>) {
+        let now = Instant::now();
+        let mut due: Vec<u64> = self.in_flight.iter().filter(|(_, f)| gone.is_some() || now.duration_since(f.since) >= SEND_ANSWER_TIMEOUT).map(|(id, _)| *id).collect();
+        due.sort_unstable();
+        for request in due {
+            self.settle_send(request, Err(Sent::Not(gone.clone().unwrap_or(SendRefusal::NoAnswer))), out);
+        }
+        if !self.in_flight.is_empty() {
+            self.ctx.request_repaint_after(Duration::from_secs(1));
+        }
+    }
+
+    /// Text sent by the app that this card did not take, and why.
+    pub fn unsent_text(&self, id: &str) -> Option<(&str, &SendRefusal)> {
+        self.unsent.get(id).map(|(text, why)| (text.as_str(), why))
+    }
+
+    /// The last outcome of text sent to this card (none while in flight).
+    pub fn last_outcome(&self, id: &str) -> Option<&SendOutcome> {
+        self.outcomes.get(id)
+    }
+
+    /// Whether the card's terminal application asked for bracketed paste (tests).
+    pub fn bracketed_paste(&self, id: &str) -> bool {
+        self.runtimes.contains_key(id) && self.mode_of(id).contains(TermMode::BRACKETED_PASTE)
     }
 
     pub fn has_dialog(&self) -> bool {
@@ -282,6 +484,21 @@ impl TerminalCards {
         }
     }
 
+    /// The card goes: the texts kept for it (not run, not sent, not yet written) go too.
+    fn forget_texts(&mut self, id: &str, out: &mut Vec<Event>) {
+        self.lost_commands.remove(id);
+        self.unsent.remove(id);
+        self.held.remove(id);
+        self.outcomes.remove(id);
+        self.shown.remove(id);
+        // Its sender is told now; the agent's late answer is ignored.
+        let gone: Vec<u64> = self.in_flight.iter().filter(|(_, f)| f.card == id).map(|(r, _)| *r).collect();
+        for request in gone {
+            self.in_flight.remove(&request);
+            out.push(Event::TextSendOutcome { card: id.to_string(), outcome: SendOutcome::Refused(SendRefusal::NoCard) });
+        }
+    }
+
     /// A card's command went to tmux, and its session has not shown up yet.
     pub fn awaiting_session(&self, id: &str) -> bool {
         matches!(self.commands.get(id), Some(CommandRun::Launched(..)))
@@ -311,13 +528,15 @@ impl TerminalCards {
     /// PTY events: replies to the terminal, clipboard, process exit.
     pub fn poll(&mut self, world: &mut World, events: &mut Vec<Event>) {
         self.confirm_launches();
+        self.settle_all(None, events);
+        self.note_shown();
         while let Ok((id, ev)) = self.rx.try_recv() {
             let Some(rt) = self.runtimes.get(&id) else { continue };
             match ev {
                 TermEvent::PtyWrite(text) => rt.write(text.into_bytes()),
                 TermEvent::ClipboardStore(_, text) => {
                     self.ctx.copy_text(text);
-                    events.push(Event::Notify(id.clone(), crate::shell::event::Notice::Copied));
+                    events.push(Event::Notify(id.clone(), Notice::Copied));
                 }
                 TermEvent::ColorRequest(index, format) => {
                     let c = match index {
@@ -330,6 +549,7 @@ impl TerminalCards {
                 TermEvent::TextAreaSizeRequest(format) => rt.write(format(rt.window_size()).into_bytes()),
                 TermEvent::ChildExit(_) | TermEvent::Exit => {
                     self.runtimes.remove(&id);
+                    self.shown.remove(&id);
                     if let Some(card) = world.card_mut(&id) {
                         card.pty_dead = true;
                         if !self.killed.contains(&card.session()) {
@@ -367,7 +587,7 @@ impl TerminalCards {
                 _ => {}
             }
         }
-        self.send_to(id, out);
+        self.type_into(id, out);
     }
 
     fn ensure_runtimes(&mut self, world: &World, cell: Vec2) {
@@ -642,7 +862,8 @@ impl TerminalCards {
             self.forward_mouse(ui, &id, &body_r, body_inner.min, cell_screen, focused);
         }
         if !is_preview(zoom) {
-            self.lost_banner(ui, body, &id);
+            let title = world.cards[i].title();
+            self.kept_text_banners(ui, body, &id, &title);
         }
         // A readable terminal under the pointer keeps the whole wheel, including the tail of
         // smoothed scrolling in later frames: the canvas doesn't move behind it.
@@ -687,6 +908,7 @@ impl TerminalCards {
             events.push(Event::FlyTo(card.id.clone()));
             ui.close();
         }
+        ui.menu_button(t().send_message_menu, |ui| quick_messages_menu(ui, world, card, events));
         ui.menu_button(t().move_to, |ui| {
             for p in &world.projects {
                 let here = card.project.as_ref() == Some(&p.id);
@@ -730,24 +952,21 @@ impl TerminalCards {
         }
     }
 
-    /// The card's command never ran: a strip at the bottom of the card says so and keeps its text
-    /// at hand (a long prompt), until dismissed.
-    fn lost_banner(&mut self, ui: &mut Ui, body: Rect, id: &CardId) {
-        let Some(text) = self.lost_commands.get(id).cloned() else { return };
-        let strip = Rect::from_min_max(pos2(body.min.x, body.max.y - 34.0), body.max).intersect(body);
-        ui.painter_at(strip).rect_filled(strip, CornerRadius::ZERO, Color32::from_rgb(110, 40, 40));
-        let mut dismiss = false;
-        ui.scope_builder(egui::UiBuilder::new().max_rect(strip.shrink2(vec2(10.0, 4.0))).layout(egui::Layout::left_to_right(egui::Align::Center)), |ui| {
-            ui.label(egui::RichText::new(t().command_not_run).color(Color32::WHITE));
-            if ui.button(t().copy_command).clicked() {
-                self.ctx.copy_text(text);
+    /// Text the card did not take (its command never ran, text sent to it was refused): strips at
+    /// the bottom of the card say so and keep the text at hand (a long prompt), until dismissed.
+    fn kept_text_banners(&mut self, ui: &mut Ui, body: Rect, id: &CardId, title: &str) {
+        let mut bottom = body.max.y;
+        if let Some(text) = self.lost_commands.get(id).cloned() {
+            if kept_text_banner(ui, Rect::from_min_max(pos2(body.min.x, bottom - BANNER_H), pos2(body.max.x, bottom)).intersect(body), t().command_not_run, t().copy_command, &text, None) {
+                self.lost_commands.remove(id);
             }
-            if ui.small_button("×").clicked() {
-                dismiss = true;
+            bottom -= BANNER_H;
+        }
+        if let Some((text, why)) = self.unsent.get(id).cloned() {
+            let message = (t().text_not_sent)(title, &t().send_refusal(&why));
+            if kept_text_banner(ui, Rect::from_min_max(pos2(body.min.x, bottom - BANNER_H), pos2(body.max.x, bottom)).intersect(body), &message, t().copy_text, &text, Some(t().dismiss_text_a11y)) {
+                self.unsent.remove(id);
             }
-        });
-        if dismiss {
-            self.lost_commands.remove(id);
         }
     }
 
@@ -931,7 +1150,7 @@ impl TerminalCards {
                     self.killed.insert(session.clone());
                     self.runtimes.remove(id);
                     self.forget_command(id, &session);
-                    self.lost_commands.remove(id);
+                    self.forget_texts(id, out);
                     if self.launcher == Launcher::Tmux {
                         pty::kill_session_in_background(session);
                     }
@@ -945,12 +1164,37 @@ impl TerminalCards {
                     let session = card.session();
                     self.forget_command(id, &session);
                 }
-                self.lost_commands.remove(id);
+                self.forget_texts(id, out);
                 world.remove_card(id);
+            }
+            Event::SendText { card, text, enter } => {
+                if let Some(outcome) = self.send_text(world, card, text, *enter, out) {
+                    self.outcomes.insert(card.clone(), outcome.clone());
+                    out.push(Event::TextSendOutcome { card: card.clone(), outcome });
+                }
+            }
+            Event::Agent(AgentEvent::TextSent { id, problem, pasted, .. }) => {
+                let result = match problem {
+                    None => Ok(()),
+                    Some(problem) if *pasted => Err(Sent::Pasted(refusal_of(problem))),
+                    Some(problem) => Err(Sent::Not(refusal_of(problem))),
+                };
+                self.settle_send(*id, result, out);
+            }
+            Event::Agent(AgentEvent::Hello { send_text, .. }) => {
+                // A new agent: the previous one will never answer what it was asked.
+                self.settle_all(Some(SendRefusal::NoAgent), out);
+                self.agent = if *send_text { AgentSupport::Ready } else { AgentSupport::TooOld };
+            }
+            Event::AgentLost => {
+                self.agent = AgentSupport::Down;
+                self.settle_all(Some(SendRefusal::NoAgent), out);
             }
             Event::RespawnCard(id) => {
                 self.spawn_errors.remove(id);
                 self.lost_commands.remove(id);
+                self.unsent.remove(id);
+                self.shown.remove(id);
                 if let Some(card) = world.card_mut(id) {
                     card.pty_dead = false;
                 }
@@ -978,6 +1222,32 @@ impl TerminalCards {
             }
             _ => {}
         }
+    }
+}
+
+/// The card menu's quick messages: those of its group, each sent to this card only, then the
+/// way to add or edit them.
+fn quick_messages_menu(ui: &mut Ui, world: &World, card: &Card, events: &mut Vec<Event>) {
+    let Some(group) = card.project.as_deref().and_then(|p| world.project(p)) else {
+        ui.label(egui::RichText::new(t().messages_need_group).color(theme::TEXT_DIM));
+        return;
+    };
+    if group.messages.is_empty() {
+        ui.label(egui::RichText::new(t().no_messages).color(theme::TEXT_DIM));
+    }
+    for m in &group.messages {
+        let then = if m.enter { format!("\n\n{}", t().then_enter) } else { String::new() };
+        let hover = egui::RichText::new(format!("{}\n\n{}{then}", m.name, m.text)).monospace();
+        if ui.button(crate::features::projects::menu_name(&m.name)).on_hover_text(hover).clicked() {
+            events.push(Event::SendText { card: card.id.clone(), text: m.text.clone(), enter: m.enter });
+            ui.close();
+        }
+    }
+    ui.separator();
+    let edit = if group.messages.is_empty() { t().add_message } else { t().edit_messages };
+    if ui.button(edit).clicked() {
+        events.push(Event::EditQuickMessages(group.id.clone()));
+        ui.close();
     }
 }
 
@@ -1078,6 +1348,33 @@ fn header_layout(title_end: f32, right: f32, cwd_width: Option<f32>, badge_width
     HeaderLayout { cwd: false, badge: None, prompt: Some(span) }
 }
 
+/// Height of a strip at the bottom of a card (screen points).
+const BANNER_H: f32 = 34.0;
+
+/// A red strip: a message, a button that copies `text`, and ×. Returns `true` when dismissed.
+/// `dismiss_a11y`: what the × says to screen readers (just "×" when `None`).
+fn kept_text_banner(ui: &mut Ui, strip: Rect, message: &str, copy_label: &str, text: &str, dismiss_a11y: Option<&str>) -> bool {
+    ui.painter_at(strip).rect_filled(strip, CornerRadius::ZERO, Color32::from_rgb(110, 40, 40));
+    let mut dismiss = false;
+    // Right to left: the buttons always fit, a long message is cut (whole on hover).
+    ui.scope_builder(egui::UiBuilder::new().max_rect(strip.shrink2(vec2(10.0, 4.0))).layout(egui::Layout::right_to_left(egui::Align::Center)), |ui| {
+        let close = ui.small_button("×");
+        if let Some(label) = dismiss_a11y {
+            close.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+        }
+        if close.clicked() {
+            dismiss = true;
+        }
+        if ui.button(copy_label).clicked() {
+            ui.ctx().copy_text(text.to_string());
+        }
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.add(egui::Label::new(egui::RichText::new(message).color(Color32::WHITE)).truncate()).on_hover_text(message);
+        });
+    });
+    dismiss
+}
+
 fn cell_px(cell: Vec2) -> (u16, u16) {
     (cell.x.round().max(1.0) as u16, cell.y.round().max(1.0) as u16)
 }
@@ -1138,6 +1435,261 @@ mod tests {
         cards.commands.insert("c".into(), CommandRun::Launched("echo c".into(), rx));
         assert!(cards.forget_command("c", "tc_c"));
         assert!(!cards.forget_command("none", "tc_none"));
+    }
+
+    fn session_info(card: &Card) -> protocol::SessionInfo {
+        protocol::SessionInfo {
+            session: card.session(),
+            status: protocol::TermStatus::Idle,
+            command: None,
+            cwd: None,
+            last_exit: None,
+            last_duration_secs: None,
+            tail: vec![],
+            agent_session_id: None,
+            agent_transcript: None,
+            last_prompt: None,
+        }
+    }
+
+    /// Two cards whose sessions the agent reported, and an agent that delivers text.
+    fn ready() -> (TerminalCards, World, CardId, CardId) {
+        let mut cards = TerminalCards::new(egui::Context::default(), Launcher::Disabled);
+        let mut world = World::default();
+        let mut ids = Vec::new();
+        for x in [0.0, 500.0] {
+            let mut card = Card::new(Rect::from_min_size(pos2(x, 0.0), Vec2::splat(100.0)), None);
+            card.info = Some(session_info(&card));
+            ids.push(card.id.clone());
+            world.add_card(card);
+        }
+        cards.handle(&Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true }), &mut world, &mut vec![]);
+        (cards, world, ids[0].clone(), ids[1].clone())
+    }
+
+    fn send(cards: &mut TerminalCards, world: &mut World, id: &str, text: &str, enter: bool) -> Vec<Event> {
+        let mut out = vec![];
+        cards.handle(&Event::SendText { card: id.into(), text: text.into(), enter }, world, &mut out);
+        out
+    }
+
+    fn answer(cards: &mut TerminalCards, world: &mut World, request: u64, problem: Option<Problem>) -> Vec<Event> {
+        answer_pasted(cards, world, request, problem, false)
+    }
+
+    fn answer_pasted(cards: &mut TerminalCards, world: &mut World, request: u64, problem: Option<Problem>, pasted: bool) -> Vec<Event> {
+        let mut out = vec![];
+        cards.handle(&Event::Agent(AgentEvent::TextSent { id: request, session: "tc_x".into(), problem, pasted }), world, &mut out);
+        out
+    }
+
+    /// The outcome the sender got, and whether a notice names the card.
+    fn outcome_of(out: &[Event], id: &str) -> (Option<SendOutcome>, bool) {
+        let outcome = out.iter().find_map(|e| match e {
+            Event::TextSendOutcome { card, outcome } if card == id => Some(outcome.clone()),
+            _ => None,
+        });
+        (outcome, out.iter().any(|e| matches!(e, Event::Notify(c, Notice::NotSent(_)) if c == id)))
+    }
+
+    #[test]
+    fn text_goes_to_the_agent_for_that_session_and_is_sent_once_tmux_took_it() {
+        let (mut cards, mut world, id, other) = ready();
+        let session = world.card(&id).unwrap().session();
+        let out = send(&mut cards, &mut world, &id, "echo one\r\necho two\n", true);
+        // Its session only; CRLF as LF, the trailing line break gone (the Enter submits once).
+        assert!(matches!(out.as_slice(), [Event::ToAgent(AgentCmd::SendText { id: 0, session: s, text, enter: true, .. })] if *s == session && text == "echo one\necho two"), "{out:?}");
+        assert_eq!(cards.last_outcome(&id), None, "in flight: no outcome yet");
+        cards.unsent.insert(id.clone(), ("old".into(), SendRefusal::NoAgent));
+        let out = answer(&mut cards, &mut world, 0, None);
+        assert_eq!(outcome_of(&out, &id), (Some(SendOutcome::Sent), false));
+        assert_eq!(cards.last_outcome(&id), Some(&SendOutcome::Sent));
+        assert_eq!(cards.unsent_text(&id), None, "an older refusal is stale now");
+        assert!(answer(&mut cards, &mut world, 0, None).is_empty(), "answered once");
+        // Without Enter, the text's own line break stays.
+        let out = send(&mut cards, &mut world, &other, "draft\n", false);
+        assert!(matches!(out.as_slice(), [Event::ToAgent(AgentCmd::SendText { id: 1, text, enter: false, .. })] if text == "draft\n"), "{out:?}");
+        // Nothing left to send: nothing sent.
+        assert_eq!(outcome_of(&send(&mut cards, &mut world, &id, "\r\n", true), &id), (Some(SendOutcome::Empty), false));
+        assert!(cards.written(&id).is_empty() && cards.written(&other).is_empty(), "never through the terminal's keys");
+    }
+
+    #[test]
+    fn keys_typed_while_text_is_in_flight_wait_for_its_enter_but_ctrl_c_does_not() {
+        let (mut cards, mut world, id, other) = ready();
+        send(&mut cards, &mut world, &id, "go on", true);
+        cards.type_into(&id, b"ab".to_vec());
+        cards.type_into(&other, b"x".to_vec());
+        assert!(cards.written(&id).is_empty(), "held: it would land between the paste and its Enter");
+        assert_eq!(cards.written(&other), b"x", "other cards are not held");
+        cards.type_into(&id, vec![0x03]);
+        assert_eq!(cards.written(&id), b"ab\x03", "Ctrl+C goes at once, with what was held before it");
+        cards.type_into(&id, b"c".to_vec());
+        answer(&mut cards, &mut world, 0, None);
+        assert_eq!(cards.written(&id), b"ab\x03c", "the rest once the text is done");
+        cards.type_into(&id, b"d".to_vec());
+        assert_eq!(cards.written(&id), b"ab\x03cd");
+    }
+
+    #[test]
+    fn a_card_that_cannot_take_text_refuses_it_and_keeps_it() {
+        let (mut cards, mut world, id, _) = ready();
+        let refused = |out: &[Event], id: &str, why: SendRefusal| outcome_of(out, id) == (Some(SendOutcome::Refused(why)), true);
+        assert_eq!(outcome_of(&send(&mut cards, &mut world, "gone", "x", true), "gone"), (Some(SendOutcome::Refused(SendRefusal::NoCard)), false));
+        assert_eq!(cards.unsent_text("gone"), None, "no card to keep it on: only its sender is told");
+        // Its start command not taken yet: text sent now would land in front of it.
+        cards.commands.insert(id.clone(), CommandRun::Pending("claude".into()));
+        assert!(refused(&send(&mut cards, &mut world, &id, "go on", true), &id, SendRefusal::Starting));
+        assert_eq!(cards.unsent_text(&id), Some(("go on", &SendRefusal::Starting)));
+        let (_tx, rx) = mpsc::channel();
+        cards.commands.insert(id.clone(), CommandRun::Launched("claude".into(), rx));
+        assert!(refused(&send(&mut cards, &mut world, &id, "go on", true), &id, SendRefusal::Starting), "until its shell took it");
+        cards.commands.clear();
+        // Its session not seen by the agent yet.
+        world.card_mut(&id).unwrap().info = None;
+        assert!(refused(&send(&mut cards, &mut world, &id, "x", true), &id, SendRefusal::Starting));
+        let info = session_info(world.card(&id).unwrap());
+        world.card_mut(&id).unwrap().info = Some(info);
+        cards.spawn_errors.insert(id.clone(), "no wsl.exe".into());
+        assert!(refused(&send(&mut cards, &mut world, &id, "a", false), &id, SendRefusal::NotStarted));
+        world.card_mut(&id).unwrap().pty_dead = true;
+        assert!(refused(&send(&mut cards, &mut world, &id, "b\nc", true), &id, SendRefusal::Ended));
+        assert_eq!(cards.unsent_text(&id), Some(("b\nc", &SendRefusal::Ended)), "the latest text, as written");
+        // Respawned: the strip goes.
+        cards.handle(&Event::RespawnCard(id.clone()), &mut world, &mut vec![]);
+        assert_eq!(cards.unsent_text(&id), None);
+        assert!(cards.in_flight.is_empty(), "nothing was handed to the agent");
+
+        // A real terminal still blank (its shell not shown yet): starting.
+        let mut real = TerminalCards::new(egui::Context::default(), Launcher::Tmux);
+        real.agent = AgentSupport::Ready;
+        assert!(refused(&send(&mut real, &mut world, &id, "x", false), &id, SendRefusal::Starting));
+        // A pane the agent reports dead (kept by `remain-on-exit`, its client still attached).
+        let info = protocol::SessionInfo { status: protocol::TermStatus::Dead, ..session_info(world.card(&id).unwrap()) };
+        world.card_mut(&id).unwrap().info = Some(info);
+        assert!(refused(&send(&mut cards, &mut world, &id, "x", true), &id, SendRefusal::Ended));
+    }
+
+    #[test]
+    fn a_card_once_shown_stays_ready_through_a_blank_screen_until_it_is_attached_again() {
+        let (_, mut world, id, _) = ready();
+        let canned = |cards: &mut TerminalCards, id: &CardId, bytes: &[u8]| {
+            let rt = TermRuntime::canned(id, GridSize { cols: 20, rows: 3 }, (8, 16), bytes, cards.tx.clone(), cards.ctx.clone());
+            cards.runtimes.insert(id.clone(), rt);
+        };
+        let mut cards = TerminalCards::new(egui::Context::default(), Launcher::Tmux);
+        cards.agent = AgentSupport::Ready;
+        canned(&mut cards, &id, b"");
+        cards.poll(&mut world, &mut vec![]);
+        assert_eq!(outcome_of(&send(&mut cards, &mut world, &id, "x", true), &id).0, Some(SendOutcome::Refused(SendRefusal::Starting)), "nothing shown yet");
+        canned(&mut cards, &id, b"$ ");
+        cards.poll(&mut world, &mut vec![]);
+        // `clear`: blank again, but its shell is up.
+        canned(&mut cards, &id, b"");
+        cards.poll(&mut world, &mut vec![]);
+        assert!(matches!(send(&mut cards, &mut world, &id, "x", true).as_slice(), [Event::ToAgent(AgentCmd::SendText { .. })]));
+        // Respawned: it must show again.
+        cards.handle(&Event::RespawnCard(id.clone()), &mut world, &mut vec![]);
+        assert_eq!(outcome_of(&send(&mut cards, &mut world, &id, "y", true), &id).0, Some(SendOutcome::Refused(SendRefusal::Starting)));
+    }
+
+    #[test]
+    fn a_text_pasted_but_not_submitted_is_told_and_not_offered_again() {
+        let (mut cards, mut world, id, _) = ready();
+        let out = send(&mut cards, &mut world, &id, "go on", true);
+        assert!(
+            matches!(out.as_slice(), [Event::ToAgent(AgentCmd::SendText { limit_ms: Some(ms), .. })] if *ms < SEND_ANSWER_TIMEOUT.as_millis() as u64),
+            "the agent gives up before the app does: {out:?}"
+        );
+        let busy = Problem::PaneBusy { session: "tc_x".into(), mode: "clock-mode".into() };
+        let out = answer_pasted(&mut cards, &mut world, 0, Some(busy), true);
+        let why = SendRefusal::Busy("clock-mode".into());
+        assert_eq!(outcome_of(&out, &id).0, Some(SendOutcome::PastedNotSubmitted(why.clone())));
+        assert!(out.iter().any(|e| matches!(e, Event::Notify(c, Notice::NotSubmitted(w)) if *c == id && *w == why)));
+        assert_eq!(cards.unsent_text(&id), None, "already in the input line: no copy offered");
+        // Not pasted at all: refused and kept, each with its reason.
+        for (k, (problem, why)) in [
+            (Problem::PaneDead { session: "tc_x".into() }, SendRefusal::Ended),
+            (Problem::PaneBusy { session: "tc_x".into(), mode: "tree-mode".into() }, SendRefusal::Busy("tree-mode".into())),
+            (Problem::Expired, SendRefusal::Expired),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            send(&mut cards, &mut world, &id, "again", true);
+            let out = answer(&mut cards, &mut world, k as u64 + 1, Some(problem));
+            assert_eq!(outcome_of(&out, &id), (Some(SendOutcome::Refused(why.clone())), true));
+            assert_eq!(cards.unsent_text(&id), Some(("again", &why)));
+        }
+    }
+
+    #[test]
+    fn without_an_agent_that_delivers_text_it_is_refused_and_kept() {
+        let (_, mut world, id, _) = ready();
+        let mut cards = TerminalCards::new(egui::Context::default(), Launcher::Disabled);
+        assert_eq!(outcome_of(&send(&mut cards, &mut world, &id, "x", true), &id).0, Some(SendOutcome::Refused(SendRefusal::NoAgent)));
+        cards.handle(&Event::Agent(AgentEvent::Hello { version: "0.1".into(), hooks: protocol::Hooks::Installed, send_text: false }), &mut world, &mut vec![]);
+        assert_eq!(outcome_of(&send(&mut cards, &mut world, &id, "x", true), &id).0, Some(SendOutcome::Refused(SendRefusal::AgentTooOld)));
+        assert_eq!(cards.unsent_text(&id), Some(("x", &SendRefusal::AgentTooOld)));
+    }
+
+    #[test]
+    fn what_the_agent_could_not_deliver_is_refused_and_kept() {
+        let (mut cards, mut world, id, other) = ready();
+        send(&mut cards, &mut world, &id, "a", true);
+        send(&mut cards, &mut world, &other, "b", true);
+        send(&mut cards, &mut world, &id, "c", true);
+        let out = answer(&mut cards, &mut world, 0, Some(Problem::SessionNotFound { session: "tc_x".into() }));
+        assert_eq!(outcome_of(&out, &id), (Some(SendOutcome::Refused(SendRefusal::NoSession)), true));
+        let out = answer(&mut cards, &mut world, 1, Some(Problem::SendFailed { detail: "no space".into() }));
+        assert_eq!(outcome_of(&out, &other).0, Some(SendOutcome::Refused(SendRefusal::Failed("no space".into()))));
+        assert_eq!(cards.unsent_text(&other), Some(("b", &SendRefusal::Failed("no space".into()))));
+        // The agent goes: what it was asked will never be answered.
+        cards.type_into(&id, b"k".to_vec());
+        let mut out = vec![];
+        cards.handle(&Event::AgentLost, &mut world, &mut out);
+        assert_eq!(outcome_of(&out, &id).0, Some(SendOutcome::Refused(SendRefusal::NoAgent)));
+        assert_eq!(cards.written(&id), b"k", "held keys go");
+        assert_eq!(outcome_of(&send(&mut cards, &mut world, &id, "d", true), &id).0, Some(SendOutcome::Refused(SendRefusal::NoAgent)));
+    }
+
+    #[test]
+    fn an_agent_that_does_not_answer_in_time_releases_the_card() {
+        let (mut cards, mut world, id, _) = ready();
+        send(&mut cards, &mut world, &id, "a", true);
+        cards.type_into(&id, b"k".to_vec());
+        let mut out = vec![];
+        cards.poll(&mut world, &mut out);
+        assert!(out.is_empty() && cards.written(&id).is_empty(), "still in time");
+        cards.in_flight.get_mut(&0).unwrap().since -= SEND_ANSWER_TIMEOUT;
+        cards.poll(&mut world, &mut out);
+        assert_eq!(outcome_of(&out, &id), (Some(SendOutcome::Refused(SendRefusal::NoAnswer)), true));
+        assert_eq!(cards.written(&id), b"k");
+        assert!(answer(&mut cards, &mut world, 0, None).is_empty(), "a late answer is ignored");
+    }
+
+    #[test]
+    fn a_card_closed_while_text_is_in_flight_tells_its_sender() {
+        let (mut cards, mut world, id, _) = ready();
+        send(&mut cards, &mut world, &id, "a", true);
+        let mut out = vec![];
+        cards.handle(&Event::RemoveCard(id.clone()), &mut world, &mut out);
+        assert_eq!(outcome_of(&out, &id).0, Some(SendOutcome::Refused(SendRefusal::NoCard)));
+        assert!(answer(&mut cards, &mut world, 0, None).is_empty());
+    }
+
+    #[test]
+    fn refusals_name_the_card_and_say_why() {
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
+        assert_eq!(
+            (t().text_not_submitted)("api", &t().send_refusal(&SendRefusal::Busy("clock-mode".into()))),
+            "Texte tapé dans « api » mais pas validé : son volet affiche un écran tmux (clock-mode) : fermez-le d'abord."
+        );
+        assert_eq!((t().text_not_sent)("api", &t().send_refusal(&SendRefusal::Ended)), "Texte non envoyé à « api » : sa session est terminée.");
+        assert_eq!(t().send_refusal(&SendRefusal::Failed("no space".into())), "tmux l'a refusé (no space).");
+        crate::shell::i18n::set(crate::shell::i18n::Lang::En);
+        assert_eq!((t().text_not_sent)("api", &t().send_refusal(&SendRefusal::NoAgent)), "Text not sent to “api”: the agent (tcanvas-agent), which delivers it, is not connected.");
+        crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
     }
 
     #[test]

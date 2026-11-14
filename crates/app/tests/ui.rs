@@ -469,7 +469,7 @@ fn missing_tmux_is_shown_in_the_status_bar() {
 
 #[test]
 fn missing_shell_hooks_can_be_installed_from_the_status_bar() {
-    let hello = |hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks });
+    let hello = |hooks| Event::Agent(AgentEvent::Hello { version: "1".into(), hooks, send_text: true });
     let installs = |h: &Harness<'_, App>| h.state().agent_sent().iter().filter(|c| **c == protocol::AgentCmd::InstallHooks).count();
     for (lang, label, button) in [(Lang::Fr, "⚠ hooks", "Installer"), (Lang::En, "⚠ hooks", "Install")] {
         let dir = temp_dir("hooks");
@@ -583,7 +583,7 @@ fn clicking_a_preview_zooms_in_on_it() {
 
 fn add_project(h: &mut Harness<'_, App>, name: &str, rect: Rect) -> String {
     let id = format!("p-{name}");
-    h.state_mut().world.projects.push(tcanvas::shell::world::Project { id: id.clone(), name: name.into(), color: [94, 129, 244], rect, cwd: None, templates: Vec::new() });
+    h.state_mut().world.projects.push(tcanvas::shell::world::Project { id: id.clone(), name: name.into(), color: [94, 129, 244], rect, cwd: None, templates: Vec::new(), messages: Vec::new() });
     id
 }
 
@@ -2774,6 +2774,298 @@ fn the_template_menu_in_english() {
     steps(&mut h, 2);
     assert!(h.query_by_label("Command templates · api").is_some());
     assert!(h.query_by_label("Save").is_some());
+}
+
+// --- Sending text: quick messages --------------------------------------------------------------
+
+/// Group "api" with these quick messages and a card "srv" in it whose session the agent reported,
+/// open, with an agent that delivers text; returns the card.
+fn group_with_messages(h: &mut Harness<'_, App>, messages: &[(&str, &str, bool)]) -> String {
+    linked_groups(h);
+    let p = h.state_mut().world.projects.iter_mut().find(|p| p.id == "p-api").unwrap();
+    p.messages = messages.iter().map(|(name, text, enter)| tcanvas::shell::world::QuickMessage { name: (*name).into(), text: (*text).into(), enter: *enter }).collect();
+    let id = add_card(h, "srv", pos2(40.0, 40.0));
+    let session = format!("tc_{id}");
+    h.state_mut().dispatch(vec![
+        Event::Agent(AgentEvent::Hello { version: "1".into(), hooks: protocol::Hooks::Installed, send_text: true }),
+        Event::Agent(AgentEvent::Session(SessionInfo {
+            session,
+            status: TermStatus::Idle,
+            command: None,
+            cwd: Some("/home/me/api".into()),
+            last_exit: None,
+            last_duration_secs: None,
+            tail: vec![],
+            agent_session_id: None,
+            agent_transcript: None,
+            last_prompt: None,
+        })),
+    ]);
+    steps(h, 2);
+    h.get_by_label("● api").click();
+    steps(h, 45);
+    id
+}
+
+/// Right-click on the card's title bar: its menu.
+fn card_menu(h: &mut Harness<'_, App>, id: &str) {
+    let title = screen_of(h, h.state().world.card(id).unwrap().rect).min + Vec2::new(150.0, 8.0);
+    right_click_at(h, title);
+}
+
+/// Text handed to the agent so far: (request, session, text, enter).
+fn texts_sent(h: &Harness<'_, App>) -> Vec<(u64, String, String, bool)> {
+    h.state()
+        .agent_sent()
+        .iter()
+        .filter_map(|c| match c {
+            protocol::AgentCmd::SendText { id, session, text, enter, .. } => Some((*id, session.clone(), text.clone(), *enter)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The agent's answer to a text it was handed.
+fn text_sent(h: &mut Harness<'_, App>, request: u64, problem: Option<protocol::Problem>) {
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::TextSent { id: request, session: String::new(), problem, pasted: false })]);
+    steps(h, 2);
+}
+
+#[test]
+fn a_quick_message_goes_to_its_card_session_through_the_agent() {
+    use tcanvas::shell::event::SendOutcome;
+    let dir = temp_dir("quick-message");
+    let mut h = harness(&dir);
+    let id = group_with_messages(&mut h, &[("Commit", "Commite tes changements\navec un message clair\n", true), ("Brouillon", "à relire\n", false)]);
+    let other = add_card(&mut h, "autre", pos2(700.0, 40.0));
+    steps(&mut h, 2);
+    card_menu(&mut h, &id);
+    assert!(h.state().cards.written(&id).is_empty(), "a right-click on the title bar opens the menu, it does not paste");
+    h.get_by_label("Envoyer un message").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Brouillon").is_some());
+    assert!(h.query_by_label("Modifier les messages…").is_some());
+    h.get_by_label("Commit").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Brouillon").is_none(), "the menu closes");
+    // To this card's session only, through the agent (never through the terminal's keys); the
+    // trailing line break goes, the Enter submits it once.
+    let session = format!("tc_{id}");
+    assert_eq!(texts_sent(&h), vec![(0, session.clone(), "Commite tes changements\navec un message clair".into(), true)]);
+    assert!(h.state().cards.written(&id).is_empty() && h.state().cards.written(&other).is_empty());
+    assert_eq!(h.state().cards.last_outcome(&id), None, "sent once tmux took it");
+    text_sent(&mut h, 0, None);
+    assert_eq!(h.state().cards.last_outcome(&id), Some(&SendOutcome::Sent));
+    assert_eq!(h.state().pending_toasts(), 0, "no notice when it got through");
+
+    // Without "press Enter after": the text as written, line break included.
+    card_menu(&mut h, &id);
+    h.get_by_label("Envoyer un message").click();
+    steps(&mut h, 2);
+    h.get_by_label("Brouillon").click();
+    steps(&mut h, 2);
+    assert_eq!(texts_sent(&h)[1], (1, session, "à relire\n".into(), false));
+}
+
+#[test]
+fn a_card_that_cannot_take_a_message_says_so_and_keeps_the_text() {
+    use tcanvas::shell::event::SendRefusal;
+    let dir = temp_dir("quick-message-refused");
+    let mut h = harness(&dir);
+    let id = group_with_messages(&mut h, &[("Relance", "continue", true)]);
+    h.state_mut().world.card_mut(&id).unwrap().pty_dead = true;
+    steps(&mut h, 2);
+    card_menu(&mut h, &id);
+    h.get_by_label("Envoyer un message").click();
+    steps(&mut h, 2);
+    h.get_by_label("Relance").click();
+    steps(&mut h, 2);
+    assert!(texts_sent(&h).is_empty(), "nothing sent");
+    assert_eq!(h.state().cards.unsent_text(&id), Some(("continue", &SendRefusal::Ended)));
+    // On the card, and in a toast (seen even when the card is off screen or zoomed out).
+    let message = "Texte non envoyé à « srv » : sa session est terminée.";
+    // The toast shows from the frame after its first (sized, then drawn).
+    h.step();
+    assert_eq!(h.query_all_by_label(message).count(), 2, "the strip and the toast");
+    assert!(h.query_by_label("Texte non envoyé").is_some(), "the toast's title");
+    h.get_by_label("Copier le texte").click();
+    steps(&mut h, 2);
+    // Dismissed: gone.
+    h.get_by_label("Fermer le texte non envoyé").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Copier le texte").is_none());
+    assert_eq!(h.state().cards.unsent_text(&id), None);
+
+    // What tmux could not take is kept too, and a later success clears it.
+    h.state_mut().world.card_mut(&id).unwrap().pty_dead = false;
+    h.state_mut().dispatch(vec![Event::SendText { card: id.clone(), text: "go".into(), enter: true }]);
+    text_sent(&mut h, 0, Some(protocol::Problem::SessionNotFound { session: format!("tc_{id}") }));
+    assert_eq!(h.state().cards.unsent_text(&id), Some(("go", &SendRefusal::NoSession)));
+    assert!(h.query_all_by_label("Texte non envoyé à « srv » : sa session tmux n'existe plus.").count() >= 1);
+    h.state_mut().dispatch(vec![Event::SendText { card: id.clone(), text: "go".into(), enter: true }]);
+    text_sent(&mut h, 1, None);
+    assert_eq!(h.state().cards.unsent_text(&id), None, "stale once a text got through");
+
+    // Pasted, but its Enter would have landed in a tmux screen: told, not offered again.
+    h.state_mut().dispatch(vec![Event::SendText { card: id.clone(), text: "go".into(), enter: true }]);
+    let busy = protocol::Problem::PaneBusy { session: format!("tc_{id}"), mode: "clock-mode".into() };
+    h.state_mut().dispatch(vec![Event::Agent(AgentEvent::TextSent { id: 2, session: String::new(), problem: Some(busy), pasted: true })]);
+    steps(&mut h, 3);
+    assert_eq!(h.state().cards.last_outcome(&id), Some(&tcanvas::shell::event::SendOutcome::PastedNotSubmitted(SendRefusal::Busy("clock-mode".into()))));
+    assert_eq!(h.state().cards.unsent_text(&id), None);
+    assert!(h.query_by_label("Texte non validé").is_some());
+    assert!(h.query_by_label("Texte tapé dans « srv » mais pas validé : son volet affiche un écran tmux (clock-mode) : fermez-le d'abord.").is_some());
+
+    // Still starting (its start command not handed over yet): refused too.
+    h.state_mut().dispatch(vec![Event::NewCard { at: None, project: Some("p-api".into()), command: Some("claude".into()) }]);
+    steps(&mut h, 45);
+    let starting = h.state().world.members("p-api").last().unwrap().id.clone();
+    h.state_mut().dispatch(vec![Event::SendText { card: starting.clone(), text: "go".into(), enter: true }]);
+    steps(&mut h, 2);
+    assert_eq!(h.state().cards.unsent_text(&starting), Some(("go", &SendRefusal::Starting)));
+    assert_eq!(texts_sent(&h).len(), 3, "the starting card got none");
+}
+
+#[test]
+fn without_the_agent_a_message_is_refused_and_kept() {
+    use tcanvas::shell::event::SendRefusal;
+    let dir = temp_dir("quick-message-no-agent");
+    let mut h = harness(&dir);
+    let id = group_with_messages(&mut h, &[("Relance", "continue", true)]);
+    h.state_mut().dispatch(vec![Event::AgentLost]);
+    card_menu(&mut h, &id);
+    h.get_by_label("Envoyer un message").click();
+    steps(&mut h, 2);
+    h.get_by_label("Relance").click();
+    steps(&mut h, 2);
+    assert!(texts_sent(&h).is_empty());
+    assert_eq!(h.state().cards.unsent_text(&id), Some(("continue", &SendRefusal::NoAgent)));
+}
+
+#[test]
+fn quick_messages_are_added_and_edited_in_their_dialog() {
+    use egui::accesskit::Role;
+    let dir = temp_dir("quick-message-editor");
+    let mut h = harness(&dir);
+    let id = group_with_messages(&mut h, &[]);
+    card_menu(&mut h, &id);
+    h.get_by_label("Envoyer un message").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Aucun message pour l'instant").is_some());
+    h.get_by_label("+ Ajouter un message…").click();
+    // Opened through an event: one more frame for the dialog to show.
+    steps(&mut h, 3);
+    assert!(h.state().projects_editing(), "the dialog keeps the keyboard");
+    assert!(h.query_by_label("Messages rapides · api").is_some());
+    let name = h.get_all_by_role(Role::TextInput).last().unwrap();
+    name.focus();
+    name.type_text("Relance");
+    steps(&mut h, 2);
+    let text = h.get_by_role(Role::MultilineTextInput);
+    text.focus();
+    text.type_text("continue, s'il te plaît");
+    steps(&mut h, 2);
+    // Enter after: on by default; turned off here.
+    h.get_by_label("Appuyer sur Entrée après").click();
+    steps(&mut h, 2);
+    // Escape with changes asks first.
+    h.key_press(Key::Escape);
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Abandonner les modifications de ces messages ?").is_some());
+    h.get_by_label("Continuer").click();
+    steps(&mut h, 2);
+    h.get_by_label("Enregistrer").click();
+    steps(&mut h, 2);
+    assert!(!h.state().projects_editing());
+    let messages = &h.state().world.project("p-api").unwrap().messages;
+    assert_eq!(messages, &vec![tcanvas::shell::world::QuickMessage { name: "Relance".into(), text: "continue, s'il te plaît".into(), enter: false }]);
+    assert!(h.state().world.project("p-api").unwrap().templates.is_empty(), "templates untouched");
+
+    // Now offered in the menu, with the editor.
+    card_menu(&mut h, &id);
+    h.get_by_label("Envoyer un message").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Relance").is_some());
+    h.get_by_label("Modifier les messages…").click();
+    steps(&mut h, 3);
+    h.get_by_label("Retirer").click();
+    steps(&mut h, 2);
+    h.get_by_label("Annuler").click();
+    steps(&mut h, 2);
+    assert_eq!(h.state().world.project("p-api").unwrap().messages.len(), 1, "cancel changes nothing");
+}
+
+#[test]
+fn a_card_outside_any_group_has_no_quick_messages() {
+    let dir = temp_dir("quick-message-no-group");
+    let mut h = harness(&dir);
+    let id = add_card(&mut h, "seul", Pos2::ZERO);
+    h.state_mut().world.camera = tcanvas::shell::world::Camera { center: pos2(250.0, 150.0), zoom: 1.0 };
+    steps(&mut h, 2);
+    card_menu(&mut h, &id);
+    h.get_by_label("Envoyer un message").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("Les messages rapides appartiennent à un groupe : placez ce terminal dans un groupe.").is_some());
+    assert!(h.query_by_label("+ Ajouter un message…").is_none());
+}
+
+#[test]
+fn quick_messages_in_english() {
+    let dir = temp_dir("quick-message-en");
+    let mut h = harness_in(&dir, Lang::En);
+    let id = group_with_messages(&mut h, &[]);
+    card_menu(&mut h, &id);
+    h.get_by_label("Send a message").click();
+    steps(&mut h, 2);
+    assert!(h.query_by_label("No message yet").is_some());
+    h.get_by_label("+ Add a message…").click();
+    steps(&mut h, 3);
+    assert!(h.query_by_label("Quick messages · api").is_some());
+    assert!(h.query_by_label("Press Enter after").is_some());
+    h.get_by_label("Cancel").click();
+    steps(&mut h, 2);
+    h.state_mut().world.card_mut(&id).unwrap().pty_dead = true;
+    h.state_mut().dispatch(vec![Event::SendText { card: id.clone(), text: "go on".into(), enter: true }]);
+    steps(&mut h, 2);
+    assert_eq!(h.query_all_by_label("Text not sent to “srv”: its session has ended.").count(), 2, "the strip and the toast");
+    assert!(h.query_by_label("Copy the text").is_some());
+    assert!(h.query_by_label("Dismiss the text not sent").is_some());
+}
+
+/// Sending text added no new way for keys to reach a terminal: Ctrl+C is ^C, Ctrl+V pastes,
+/// Ctrl+Shift+C sends nothing, Alt+right-click goes to tmux (no paste), right-click pastes.
+#[test]
+fn keys_and_clicks_still_do_what_they_did() {
+    let dir = temp_dir("keys-unchanged");
+    let mut h = harness(&dir);
+    h.state_mut().cards.set_clipboard(Box::new(tcanvas::features::terminal_card::FixedClipboard(Some("clip".into()))));
+    let id = add_card(&mut h, "api", Pos2::ZERO);
+    h.state_mut().world.camera = tcanvas::shell::world::Camera { center: pos2(250.0, 150.0), zoom: 1.0 };
+    h.state_mut().dispatch(vec![Event::FocusCard(id.clone())]);
+    steps(&mut h, 2);
+    h.event(egui::Event::Copy);
+    steps(&mut h, 2);
+    assert_eq!(h.state().cards.written(&id), b"\x03", "Ctrl+C: ^C, never a copy");
+    h.event(egui::Event::Paste("a\nb".into()));
+    steps(&mut h, 2);
+    assert_eq!(h.state().cards.written(&id), b"\x03a\rb", "Ctrl+V: egui's paste");
+    ctrl_shift(&h, Key::C);
+    steps(&mut h, 2);
+    assert_eq!(h.state().cards.written(&id), b"\x03a\rb", "Ctrl+Shift+C: nothing sent");
+    let body = screen_of(&h, h.state().world.card(&id).unwrap().rect).center();
+    h.hover_at(body);
+    h.step();
+    h.event(egui::Event::ModifiersChanged(Modifiers::ALT));
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: body, button: egui::PointerButton::Secondary, pressed, modifiers: Modifiers::ALT });
+        h.step();
+    }
+    h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+    steps(&mut h, 2);
+    assert_eq!(h.state().cards.written(&id), b"\x03a\rb", "Alt+right-click: not a paste");
+    right_click_at(&mut h, body);
+    assert_eq!(h.state().cards.written(&id), b"\x03a\rbclip", "right-click: paste");
+    assert!(h.query_by_label("Envoyer un message").is_none(), "no menu in the terminal");
 }
 
 /// A second group, `blog`, with its own repository and a merged worktree.

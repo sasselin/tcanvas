@@ -539,7 +539,7 @@ mod tests {
     use egui::{Pos2, Rect, Vec2};
 
     fn project(id: &str, cwd: Option<&str>) -> Project {
-        Project { id: id.into(), name: id.into(), color: [0; 3], rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.0)), cwd: cwd.map(Into::into), templates: Vec::new() }
+        Project { id: id.into(), name: id.into(), color: [0; 3], rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(100.0)), cwd: cwd.map(Into::into), templates: Vec::new(), messages: Vec::new() }
     }
 
     fn file(path: &str, mtime: u64, added: u32) -> FileChange {
@@ -595,7 +595,7 @@ mod tests {
         let mut ev = vec![];
         c.poll(&w, &mut ev);
         assert_eq!(ev.len(), 1);
-        c.handle(&Event::Agent(AgentEvent::Hello { version: "x".into(), hooks: protocol::Hooks::Installed }), &mut world(), &mut vec![]);
+        c.handle(&Event::Agent(AgentEvent::Hello { version: "x".into(), hooks: protocol::Hooks::Installed, send_text: true }), &mut world(), &mut vec![]);
         let mut ev = vec![];
         c.poll(&w, &mut ev);
         assert!(matches!(ev.as_slice(), [Event::ToAgent(AgentCmd::Watch { .. })]));

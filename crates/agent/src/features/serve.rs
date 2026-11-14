@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protocol::{AgentCmd, AgentEvent, DEFAULT_STALL_SECS, Problem, SessionInfo, TermStatus};
 
-use super::{agent_hooks, changes, hooks, kill, status, timing, tmux};
+use super::{agent_hooks, changes, hooks, kill, send as send_text, status, timing, tmux};
 
 const POLL: Duration = Duration::from_secs(1);
 const TAIL_LINES: usize = 3;
@@ -38,8 +38,13 @@ pub fn run() -> io::Result<()> {
             std::process::exit(0);
         }
     });
-    let cmds = spawn_stdin_reader(watcher);
-    send(&AgentEvent::Hello { version: env!("CARGO_PKG_VERSION").into(), hooks: hooks::state() })?;
+    let sender = send_text::spawn(|ev| {
+        if send(ev).is_err() {
+            std::process::exit(0);
+        }
+    });
+    let cmds = spawn_stdin_reader(watcher, sender);
+    send(&AgentEvent::Hello { version: env!("CARGO_PKG_VERSION").into(), hooks: hooks::state(), send_text: true })?;
 
     let mut tracked: HashMap<String, Tracked> = HashMap::new();
     let mut clock = timing::ClockLog::default();
@@ -61,7 +66,8 @@ pub fn run() -> io::Result<()> {
                 | AgentCmd::ShowCommit { .. }
                 | AgentCmd::ListDir { .. }
                 | AgentCmd::Cleanup { .. }
-                | AgentCmd::WorktreeSizes { .. } => {}
+                | AgentCmd::WorktreeSizes { .. }
+                | AgentCmd::SendText { .. } => {}
             }
         }
 
@@ -167,8 +173,9 @@ fn send(ev: &AgentEvent) -> io::Result<()> {
 }
 
 /// Reads the app's commands. End of stdin (app closed) stops the agent.
-/// Change-tracking commands go straight to their thread (no waiting for diffs).
-fn spawn_stdin_reader(watcher: Sender<changes::Cmd>) -> Receiver<AgentCmd> {
+/// Change-tracking commands go straight to their thread (no waiting for diffs), and so does text
+/// to send (no waiting for the next poll).
+fn spawn_stdin_reader(watcher: Sender<changes::Cmd>, sender: Sender<send_text::Request>) -> Receiver<AgentCmd> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         for line in io::stdin().lock().lines() {
@@ -197,6 +204,11 @@ fn spawn_stdin_reader(watcher: Sender<changes::Cmd>) -> Receiver<AgentCmd> {
                 }
                 Ok(AgentCmd::WorktreeSizes { key, paths }) => {
                     let _ = watcher.send(changes::Cmd::Sizes { key, paths });
+                }
+                Ok(AgentCmd::SendText { id, session, text, enter, limit_ms }) => {
+                    // Measured from now, on this machine's monotonic clock.
+                    let deadline = limit_ms.map(|ms| std::time::Instant::now() + Duration::from_millis(ms));
+                    let _ = sender.send(send_text::Request { id, session, text, enter, deadline });
                 }
                 Ok(cmd) => {
                     if tx.send(cmd).is_err() {

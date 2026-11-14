@@ -317,7 +317,15 @@ mod tests {
     fn world() -> World {
         let mut w = World::default();
         for (id, x) in [("api", 0.0), ("web", 10_000.0)] {
-            w.projects.push(Project { id: id.into(), name: id.into(), color: [0; 3], rect: Rect::from_min_size(pos2(x, 0.0), Vec2::new(2000.0, 1200.0)), cwd: None, templates: Vec::new() });
+            w.projects.push(Project {
+                id: id.into(),
+                name: id.into(),
+                color: [0; 3],
+                rect: Rect::from_min_size(pos2(x, 0.0), Vec2::new(2000.0, 1200.0)),
+                cwd: None,
+                templates: Vec::new(),
+                messages: Vec::new(),
+            });
             let mut c = Card::with_id(format!("{id}-1"), Rect::from_min_size(pos2(x + 100.0, 100.0), Vec2::new(500.0, 300.0)), None);
             c.name = Some(id.into());
             c.project = Some(id.into());
@@ -405,7 +413,7 @@ mod tests {
     #[test]
     fn moving_a_project_reorders_the_chips_and_is_saved() {
         let mut w = world();
-        w.projects.push(Project { id: "db".into(), name: "db".into(), color: [0; 3], rect: Rect::ZERO, cwd: None, templates: Vec::new() });
+        w.projects.push(Project { id: "db".into(), name: "db".into(), color: [0; 3], rect: Rect::ZERO, cwd: None, templates: Vec::new(), messages: Vec::new() });
         let mut s = Spaces::default();
         let rev = w.revision;
         handle(&mut s, &mut w, Event::MoveProject("api".into(), 3));
@@ -421,7 +429,7 @@ mod tests {
     fn sorting_orders_the_groups_by_name_ignoring_case() {
         let mut w = World::default();
         for name in ["web", "Api", "db", "api"] {
-            w.projects.push(Project { id: name.into(), name: name.into(), color: [0; 3], rect: Rect::ZERO, cwd: None, templates: Vec::new() });
+            w.projects.push(Project { id: name.into(), name: name.into(), color: [0; 3], rect: Rect::ZERO, cwd: None, templates: Vec::new(), messages: Vec::new() });
         }
         let mut s = Spaces::default();
         let rev = w.revision;

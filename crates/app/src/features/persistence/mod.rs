@@ -153,7 +153,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::shell::world::CommandTemplate;
+    use crate::shell::world::{CommandTemplate, QuickMessage};
     use egui::{Pos2, Rect, Vec2, pos2};
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -164,6 +164,13 @@ mod tests {
 
     fn sample_templates() -> Vec<CommandTemplate> {
         vec![CommandTemplate { name: "Review".into(), command: "claude \"review it's $HOME\"\nnpm test".into() }, CommandTemplate { name: "Logs".into(), command: "tail -f log/*.log".into() }]
+    }
+
+    fn sample_messages() -> Vec<QuickMessage> {
+        vec![
+            QuickMessage { name: "Commit".into(), text: "Commit your changes, it's \"done\"\r\n- with a clear message".into(), enter: true },
+            QuickMessage { name: "Draft".into(), text: "café 日本 \t$HOME \x1b[201~".into(), enter: false },
+        ]
     }
 
     fn sample_world() -> World {
@@ -182,8 +189,17 @@ mod tests {
             rect: Rect::from_min_size(pos2(-50.0, -50.0), Vec2::splat(900.0)),
             cwd: Some("~/api".into()),
             templates: sample_templates(),
+            messages: sample_messages(),
         });
-        w.projects.push(Project { id: "p2".into(), name: "Web".into(), color: [4, 5, 6], rect: Rect::from_min_size(pos2(2000.0, 0.0), Vec2::splat(400.0)), cwd: None, templates: Vec::new() });
+        w.projects.push(Project {
+            id: "p2".into(),
+            name: "Web".into(),
+            color: [4, 5, 6],
+            rect: Rect::from_min_size(pos2(2000.0, 0.0), Vec2::splat(400.0)),
+            cwd: None,
+            templates: Vec::new(),
+            messages: Vec::new(),
+        });
         w.wires.push(Wire { from: "p1".into(), to: "p2".into() });
         w.add_card(a);
         w.add_card(b);
@@ -206,6 +222,7 @@ mod tests {
         assert_eq!(loaded.camera, w.camera);
         assert_eq!(loaded.projects, w.projects);
         assert_eq!(loaded.projects[0].templates, sample_templates(), "command templates are kept as typed");
+        assert_eq!(loaded.projects[0].messages, sample_messages(), "quick messages too, with their Enter flag");
         assert_eq!(loaded.wires, w.wires);
         assert_eq!(loaded.cards.len(), 2);
         let a = &loaded.cards[0];
@@ -274,8 +291,36 @@ mod tests {
         assert_eq!(p.last_error, None);
         assert_eq!((w.projects.len(), w.cards.len()), (1, 1));
         assert!(w.projects[0].templates.is_empty());
+        assert!(w.projects[0].messages.is_empty());
         p.save_now(&w);
-        assert!(!fs::read_to_string(dir.join("layout.json")).unwrap().contains("templates"));
+        let saved = fs::read_to_string(dir.join("layout.json")).unwrap();
+        assert!(!saved.contains("templates") && !saved.contains("messages"), "{saved}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A layout written with command templates but before quick messages loads with none; a
+    /// message saved without its Enter flag presses Enter.
+    #[test]
+    fn layouts_from_before_quick_messages_still_load() {
+        let dir = temp_dir("before-messages");
+        fs::create_dir_all(&dir).unwrap();
+        let project = |extra: &str| {
+            format!(
+                r#"{{"id":"p","name":"API","color":[1,2,3],"rect":{{"min":{{"x":-10.0,"y":-10.0}},"max":{{"x":500.0,"y":500.0}}}},"cwd":"~/api","templates":[{{"name":"Logs","command":"tail -f x"}}]{extra}}}"#
+            )
+        };
+        let layout = |extra: &str| format!(r#"{{"version":2,"camera":{{"center":{{"x":0.0,"y":0.0}},"zoom":1.0}},"cards":[],"projects":[{}],"wires":[]}}"#, project(extra));
+        fs::write(dir.join("layout.json"), layout("")).unwrap();
+        let mut w = World::default();
+        let mut p = Persistence::new(&dir);
+        p.load(&mut w);
+        assert_eq!(p.last_error, None);
+        assert_eq!(w.projects[0].templates.len(), 1);
+        assert!(w.projects[0].messages.is_empty());
+        fs::write(dir.join("layout.json"), layout(r#","messages":[{"name":"Go","text":"go on"}]"#)).unwrap();
+        let mut w = World::default();
+        Persistence::new(&dir).load(&mut w);
+        assert_eq!(w.projects[0].messages, vec![QuickMessage { name: "Go".into(), text: "go on".into(), enter: true }]);
         fs::remove_dir_all(dir).unwrap();
     }
 

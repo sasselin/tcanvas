@@ -177,7 +177,10 @@ impl AgentLink {
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::Event(ev) => events.push(Event::Agent(ev)),
-                Msg::Closed(why) => self.fail(why),
+                Msg::Closed(why) => {
+                    self.fail(why);
+                    events.push(Event::AgentLost);
+                }
                 Msg::Installed(Ok(())) => {
                     self.install = Install::Ready;
                     self.start();

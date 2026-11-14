@@ -11,7 +11,7 @@ use crate::shell::event::{Event, Notice};
 use crate::shell::i18n::t;
 use crate::shell::theme::{self, HEADER_H, LINKED_ROW_GAP, LINKED_ROW_H, PINNED_MARGIN};
 use crate::shell::widgets::confirm;
-use crate::shell::world::{Body, CardId, CommandTemplate, EMPTY_PROJECT, PROJECT_COLORS, Project, ProjectId, World, new_id};
+use crate::shell::world::{Body, CardId, CommandTemplate, EMPTY_PROJECT, PROJECT_COLORS, Project, ProjectId, QuickMessage, World, new_id};
 use folder_picker::{Choice, FolderPicker};
 
 /// Width of the × button at the end of the label.
@@ -19,34 +19,231 @@ const CLOSE_W: f32 = 24.0;
 /// Width of the arrow next to "+ Terminal" (its menu of command templates).
 const MORE_W: f32 = 20.0;
 
-/// Templates being edited for a group, in a dialog.
-struct TemplateEditor {
+/// A row of a group's named list, edited in a dialog: a command template or a quick message.
+trait Row: Clone + Default + PartialEq {
+    fn name(&self) -> &str;
+    fn name_mut(&mut self) -> &mut String;
+    /// The command or the text.
+    fn body(&self) -> &str;
+    fn body_mut(&mut self) -> &mut String;
+    /// The "press Enter after" flag, for rows that have one.
+    fn enter_mut(&mut self) -> Option<&mut bool> {
+        None
+    }
+    fn renamed(&self, name: String) -> Self;
+}
+
+impl Row for CommandTemplate {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn name_mut(&mut self) -> &mut String {
+        &mut self.name
+    }
+    fn body(&self) -> &str {
+        &self.command
+    }
+    fn body_mut(&mut self) -> &mut String {
+        &mut self.command
+    }
+    fn renamed(&self, name: String) -> Self {
+        Self { name, ..self.clone() }
+    }
+}
+
+impl Row for QuickMessage {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn name_mut(&mut self) -> &mut String {
+        &mut self.name
+    }
+    fn body(&self) -> &str {
+        &self.text
+    }
+    fn body_mut(&mut self) -> &mut String {
+        &mut self.text
+    }
+    fn enter_mut(&mut self) -> Option<&mut bool> {
+        Some(&mut self.enter)
+    }
+    fn renamed(&self, name: String) -> Self {
+        Self { name, ..self.clone() }
+    }
+}
+
+/// A group's rows being edited, in a dialog.
+struct RowEditor<R> {
     project: ProjectId,
-    rows: Vec<CommandTemplate>,
-    /// The group's templates when the editor opened: anything else is unsaved.
-    saved: Vec<CommandTemplate>,
+    rows: Vec<R>,
+    /// The group's rows when the editor opened: anything else is unsaved.
+    saved: Vec<R>,
     /// Escape with unsaved changes: asking whether to discard them.
     confirm_discard: bool,
+}
+
+impl<R: Row> RowEditor<R> {
+    /// On the group's rows, or one empty row to fill when it has none.
+    fn open(project: &ProjectId, saved: &[R]) -> Self {
+        let mut rows = saved.to_vec();
+        if rows.is_empty() {
+            rows.push(R::default());
+        }
+        Self { project: project.clone(), rows, saved: saved.to_vec(), confirm_discard: false }
+    }
+}
+
+/// What an editor dialog says, per kind of row.
+struct EditorTexts {
+    id: &'static str,
+    title: fn(&str) -> String,
+    help: &'static str,
+    body: &'static str,
+    name_hint: &'static str,
+    body_hint: &'static str,
+    /// The body is code (monospace, no wrapping).
+    code: bool,
+    add: &'static str,
+    discard_question: &'static str,
+}
+
+fn template_texts() -> EditorTexts {
+    let t = t();
+    EditorTexts {
+        id: "command-templates",
+        title: t.templates_title,
+        help: t.templates_help,
+        body: t.template_command,
+        name_hint: t.template_name_hint,
+        body_hint: t.template_command_hint,
+        code: true,
+        add: t.add_template,
+        discard_question: t.discard_template_changes,
+    }
+}
+
+fn message_texts() -> EditorTexts {
+    let t = t();
+    EditorTexts {
+        id: "quick-messages",
+        title: t.messages_title,
+        help: t.messages_help,
+        body: t.message_text,
+        name_hint: t.message_name_hint,
+        body_hint: t.message_text_hint,
+        code: false,
+        add: t.add_message_row,
+        discard_question: t.discard_message_changes,
+    }
 }
 
 /// Longest template name shown whole in the menu.
 const MENU_NAME_CHARS: usize = 32;
 
-/// Templates as saved from the editor: rows without a command are dropped, a row without a name
-/// is named after the first line of its command, and a name already taken gets a number (` (2)`).
-/// The command itself is kept as typed.
-pub fn clean_templates(rows: &[CommandTemplate]) -> Vec<CommandTemplate> {
-    let mut out: Vec<CommandTemplate> = Vec::new();
-    for r in rows.iter().filter(|r| !r.command.trim().is_empty()) {
-        let base: String = match r.name.trim() {
-            "" => r.command.trim().lines().next().unwrap_or_default().chars().take(40).collect(),
+/// Rows as saved from the editor: rows without a body are dropped, a row without a name is named
+/// after the first line of its body, and a name already taken gets a number (` (2)`). The body
+/// itself is kept as typed.
+fn clean_rows<R: Row>(rows: &[R]) -> Vec<R> {
+    let mut out: Vec<R> = Vec::new();
+    for r in rows.iter().filter(|r| !r.body().trim().is_empty()) {
+        let base: String = match r.name().trim() {
+            "" => r.body().trim().lines().next().unwrap_or_default().chars().take(40).collect(),
             name => name.to_string(),
         };
-        let taken = |n: &str| out.iter().any(|t| t.name == n);
+        let taken = |n: &str| out.iter().any(|t| t.name() == n);
         let name = (1..).map(|k| if k == 1 { base.clone() } else { format!("{base} ({k})") }).find(|n| !taken(n)).expect("a free name");
-        out.push(CommandTemplate { name, command: r.command.clone() });
+        out.push(r.renamed(name));
     }
     out
+}
+
+/// Templates as saved from the editor (see `clean_rows`).
+pub fn clean_templates(rows: &[CommandTemplate]) -> Vec<CommandTemplate> {
+    clean_rows(rows)
+}
+
+/// Quick messages as saved from the editor (see `clean_rows`); each keeps its Enter flag.
+pub fn clean_messages(rows: &[QuickMessage]) -> Vec<QuickMessage> {
+    clean_rows(rows)
+}
+
+/// An editor dialog: one name and one body per row (and the Enter flag of a message).
+/// `Some(true)`: save, `Some(false)`: close without saving, `None`: still open.
+fn rows_dialog<R: Row>(ctx: &egui::Context, editor: &mut RowEditor<R>, group: &str, texts: &EditorTexts) -> Option<bool> {
+    let mut result = None;
+    egui::Modal::new(Id::unique(texts.id)).show(ctx, |ui| {
+        ui.set_width(520.0);
+        ui.label(egui::RichText::new((texts.title)(group)).strong().size(16.0));
+        ui.add_space(2.0);
+        ui.label(egui::RichText::new(texts.help).color(theme::TEXT_DIM));
+        ui.add_space(6.0);
+        let mut remove = None;
+        egui::ScrollArea::vertical().max_height((ctx.content_rect().height() * 0.6).max(160.0)).show(ui, |ui| {
+            for (k, row) in editor.rows.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.label(t().template_name);
+                    ui.add(TextEdit::singleline(row.name_mut()).hint_text(texts.name_hint).desired_width(180.0).id(Id::unique((texts.id, "name", k))));
+                    if ui.button(t().remove_template).clicked() {
+                        remove = Some(k);
+                    }
+                });
+                ui.label(texts.body);
+                let mut body = TextEdit::multiline(row.body_mut()).hint_text(texts.body_hint).desired_rows(2).desired_width(f32::INFINITY);
+                if texts.code {
+                    body = body.code_editor();
+                }
+                ui.add(body.id(Id::unique((texts.id, "body", k))));
+                if let Some(enter) = row.enter_mut() {
+                    ui.checkbox(enter, t().message_enter);
+                }
+                ui.separator();
+            }
+        });
+        if let Some(k) = remove {
+            editor.rows.remove(k);
+        }
+        if ui.button(texts.add).clicked() {
+            editor.rows.push(R::default());
+        }
+        ui.add_space(8.0);
+        if editor.confirm_discard {
+            ui.label(egui::RichText::new(texts.discard_question).strong());
+            ui.horizontal(|ui| {
+                if ui.button(t().discard).clicked() {
+                    result = Some(false);
+                }
+                if ui.button(t().keep_editing).clicked() {
+                    editor.confirm_discard = false;
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                if ui.button(t().save).clicked() {
+                    result = Some(true);
+                }
+                // Like Escape: unsaved changes are never thrown away without asking.
+                if ui.button(t().cancel).clicked() {
+                    if clean_rows(&editor.rows) != editor.saved {
+                        editor.confirm_discard = true;
+                    } else {
+                        result = Some(false);
+                    }
+                }
+            });
+        }
+    });
+    // A click outside never closes it (a long prompt would be lost); Escape closes it, after
+    // asking when there are unsaved changes (a second Escape keeps editing).
+    if result.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        if editor.confirm_discard {
+            editor.confirm_discard = false;
+        } else if clean_rows(&editor.rows) != editor.saved {
+            editor.confirm_discard = true;
+        } else {
+            result = Some(false);
+        }
+    }
+    result
 }
 
 /// A template's name in the menu: cut at `MENU_NAME_CHARS`, with an ellipsis.
@@ -75,7 +272,9 @@ pub struct Projects {
     /// Alt + drag in progress from this group's label: pulling a wire to another group.
     wire_from: Option<ProjectId>,
     /// Command templates being edited.
-    templates: Option<TemplateEditor>,
+    templates: Option<RowEditor<CommandTemplate>>,
+    /// Quick messages being edited.
+    messages: Option<RowEditor<QuickMessage>>,
 }
 
 /// Group (other than `from`) whose frame or label is under `at` (world units): the end of a
@@ -177,16 +376,17 @@ pub fn move_project(world: &mut World, id: &str, delta: Vec2) {
 
 impl Projects {
     pub fn has_dialog(&self) -> bool {
-        self.picker.is_some() || self.editing.is_some() || self.confirm_close.is_some() || self.templates.is_some()
+        self.picker.is_some() || self.editing.is_some() || self.confirm_close.is_some() || self.templates.is_some() || self.messages.is_some()
     }
 
     /// Opens the editor of a group's command templates.
     pub fn edit_templates(&mut self, p: &Project) {
-        let mut rows = p.templates.clone();
-        if rows.is_empty() {
-            rows.push(CommandTemplate::default());
-        }
-        self.templates = Some(TemplateEditor { project: p.id.clone(), rows, saved: p.templates.clone(), confirm_discard: false });
+        self.templates = Some(RowEditor::open(&p.id, &p.templates));
+    }
+
+    /// Opens the editor of a group's quick messages.
+    pub fn edit_messages(&mut self, p: &Project) {
+        self.messages = Some(RowEditor::open(&p.id, &p.messages));
     }
 
     /// Menu of the arrow next to "+ Terminal": a plain shell, each template, then the editor.
@@ -210,87 +410,6 @@ impl Projects {
         if ui.button(t().edit_templates).clicked() {
             self.edit_templates(p);
             ui.close();
-        }
-    }
-
-    /// The template editor: one name and one command per row. `Some(templates)` when saved.
-    fn templates_dialog(&mut self, ctx: &egui::Context, world: &World) -> Option<Vec<CommandTemplate>> {
-        let editor = self.templates.as_mut()?;
-        let name = world.project(&editor.project).map(|p| p.name.clone()).unwrap_or_default();
-        let mut result = None;
-        egui::Modal::new(Id::unique("command-templates")).show(ctx, |ui| {
-            ui.set_width(520.0);
-            ui.label(egui::RichText::new((t().templates_title)(&name)).strong().size(16.0));
-            ui.add_space(2.0);
-            ui.label(egui::RichText::new(t().templates_help).color(theme::TEXT_DIM));
-            ui.add_space(6.0);
-            let mut remove = None;
-            egui::ScrollArea::vertical().max_height((ctx.content_rect().height() * 0.6).max(160.0)).show(ui, |ui| {
-                for (k, row) in editor.rows.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(t().template_name);
-                        ui.add(TextEdit::singleline(&mut row.name).hint_text(t().template_name_hint).desired_width(180.0).id(Id::unique(("template-name", k))));
-                        if ui.button(t().remove_template).clicked() {
-                            remove = Some(k);
-                        }
-                    });
-                    ui.label(t().template_command);
-                    let command = TextEdit::multiline(&mut row.command).hint_text(t().template_command_hint).code_editor().desired_rows(2).desired_width(f32::INFINITY);
-                    ui.add(command.id(Id::unique(("template-command", k))));
-                    ui.separator();
-                }
-            });
-            if let Some(k) = remove {
-                editor.rows.remove(k);
-            }
-            if ui.button(t().add_template).clicked() {
-                editor.rows.push(CommandTemplate::default());
-            }
-            ui.add_space(8.0);
-            if editor.confirm_discard {
-                ui.label(egui::RichText::new(t().discard_template_changes).strong());
-                ui.horizontal(|ui| {
-                    if ui.button(t().discard).clicked() {
-                        result = Some(false);
-                    }
-                    if ui.button(t().keep_editing).clicked() {
-                        editor.confirm_discard = false;
-                    }
-                });
-            } else {
-                ui.horizontal(|ui| {
-                    if ui.button(t().save).clicked() {
-                        result = Some(true);
-                    }
-                    // Like Escape: unsaved changes are never thrown away without asking.
-                    if ui.button(t().cancel).clicked() {
-                        if clean_templates(&editor.rows) != editor.saved {
-                            editor.confirm_discard = true;
-                        } else {
-                            result = Some(false);
-                        }
-                    }
-                });
-            }
-        });
-        // A click outside never closes it (a long prompt would be lost); Escape closes it, after
-        // asking when there are unsaved changes (a second Escape keeps editing).
-        if result.is_none() && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
-            if editor.confirm_discard {
-                editor.confirm_discard = false;
-            } else if clean_templates(&editor.rows) != editor.saved {
-                editor.confirm_discard = true;
-            } else {
-                result = Some(false);
-            }
-        }
-        match result {
-            Some(true) => self.templates.take().map(|e| clean_templates(&e.rows)),
-            Some(false) => {
-                self.templates = None;
-                None
-            }
-            None => None,
         }
     }
 
@@ -615,12 +734,26 @@ impl Projects {
             }
             return;
         }
-        if let Some(editor) = &self.templates {
-            let project = editor.project.clone();
-            if world.project(&project).is_none() {
-                self.templates = None;
-            } else if let Some(templates) = self.templates_dialog(ctx, world) {
-                events.push(Event::SetProjectTemplates(project, templates));
+        if let Some(editor) = &mut self.templates {
+            match world.project(&editor.project).map(|p| rows_dialog(ctx, editor, &p.name, &template_texts())) {
+                Some(None) => {}
+                Some(Some(true)) => {
+                    events.push(Event::SetProjectTemplates(editor.project.clone(), clean_rows(&editor.rows)));
+                    self.templates = None;
+                }
+                // Closed, or its group is gone.
+                _ => self.templates = None,
+            }
+            return;
+        }
+        if let Some(editor) = &mut self.messages {
+            match world.project(&editor.project).map(|p| rows_dialog(ctx, editor, &p.name, &message_texts())) {
+                Some(None) => {}
+                Some(Some(true)) => {
+                    events.push(Event::SetProjectMessages(editor.project.clone(), clean_rows(&editor.rows)));
+                    self.messages = None;
+                }
+                _ => self.messages = None,
             }
             return;
         }
@@ -694,6 +827,7 @@ impl Projects {
                     rect: Rect::from_center_size(center, EMPTY_PROJECT),
                     cwd: None,
                     templates: Vec::new(),
+                    messages: Vec::new(),
                 };
                 self.start_rename(&p);
                 let id = p.id.clone();
@@ -728,6 +862,17 @@ impl Projects {
                     p.templates = templates.clone();
                 }
                 world.touch();
+            }
+            Event::SetProjectMessages(id, messages) => {
+                if let Some(p) = world.projects.iter_mut().find(|p| &p.id == id) {
+                    p.messages = messages.clone();
+                }
+                world.touch();
+            }
+            Event::EditQuickMessages(id) => {
+                if let Some(p) = world.project(id) {
+                    self.edit_messages(p);
+                }
             }
             Event::SetProjectColor(id, color) => {
                 if let Some(p) = world.projects.iter_mut().find(|p| &p.id == id) {
@@ -780,7 +925,15 @@ mod tests {
     #[test]
     fn moving_a_project_carries_its_cards_only() {
         let mut w = World::default();
-        w.projects.push(Project { id: "p".into(), name: "p".into(), color: [0; 3], rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0)), cwd: None, templates: Vec::new() });
+        w.projects.push(Project {
+            id: "p".into(),
+            name: "p".into(),
+            color: [0; 3],
+            rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0)),
+            cwd: None,
+            templates: Vec::new(),
+            messages: Vec::new(),
+        });
         let mut member = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::splat(50.0)), None);
         member.project = Some("p".into());
         w.add_card(member);
@@ -796,7 +949,15 @@ mod tests {
     fn group_members_and_close_message() {
         crate::shell::i18n::set(crate::shell::i18n::Lang::Fr);
         let mut w = World::default();
-        w.projects.push(Project { id: "p".into(), name: "API".into(), color: [0; 3], rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0)), cwd: None, templates: Vec::new() });
+        w.projects.push(Project {
+            id: "p".into(),
+            name: "API".into(),
+            color: [0; 3],
+            rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0)),
+            cwd: None,
+            templates: Vec::new(),
+            messages: Vec::new(),
+        });
         let mut a = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::splat(50.0)), None);
         a.name = Some("server".into());
         a.project = Some("p".into());
@@ -825,7 +986,15 @@ mod tests {
     fn two_groups() -> (World, CardId) {
         let mut w = World::default();
         for (id, x) in [("api", 0.0), ("web", 5000.0)] {
-            w.projects.push(Project { id: id.into(), name: id.to_uppercase(), color: [0; 3], rect: Rect::from_min_size(pos2(x, 0.0), Vec2::splat(1000.0)), cwd: None, templates: Vec::new() });
+            w.projects.push(Project {
+                id: id.into(),
+                name: id.to_uppercase(),
+                color: [0; 3],
+                rect: Rect::from_min_size(pos2(x, 0.0), Vec2::splat(1000.0)),
+                cwd: None,
+                templates: Vec::new(),
+                messages: Vec::new(),
+            });
         }
         let mut c = Card::new(Rect::from_min_size(pos2(100.0, 100.0), Vec2::new(300.0, 200.0)), None);
         c.project = Some("api".into());
@@ -919,6 +1088,26 @@ mod tests {
     }
 
     #[test]
+    fn saved_messages_keep_their_text_and_enter_flag() {
+        let row = |name: &str, text: &str, enter: bool| QuickMessage { name: name.into(), text: text.into(), enter };
+        let rows = [row("Go", "go on\n", true), row(" ", "  commit it\nplease", false), row("blank", " \n", true), row("Go", "again", true)];
+        assert_eq!(clean_messages(&rows), vec![row("Go", "go on\n", true), row("commit it", "  commit it\nplease", false), row("Go (2)", "again", true)]);
+        assert!(QuickMessage::default().enter, "a new message presses Enter by default");
+        let (mut w, _) = two_groups();
+        let mut p = Projects::default();
+        p.handle(&Event::SetProjectMessages("api".into(), vec![row("a", "b", false)]), &mut w, &mut vec![]);
+        assert_eq!(w.project("api").unwrap().messages, vec![row("a", "b", false)]);
+        assert!(w.project("web").unwrap().messages.is_empty());
+        assert!(w.project("api").unwrap().templates.is_empty(), "templates untouched");
+        // Opening the editor from a card's menu.
+        p.handle(&Event::EditQuickMessages("gone".into()), &mut w, &mut vec![]);
+        assert!(!p.has_dialog());
+        p.handle(&Event::EditQuickMessages("api".into()), &mut w, &mut vec![]);
+        assert!(p.has_dialog());
+        assert_eq!(p.messages.as_ref().map(|e| e.rows.clone()), Some(vec![row("a", "b", false)]));
+    }
+
+    #[test]
     fn new_project_lifecycle() {
         let mut w = World::default();
         let mut p = Projects::default();
@@ -936,7 +1125,15 @@ mod tests {
     #[test]
     fn a_project_created_from_a_space_opens_apart_from_the_rest() {
         let mut w = World::default();
-        w.projects.push(Project { id: "api".into(), name: "API".into(), color: [0; 3], rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0)), cwd: None, templates: Vec::new() });
+        w.projects.push(Project {
+            id: "api".into(),
+            name: "API".into(),
+            color: [0; 3],
+            rect: Rect::from_min_size(Pos2::ZERO, Vec2::splat(1000.0)),
+            cwd: None,
+            templates: Vec::new(),
+            messages: Vec::new(),
+        });
         w.space = Some("api".into());
         let mut out = vec![];
         Projects::default().handle(&Event::NewProject { at: None }, &mut w, &mut out);
@@ -948,7 +1145,15 @@ mod tests {
     #[test]
     fn a_new_group_never_lands_on_an_existing_one() {
         let mut w = World::default();
-        w.projects.push(Project { id: "api".into(), name: "API".into(), color: [0; 3], rect: Rect::from_center_size(Pos2::ZERO, EMPTY_PROJECT), cwd: None, templates: Vec::new() });
+        w.projects.push(Project {
+            id: "api".into(),
+            name: "API".into(),
+            color: [0; 3],
+            rect: Rect::from_center_size(Pos2::ZERO, EMPTY_PROJECT),
+            cwd: None,
+            templates: Vec::new(),
+            messages: Vec::new(),
+        });
         // "All" view, camera centered on the existing group, or creation at a precise point inside it.
         for at in [None, Some(pos2(20.0, 10.0))] {
             Projects::default().handle(&Event::NewProject { at }, &mut w, &mut vec![]);

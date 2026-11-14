@@ -102,6 +102,26 @@ pub enum Problem {
     IgnoredChanged {
         path: String,
     },
+    /// Text not sent: no such canvas session.
+    SessionNotFound {
+        session: String,
+    },
+    /// Text not sent: tmux refused it (tmux's message, not translated).
+    SendFailed {
+        detail: String,
+    },
+    /// Text not sent: the session's pane is dead (its program exited, the pane kept).
+    PaneDead {
+        session: String,
+    },
+    /// Text not sent: the pane shows a tmux screen (`mode`: tmux's name, e.g. `clock-mode`,
+    /// `tree-mode`) that would take the keys.
+    PaneBusy {
+        session: String,
+        mode: String,
+    },
+    /// Text not sent: its time limit (`AgentCmd::SendText::limit_ms`) passed before it could be.
+    Expired,
 }
 
 /// Why a worktree is not offered for removal (and why the agent refuses to remove it).
@@ -489,6 +509,9 @@ pub enum AgentEvent {
     Hello {
         version: String,
         hooks: Hooks,
+        /// The agent takes `AgentCmd::SendText` (missing from older agents: they cannot).
+        #[serde(default)]
+        send_text: bool,
     },
     /// Hooks state after `AgentCmd::InstallHooks`.
     HooksChanged {
@@ -529,6 +552,17 @@ pub enum AgentEvent {
     WorktreeSizes {
         key: String,
         sizes: Vec<WorktreeSize>,
+    },
+    /// Answer to `AgentCmd::SendText` with its `id`, once tmux took the paste (and the Enter,
+    /// if asked): `problem` is `None` when it did. `pasted` with a problem: the text was pasted,
+    /// but the Enter could not be pressed (it is in the input line, not submitted).
+    TextSent {
+        id: u64,
+        session: String,
+        #[serde(default)]
+        problem: Option<Problem>,
+        #[serde(default)]
+        pasted: bool,
     },
 }
 
@@ -579,6 +613,22 @@ pub enum AgentCmd {
     WorktreeSizes {
         key: String,
         paths: Vec<String>,
+    },
+    /// Pastes `text` into the active pane of `session` (a canvas session only) through tmux: the
+    /// text goes in a private tmux buffer by stdin (never on a command line), and tmux pastes it,
+    /// bracketed when the application asked for it, unless the pane is dead or shows a tmux
+    /// screen other than copy mode (checked by the same server-side command that pastes). Then,
+    /// with `enter`, Enter as its own key a moment later (copy mode left first). Sends to one
+    /// session are done in the order asked, one after the other; other sessions do not wait.
+    /// `limit_ms`: past this long after the agent got it, the text is never pasted (answered
+    /// `Problem::Expired`). Response: `AgentEvent::TextSent` with the same `id`.
+    SendText {
+        id: u64,
+        session: String,
+        text: String,
+        enter: bool,
+        #[serde(default)]
+        limit_ms: Option<u64>,
     },
 }
 
@@ -931,12 +981,42 @@ mod tests {
     #[test]
     fn roundtrip_hooks() {
         for hooks in [Hooks::Installed, Hooks::Missing, Hooks::Unsupported] {
-            let ev = AgentEvent::Hello { version: "1".into(), hooks };
+            let ev = AgentEvent::Hello { version: "1".into(), hooks, send_text: true };
             assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
             let ev = AgentEvent::HooksChanged { hooks };
             assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
         }
         let ev = AgentEvent::Error { problem: Problem::HooksFailed { detail: "read-only".into() } };
         assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+    }
+
+    #[test]
+    fn roundtrip_send_text() {
+        let cmd = AgentCmd::SendText { id: 7, session: "tc_x".into(), text: "a\nb \x1b[201~ café".into(), enter: true, limit_ms: Some(8000) };
+        let line = encode(&cmd);
+        assert!(!line[..line.len() - 1].contains('\n'), "one line, whatever the text");
+        assert_eq!(decode::<AgentCmd>(&line).unwrap(), cmd);
+        let problems = [
+            None,
+            Some(Problem::SessionNotFound { session: "tc_x".into() }),
+            Some(Problem::SendFailed { detail: "no space".into() }),
+            Some(Problem::PaneDead { session: "tc_x".into() }),
+            Some(Problem::PaneBusy { session: "tc_x".into(), mode: "clock-mode".into() }),
+            Some(Problem::Expired),
+        ];
+        for problem in problems {
+            for pasted in [false, true] {
+                let ev = AgentEvent::TextSent { id: 7, session: "tc_x".into(), problem: problem.clone(), pasted };
+                assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+            }
+        }
+        // Without a time limit (an older app), and an older answer without `pasted`.
+        let old = r#"{"type":"SendText","id":1,"session":"tc_x","text":"x","enter":false}"#;
+        assert!(matches!(decode::<AgentCmd>(old).unwrap(), AgentCmd::SendText { limit_ms: None, .. }));
+        let old = r#"{"type":"TextSent","id":1,"session":"tc_x","problem":null}"#;
+        assert!(matches!(decode::<AgentEvent>(old).unwrap(), AgentEvent::TextSent { pasted: false, .. }));
+        // An older agent's hello: it cannot send text.
+        let old = r#"{"type":"Hello","version":"0.1.7","hooks":"Installed"}"#;
+        assert!(matches!(decode::<AgentEvent>(old).unwrap(), AgentEvent::Hello { send_text: false, .. }));
     }
 }
