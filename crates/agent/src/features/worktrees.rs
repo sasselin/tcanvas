@@ -138,6 +138,7 @@ fn entry(path: &str, main: bool) -> Worktree {
         last_commit: None,
         branch_deletable: false,
         reflog_commits: false,
+        new_branch: false,
     }
 }
 
@@ -199,6 +200,13 @@ pub fn merged(branch: Option<&str>, base_local: &str, ahead: u32, moved: Option<
         (0, _) => None,
         _ => Some(false),
     }
+}
+
+/// A branch with no commit of its own that never moved since it was created: just made on a
+/// commit the default branch already has (what keeps it from counting as merged, told apart
+/// from "not merged"). Unknown reflog (`moved` is `None`): not told.
+pub fn new_branch(branch: Option<&str>, base_local: &str, ahead: u32, moved: Option<bool>) -> bool {
+    branch.is_some_and(|b| b != base_local) && ahead == 0 && moved == Some(false)
 }
 
 /// `git reflog show --format=%H -n 2 refs/heads/<branch>`: two lines or more, the branch moved
@@ -566,6 +574,7 @@ fn scan_repo(top: &Path, cache: &mut Cache, budget: &mut usize) -> Option<Repo> 
             // The reflog is read only when it decides something.
             let moved = branch.as_deref().filter(|_| ahead == 0).and_then(|b| cache.moved(top, b, &head));
             wt.merged = merged(branch.as_deref(), base.local(), ahead, moved);
+            wt.new_branch = new_branch(branch.as_deref(), base.local(), ahead, moved);
         }
     }
     let refs = read_refs(top);
@@ -749,6 +758,13 @@ mod tests {
         assert_eq!(merged(Some("wip"), "main", 2, None), Some(false));
         assert_eq!(merged(Some("main"), "main", 0, Some(true)), None, "the default branch itself");
         assert_eq!(merged(None, "main", 0, Some(true)), None, "detached");
+        // Told apart from "not merged": just created, nothing of its own yet.
+        assert!(new_branch(Some("fresh"), "main", 0, Some(false)));
+        assert!(!new_branch(Some("fresh"), "main", 0, None), "reflog unknown: not told");
+        assert!(!new_branch(Some("done"), "main", 0, Some(true)), "moved: merged");
+        assert!(!new_branch(Some("wip"), "main", 2, Some(false)), "commits of its own");
+        assert!(!new_branch(Some("main"), "main", 0, Some(false)), "the default branch itself");
+        assert!(!new_branch(None, "main", 0, Some(false)), "detached");
         assert!(!moved_since_created(&format!("{A}\n")));
         assert!(moved_since_created(&format!("{B}\n{A}\n")));
         assert!(!moved_since_created(""));
