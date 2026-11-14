@@ -168,6 +168,190 @@ pub enum Problem {
     GitStillRunning {
         secs: u64,
     },
+    /// The worktree recipe (`file`, at the root of the main checkout) is not valid TOML (the
+    /// parser's message, not translated): none of it applies.
+    RecipeMalformed {
+        file: String,
+        #[serde(default)]
+        line: Option<u64>,
+        detail: String,
+    },
+    /// The worktree recipe's `key` (`worktree.copy`...) does not have the expected type: none of
+    /// the recipe applies.
+    RecipeWrongType {
+        file: String,
+        key: String,
+    },
+    /// The worktree recipe is larger than `max_bytes`: not read.
+    RecipeTooBig {
+        file: String,
+        max_bytes: u64,
+    },
+    /// The worktree recipe is not a regular file (a symbolic link, a folder, a FIFO, a device...):
+    /// not read.
+    RecipeNotAFile {
+        file: String,
+    },
+}
+
+/// The file, at the root of a repository's main checkout, that says what a new worktree needs
+/// (`[worktree]`: `copy`, `symlink`, `setup`).
+pub const RECIPE_FILE: &str = ".tcanvas.toml";
+/// Results done as asked a recipe report lists one by one; the others are only counted.
+pub const MAX_RECIPE_ITEMS: usize = 200;
+/// Results not done a recipe report lists one by one (always listed before any done one is left
+/// out); beyond, only counted.
+pub const MAX_RECIPE_FAILURES: usize = 1000;
+
+/// Why a recipe pattern is refused: nothing it names is touched.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PatternIssue {
+    Empty,
+    /// Starts with `/`: patterns are relative to the main checkout.
+    Absolute,
+    /// Starts with `~`.
+    Home,
+    /// A `..` component.
+    ParentDir,
+    /// A `.git` component: never the repository's own files.
+    GitDir,
+    /// A character outside the supported syntax (`[`, `]`, `{`, `}`, `\`, control characters).
+    BadCharacter,
+    /// `**` mixed with other characters in one component.
+    BadGlob,
+    /// Longer than `MAX_PATTERN_BYTES`.
+    TooLong,
+}
+
+/// Longest recipe pattern, in bytes.
+pub const MAX_PATTERN_BYTES: usize = 1024;
+
+/// What a recipe does with a path of the main checkout.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RecipeAction {
+    /// Copied into the new worktree (folders whole, permissions kept).
+    Copy,
+    /// A symbolic link in the new worktree, to the path in the main checkout.
+    Symlink,
+}
+
+/// A recipe pattern as the agent sees it now, for the new-worktree dialog.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct RecipePattern {
+    pub pattern: String,
+    /// From the repository's Claude Code settings (`worktree.symlinkDirectories`).
+    #[serde(default)]
+    pub claude: bool,
+    /// Paths of the main checkout it matches now.
+    pub matches: usize,
+    /// Refused: matches nothing, never applied.
+    #[serde(default)]
+    pub refused: Option<PatternIssue>,
+    /// The search stopped at its bound: there may be more matches.
+    #[serde(default)]
+    pub incomplete: bool,
+}
+
+/// A repository's worktree recipe, as read from its main checkout (`RECIPE_FILE`, plus the
+/// Claude Code settings' `worktree.symlinkDirectories`).
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct Recipe {
+    /// The main checkout: acceptance of `setup` is remembered per repository.
+    pub main: String,
+    pub copy: Vec<RecipePattern>,
+    pub symlink: Vec<RecipePattern>,
+    /// The command to run in the new worktree's terminal, exactly as written. The agent never
+    /// runs it.
+    #[serde(default)]
+    pub setup: Option<String>,
+    /// The recipe file is unreadable or malformed: only the Claude Code settings apply.
+    #[serde(default)]
+    pub problem: Option<Problem>,
+}
+
+/// Why a recipe item was not applied.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[serde(tag = "kind")]
+pub enum SkipReason {
+    /// The pattern matches nothing.
+    NoMatch,
+    Refused {
+        issue: PatternIssue,
+    },
+    /// Something is already at that path in the new worktree (a tracked file): never replaced.
+    Exists,
+    /// A symbolic link whose target is outside the main checkout (or missing): not copied.
+    LinkOutside,
+    /// The way to it in the new worktree goes through a symbolic link or a file.
+    Escapes,
+    /// Another repository or worktree (it holds a `.git`): never copied.
+    NestedRepository,
+    /// Neither a file, a folder nor a symbolic link (a socket, a device...).
+    Unsupported,
+    /// The copy limits were reached (`max_bytes`, `max_entries`): the copies stopped there.
+    CapReached {
+        max_bytes: u64,
+        max_entries: u64,
+    },
+    /// The search for matches stopped at its bound.
+    SearchLimit,
+    /// The system refused (its message, not translated).
+    Failed {
+        detail: String,
+    },
+    /// A link would hold the new worktree itself (the path is the worktree or one of its
+    /// folders): never made.
+    ContainsWorktree,
+    /// A folder copied only in part: what was left out is listed before it.
+    Partial,
+    /// A folder whose entries could not be listed (its permissions...): the system's message.
+    Unreadable {
+        detail: String,
+    },
+    /// A name that is not valid UTF-8: left out.
+    BadName,
+    /// A relative symbolic link copied as is, whose target is missing in the new worktree.
+    DanglingLink,
+}
+
+/// One result of a recipe applied to a new worktree.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+pub struct RecipeItem {
+    pub action: RecipeAction,
+    /// Relative to the worktree (the pattern itself for `NoMatch`, `Refused`, `SearchLimit`).
+    pub path: String,
+    /// `None`: done.
+    #[serde(default)]
+    pub skipped: Option<SkipReason>,
+}
+
+/// What the recipe did to a new worktree. Its failures never undo the worktree.
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
+pub struct RecipeReport {
+    /// In order: every result not done (at most `MAX_RECIPE_FAILURES`), and the first
+    /// `MAX_RECIPE_ITEMS` done.
+    pub items: Vec<RecipeItem>,
+    /// Results done that are not listed.
+    #[serde(default)]
+    pub omitted: usize,
+    /// Results not done that are not listed.
+    #[serde(default)]
+    pub omitted_failures: usize,
+    /// The recipe file is unreadable or malformed: only the Claude Code settings applied.
+    #[serde(default)]
+    pub problem: Option<Problem>,
+}
+
+impl RecipeReport {
+    pub fn push(&mut self, item: RecipeItem) {
+        let failed = item.skipped.is_some();
+        let listed = self.items.iter().filter(|i| i.skipped.is_some() == failed).count();
+        match (failed, listed < if failed { MAX_RECIPE_FAILURES } else { MAX_RECIPE_ITEMS }) {
+            (_, true) => self.items.push(item),
+            (true, false) => self.omitted_failures += 1,
+            (false, false) => self.omitted += 1,
+        }
+    }
 }
 
 /// Why a worktree location template (or the folder it gives) is refused.
@@ -762,6 +946,9 @@ pub struct WorktreePlan {
     /// would list it as untracked): the pattern `CreateWorktree::exclude` would add to
     /// `info/exclude`.
     pub exclude: Option<String>,
+    /// The repository's worktree recipe (`None`: it has none).
+    #[serde(default)]
+    pub recipe: Option<Recipe>,
 }
 
 /// Disk space used by a worktree's folder, and what of it git ignores (what `git worktree
@@ -865,6 +1052,8 @@ pub enum AgentEvent {
     WorktreePlan(Box<WorktreePlan>),
     /// Answer to `AgentCmd::CreateWorktree` with its `id`: `path` is the new worktree's folder,
     /// `problem` why nothing was created. `excluded`: the location was added to `info/exclude`.
+    /// `recipe_pending`: the repository has a recipe; the agent applies it now, and
+    /// `RecipeApplied` with the same `id` follows once its copies and links are done.
     WorktreeCreated {
         id: u64,
         key: String,
@@ -874,6 +1063,16 @@ pub enum AgentEvent {
         problem: Option<Problem>,
         #[serde(default)]
         excluded: bool,
+        #[serde(default)]
+        recipe_pending: bool,
+    },
+    /// What the repository's recipe did to the worktree the creation `id` made, once done
+    /// (follows `WorktreeCreated` with `recipe_pending`).
+    RecipeApplied {
+        id: u64,
+        key: String,
+        path: String,
+        report: Box<RecipeReport>,
     },
 }
 
@@ -942,7 +1141,8 @@ pub enum AgentCmd {
         limit_ms: Option<u64>,
     },
     /// What creating a worktree for a watched folder's repository would give: its local
-    /// branches, the folder `folder` would get with `location`, and whether git ignores it.
+    /// branches, the folder `folder` would get with `location`, whether git ignores it, and the
+    /// repository's recipe with what each pattern matches now.
     /// Read only. Response: `AgentEvent::WorktreePlan` with the same `id`.
     PlanWorktree {
         id: u64,
@@ -951,8 +1151,9 @@ pub enum AgentCmd {
         #[serde(default)]
         location: Option<String>,
     },
-    /// Creates a worktree (never forced; checked again on fresh data first), then scans the
-    /// repository again. Response: `AgentEvent::WorktreeCreated` with the same `id`.
+    /// Creates a worktree (never forced; checked again on fresh data first), applies the
+    /// repository's recipe copies and links to it (never its `setup`), then scans the repository
+    /// again. Response: `AgentEvent::WorktreeCreated` with the same `id`.
     CreateWorktree {
         id: u64,
         key: String,
@@ -1418,7 +1619,7 @@ mod tests {
             assert!(request.branch.name().contains('/'));
             let cmd = AgentCmd::CreateWorktree { id: 3, key: "p".into(), request: request.clone() };
             assert_eq!(decode::<AgentCmd>(&encode(&cmd)).unwrap(), cmd);
-            let ok = AgentEvent::WorktreeCreated { id: 3, key: "p".into(), path: Some("/home/me/shop/.claude/worktrees/x".into()), problem: None, excluded: true };
+            let ok = AgentEvent::WorktreeCreated { id: 3, key: "p".into(), path: Some("/home/me/shop/.claude/worktrees/x".into()), problem: None, excluded: true, recipe_pending: false };
             assert_eq!(decode::<AgentEvent>(&encode(&ok)).unwrap(), ok);
         }
         let cmd = AgentCmd::PlanWorktree { id: 4, key: "p".into(), folder: "invoices".into(), location: None };
@@ -1435,6 +1636,7 @@ mod tests {
             problem: Some(Problem::DestinationExists { path: "/home/me/shop-invoices".into() }),
             free_folder: Some("invoices-2".into()),
             exclude: Some("/.claude/worktrees/".into()),
+            recipe: None,
         }));
         assert_eq!(decode::<AgentEvent>(&encode(&plan)).unwrap(), plan);
         let issues = [
@@ -1464,12 +1666,94 @@ mod tests {
             Problem::GitStillRunning { secs: 60 },
         ]);
         for problem in problems {
-            let ev = AgentEvent::WorktreeCreated { id: 1, key: "p".into(), path: None, problem: Some(problem), excluded: false };
+            let ev = AgentEvent::WorktreeCreated { id: 1, key: "p".into(), path: None, problem: Some(problem), excluded: false, recipe_pending: false };
             assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
         }
         // Without the optional fields.
         let old = r#"{"type":"CreateWorktree","id":1,"key":"p","request":{"branch":{"kind":"Existing","name":"a"},"folder":"a"}}"#;
         assert!(matches!(decode::<AgentCmd>(old).unwrap(), AgentCmd::CreateWorktree { request: CreateWorktree { location: None, exclude: false, .. }, .. }));
+    }
+
+    #[test]
+    fn roundtrip_recipes() {
+        let pattern = |p: &str, refused| RecipePattern { pattern: p.into(), claude: false, matches: 2, refused, incomplete: false };
+        let recipe = Recipe {
+            main: "/home/me/shop".into(),
+            copy: vec![pattern(".env*", None), pattern("../x", Some(PatternIssue::ParentDir))],
+            symlink: vec![RecipePattern { claude: true, incomplete: true, ..pattern("node_modules", None) }],
+            setup: Some("npm ci\nnpm run seed -- --name \"it's\"".into()),
+            problem: Some(Problem::RecipeMalformed { file: RECIPE_FILE.into(), line: Some(3), detail: "expected `]`".into() }),
+        };
+        let plan = WorktreePlan {
+            id: 1,
+            key: "p".into(),
+            branches: vec![],
+            current_branch: None,
+            default_branch: None,
+            folder: "x".into(),
+            location: None,
+            path: Some("/home/me/shop/.claude/worktrees/x".into()),
+            problem: None,
+            free_folder: None,
+            exclude: None,
+            recipe: Some(recipe),
+        };
+        let ev = AgentEvent::WorktreePlan(Box::new(plan));
+        assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        let issues =
+            [PatternIssue::Empty, PatternIssue::Absolute, PatternIssue::Home, PatternIssue::ParentDir, PatternIssue::GitDir, PatternIssue::BadCharacter, PatternIssue::BadGlob, PatternIssue::TooLong];
+        let mut reasons: Vec<Option<SkipReason>> = issues.into_iter().map(|issue| Some(SkipReason::Refused { issue })).collect();
+        reasons.extend(
+            [
+                SkipReason::NoMatch,
+                SkipReason::Exists,
+                SkipReason::LinkOutside,
+                SkipReason::Escapes,
+                SkipReason::NestedRepository,
+                SkipReason::Unsupported,
+                SkipReason::CapReached { max_bytes: 4 << 30, max_entries: 200_000 },
+                SkipReason::SearchLimit,
+                SkipReason::Failed { detail: "Permission denied".into() },
+                SkipReason::ContainsWorktree,
+                SkipReason::Partial,
+                SkipReason::Unreadable { detail: "Permission denied".into() },
+                SkipReason::BadName,
+                SkipReason::DanglingLink,
+            ]
+            .map(Some),
+        );
+        reasons.push(None);
+        let mut report = RecipeReport { problem: Some(Problem::RecipeWrongType { file: RECIPE_FILE.into(), key: "worktree.copy".into() }), ..RecipeReport::default() };
+        for (i, skipped) in reasons.into_iter().enumerate() {
+            let action = if i % 2 == 0 { RecipeAction::Copy } else { RecipeAction::Symlink };
+            report.push(RecipeItem { action, path: format!("p{i}"), skipped });
+        }
+        let ev = AgentEvent::WorktreeCreated { id: 2, key: "p".into(), path: Some("/w".into()), problem: None, excluded: false, recipe_pending: true };
+        assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        let ev = AgentEvent::RecipeApplied { id: 2, key: "p".into(), path: "/w".into(), report: Box::new(report) };
+        assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        for problem in [Problem::RecipeTooBig { file: RECIPE_FILE.into(), max_bytes: 65536 }, Problem::RecipeNotAFile { file: RECIPE_FILE.into() }] {
+            let ev = AgentEvent::Error { problem };
+            assert_eq!(decode::<AgentEvent>(&encode(&ev)).unwrap(), ev);
+        }
+        // Past the listed results, only counted.
+        let mut big = RecipeReport::default();
+        for i in 0..MAX_RECIPE_ITEMS + 5 {
+            big.push(RecipeItem { action: RecipeAction::Copy, path: i.to_string(), skipped: None });
+        }
+        assert_eq!((big.items.len(), big.omitted), (MAX_RECIPE_ITEMS, 5));
+        // Failures are listed even once the done ones are only counted.
+        big.push(RecipeItem { action: RecipeAction::Symlink, path: "late".into(), skipped: Some(SkipReason::Exists) });
+        assert_eq!((big.items.last().map(|i| i.path.as_str()), big.omitted_failures), (Some("late"), 0));
+        for i in 0..MAX_RECIPE_FAILURES + 2 {
+            big.push(RecipeItem { action: RecipeAction::Copy, path: i.to_string(), skipped: Some(SkipReason::NoMatch) });
+        }
+        assert_eq!((big.items.len(), big.omitted_failures), (MAX_RECIPE_ITEMS + MAX_RECIPE_FAILURES, 3));
+        // An older agent: no recipe in its plan nor its answer.
+        let old = r#"{"type":"WorktreeCreated","id":1,"key":"p","path":"/w","problem":null,"excluded":false}"#;
+        assert!(matches!(decode::<AgentEvent>(old).unwrap(), AgentEvent::WorktreeCreated { recipe_pending: false, .. }));
+        let old = r#"{"type":"WorktreePlan","id":1,"key":"p","branches":[],"current_branch":null,"default_branch":null,"folder":"x","location":null,"path":null,"problem":null,"free_folder":null,"exclude":null}"#;
+        assert!(matches!(decode::<AgentEvent>(old).unwrap(), AgentEvent::WorktreePlan(p) if p.recipe.is_none()));
     }
 
     #[test]

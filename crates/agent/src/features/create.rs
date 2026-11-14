@@ -30,7 +30,7 @@ use protocol::{
 
 use super::changes::git_ok;
 use super::cleanup::{Written, git_write_within, write_limit};
-use super::worktrees;
+use super::{recipe, worktrees};
 
 /// Free folder names tried after the one asked (`<folder>-2` ... `<folder>-<n>`).
 const FREE_TRIES: u32 = 50;
@@ -59,8 +59,13 @@ fn free_destination(list: &[Worktree], at: &Path, template: &str, folder: &str) 
     }
 }
 
+/// The main checkout whose recipe applies: none for a bare repository or a missing folder.
+fn recipe_dir(main: &Worktree) -> Option<PathBuf> {
+    Some(PathBuf::from(&main.path)).filter(|p| !main.bare && p.is_dir())
+}
+
 /// What the new-worktree dialog needs: branches, the folder it would create, whether git ignores
-/// it. Read only.
+/// it, the repository's recipe. Read only.
 pub fn plan(dir: &Path, id: u64, key: &str, folder: &str, location: Option<&str>) -> WorktreePlan {
     let Some(list) = listed(dir) else { return refused_plan(id, key, folder, location, Problem::NotAGitRepo) };
     let mut plan = WorktreePlan { problem: None, ..refused_plan(id, key, folder, location, Problem::NotAGitRepo) };
@@ -70,6 +75,7 @@ pub fn plan(dir: &Path, id: u64, key: &str, folder: &str, location: Option<&str>
     plan.current_branch = git_ok(dir, &["symbolic-ref", "--short", "-q", "HEAD"]).map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
     let main_checkout = main.branch.as_deref().zip(main.head.as_deref());
     plan.default_branch = worktrees::default_branch(&at, main_checkout).map(|b| b.name);
+    plan.recipe = recipe_dir(main).and_then(|m| recipe::plan(&m));
     let template = location.unwrap_or(DEFAULT_WORKTREE_LOCATION);
     match free_destination(&list, &at, template, folder) {
         Ok(path) => {
@@ -99,6 +105,7 @@ pub fn refused_plan(id: u64, key: &str, folder: &str, location: Option<&str>, pr
         problem: Some(problem),
         free_folder: None,
         exclude: None,
+        recipe: None,
     }
 }
 
@@ -126,10 +133,19 @@ fn local_branches(at: &Path, list: &[Worktree]) -> Vec<LocalBranch> {
     branches
 }
 
-/// What a creation gives: its folder, and whether a block went to `info/exclude`.
-pub type Created = Result<(String, bool), Problem>;
+/// A worktree created: its folder, whether a block went to `info/exclude`, what the repository's
+/// recipe applies to (`None`: it has none), applied by the caller once the answer is sent.
+#[derive(Debug)]
+pub struct Done {
+    pub path: String,
+    pub excluded: bool,
+    pub recipe: Option<PathBuf>,
+}
 
-/// Creates the worktree. When git is still running after `write_limit()`, the answer is
+pub type Created = Result<Done, Problem>;
+
+/// Creates the worktree; says whether the repository has a recipe to apply to it (whatever the
+/// recipe does then, the worktree stays). When git is still running after `write_limit()`, the answer is
 /// `GitStillRunning` and `late` gets the final result when git ends (the writes then taken back
 /// if it failed); otherwise `late` is never called.
 pub fn run(dir: &Path, request: &CreateWorktree, late: impl FnOnce(Created) + Send + 'static) -> Created {
@@ -190,8 +206,12 @@ pub fn run(dir: &Path, request: &CreateWorktree, late: impl FnOnce(Created) + Se
         }
     };
     let excluded = appended.is_some();
+    let recipe_main = recipe_dir(main);
     let finish = move |result: Result<(), Problem>, appended| match result {
-        Ok(()) => Ok((text, excluded)),
+        Ok(()) => {
+            let recipe = recipe_main.filter(|m| recipe::present(m));
+            Ok(Done { path: text, excluded, recipe })
+        }
         Err(problem) => {
             take_back(appended);
             Err(problem)

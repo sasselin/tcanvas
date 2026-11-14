@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use protocol::{AgentEvent, ChangeKind, ChangeSet, CommitInfo, DirEntry, DirListing, FileChange, Problem, WorktreeList};
 
-use super::{cleanup, create, tmux, worktrees};
+use super::{cleanup, create, recipe, tmux, worktrees};
 
 const SCAN_EVERY: Duration = Duration::from_secs(2);
 const MAX_FILES: usize = 500;
@@ -77,6 +77,23 @@ enum Job {
     Create { id: u64, key: String, dir: PathBuf, request: protocol::CreateWorktree },
 }
 
+/// A recipe to apply to a new worktree, on the recipe thread.
+struct RecipeJob {
+    id: u64,
+    key: String,
+    main: PathBuf,
+    path: String,
+}
+
+/// A plan to compute on the plan thread (`dir`: the watched folder, or why there is none).
+struct PlanJob {
+    id: u64,
+    key: String,
+    dir: Result<PathBuf, Problem>,
+    folder: String,
+    location: Option<String>,
+}
+
 /// A worktree to measure on the size thread.
 struct SizeJob {
     key: String,
@@ -105,7 +122,9 @@ pub fn spawn(send: impl Fn(&AgentEvent) + Send + Sync + 'static) -> Sender<Cmd> 
     let send: Sink = Arc::new(send);
     let paths: WatchedPaths = Arc::default();
     let measuring: Measuring = Arc::default();
-    let workers = Workers { jobs: spawn_cleaner(send.clone(), tx.clone(), paths.clone()), sizes: spawn_measurer(send.clone(), measuring.clone()), paths, measuring };
+    let recipes = spawn_recipes(send.clone(), tx.clone());
+    let workers =
+        Workers { jobs: spawn_cleaner(send.clone(), tx.clone(), paths.clone(), recipes), sizes: spawn_measurer(send.clone(), measuring.clone()), plans: spawn_planner(send.clone()), paths, measuring };
     thread::spawn(move || run(rx, send, workers));
     tx
 }
@@ -114,6 +133,7 @@ pub fn spawn(send: impl Fn(&AgentEvent) + Send + Sync + 'static) -> Sender<Cmd> 
 struct Workers {
     jobs: Sender<Job>,
     sizes: Sender<SizeJob>,
+    plans: Sender<PlanJob>,
     paths: WatchedPaths,
     measuring: Measuring,
 }
@@ -135,11 +155,52 @@ fn spawn_measurer(send: Sink, measuring: Measuring) -> Sender<SizeJob> {
     tx
 }
 
+/// Worktree plans are computed on their own thread (a recipe's searches may take a while: the
+/// scans go on meanwhile); of several waiting for one key, only the last is answered.
+fn spawn_planner(send: Sink) -> Sender<PlanJob> {
+    let (tx, rx) = mpsc::channel::<PlanJob>();
+    thread::spawn(move || {
+        while let Ok(first) = rx.recv() {
+            let mut waiting: Vec<PlanJob> = vec![first];
+            waiting.extend(rx.try_iter());
+            let last: Vec<&PlanJob> = waiting.iter().enumerate().filter(|(i, j)| !waiting[i + 1..].iter().any(|later| later.key == j.key)).map(|(_, j)| j).collect();
+            for job in last {
+                let plan = match &job.dir {
+                    Ok(dir) => create::plan(dir, job.id, &job.key, &job.folder, job.location.as_deref()),
+                    Err(problem) => create::refused_plan(job.id, &job.key, &job.folder, job.location.as_deref(), problem.clone()),
+                };
+                send(&AgentEvent::WorktreePlan(Box::new(plan)));
+            }
+        }
+    });
+    tx
+}
+
+/// Recipes are applied one at a time on their own thread, once the creation is answered: a long
+/// copy never holds the cleanups and creations. `RecipeApplied` always follows, even when the
+/// recipe went away meanwhile (an empty report), so the app never waits for nothing.
+fn spawn_recipes(send: Sink, rescan: Sender<Cmd>) -> Sender<RecipeJob> {
+    let (tx, rx) = mpsc::channel::<RecipeJob>();
+    thread::spawn(move || {
+        // Test only: the copies take this long, to check that nothing waits for them.
+        let delay = std::env::var("TCANVAS_RECIPE_TEST_DELAY_MS").ok().and_then(|s| s.parse().ok()).map(Duration::from_millis);
+        for job in rx {
+            if let Some(delay) = delay {
+                thread::sleep(delay);
+            }
+            let report = recipe::apply(&job.main, Path::new(&job.path)).unwrap_or_default();
+            send(&AgentEvent::RecipeApplied { id: job.id, key: job.key, path: job.path, report: Box::new(report) });
+            let _ = rescan.send(Cmd::Rescan);
+        }
+    });
+    tx
+}
+
 /// Cleanups and worktree creations run one at a time on their own thread (deleting a big folder,
 /// or checking out a big one, takes a while; diffs and scans go on meanwhile), then ask for a scan
 /// so the lists follow right away. What uses the folders (panes, processes, watched folders) is
 /// read by `cleanup::run` right before it writes, after its slow checks.
-fn spawn_cleaner(send: Sink, rescan: Sender<Cmd>, paths: WatchedPaths) -> Sender<Job> {
+fn spawn_cleaner(send: Sink, rescan: Sender<Cmd>, paths: WatchedPaths, recipes: Sender<RecipeJob>) -> Sender<Job> {
     let (tx, rx) = mpsc::channel::<Job>();
     thread::spawn(move || {
         for job in rx {
@@ -159,12 +220,12 @@ fn spawn_cleaner(send: Sink, rescan: Sender<Cmd>, paths: WatchedPaths) -> Sender
                 Job::Create { id, key, dir, request } => {
                     // Still running past the time limit: the final answer, with the same id,
                     // follows when git ends, from another thread (the next jobs do not wait).
-                    let (late_send, late_rescan, late_key) = (send.clone(), rescan.clone(), key.clone());
+                    let (late_send, late_rescan, late_key, late_recipes) = (send.clone(), rescan.clone(), key.clone(), recipes.clone());
                     let late = move |result| {
-                        late_send(&created_event(id, late_key, result));
+                        answer_created(&late_send, &late_recipes, id, late_key, result);
                         let _ = late_rescan.send(Cmd::Rescan);
                     };
-                    send(&created_event(id, key, create::run(&dir, &request, late)));
+                    answer_created(&send, &recipes, id, key.clone(), create::run(&dir, &request, late));
                 }
             }
             let _ = rescan.send(Cmd::Rescan);
@@ -173,10 +234,18 @@ fn spawn_cleaner(send: Sink, rescan: Sender<Cmd>, paths: WatchedPaths) -> Sender
     tx
 }
 
-fn created_event(id: u64, key: String, result: create::Created) -> AgentEvent {
+/// Answers a creation as soon as git is done; its recipe, if any, then goes to the recipe thread
+/// (`RecipeApplied` follows).
+fn answer_created(send: &Sink, recipes: &Sender<RecipeJob>, id: u64, key: String, result: create::Created) {
     match result {
-        Ok((path, excluded)) => AgentEvent::WorktreeCreated { id, key, path: Some(path), problem: None, excluded },
-        Err(problem) => AgentEvent::WorktreeCreated { id, key, path: None, problem: Some(problem), excluded: false },
+        Ok(done) => {
+            let pending = done.recipe.is_some();
+            send(&AgentEvent::WorktreeCreated { id, key: key.clone(), path: Some(done.path.clone()), problem: None, excluded: done.excluded, recipe_pending: pending });
+            if let Some(main) = done.recipe {
+                let _ = recipes.send(RecipeJob { id, key, main, path: done.path });
+            }
+        }
+        Err(problem) => send(&AgentEvent::WorktreeCreated { id, key, path: None, problem: Some(problem), excluded: false, recipe_pending: false }),
     }
 }
 
@@ -247,20 +316,16 @@ fn run(rx: Receiver<Cmd>, send: Sink, workers: Workers) {
                 }
             }
             Ok(Cmd::PlanWorktree { id, key, folder, location }) => {
-                // A few quick read-only git calls: answered right here.
-                let plan = match watched.get(&key).map(|w| resolve(&w.path)) {
-                    Some(Ok(dir)) => create::plan(&dir, id, &key, &folder, location.as_deref()),
-                    Some(Err(problem)) => create::refused_plan(id, &key, &folder, location.as_deref(), problem),
-                    None => create::refused_plan(id, &key, &folder, location.as_deref(), Problem::NotAGitRepo),
-                };
-                send(&AgentEvent::WorktreePlan(Box::new(plan)));
+                // Read only, but a recipe's searches may take a while: off this thread.
+                let dir = watched.get(&key).map(|w| resolve(&w.path)).unwrap_or(Err(Problem::NotAGitRepo));
+                let _ = workers.plans.send(PlanJob { id, key, dir, folder, location });
             }
             Ok(Cmd::CreateWorktree { id, key, request }) => match watched.get(&key).map(|w| resolve(&w.path)) {
                 Some(Ok(dir)) => {
                     let _ = workers.jobs.send(Job::Create { id, key, dir, request });
                 }
-                Some(Err(problem)) => send(&AgentEvent::WorktreeCreated { id, key, path: None, problem: Some(problem), excluded: false }),
-                None => send(&AgentEvent::WorktreeCreated { id, key, path: None, problem: Some(Problem::NotAGitRepo), excluded: false }),
+                Some(Err(problem)) => send(&AgentEvent::WorktreeCreated { id, key, path: None, problem: Some(problem), excluded: false, recipe_pending: false }),
+                None => send(&AgentEvent::WorktreeCreated { id, key, path: None, problem: Some(Problem::NotAGitRepo), excluded: false, recipe_pending: false }),
             },
             Ok(Cmd::Rescan) => next_scan = Instant::now(),
             Err(RecvTimeoutError::Timeout) => {

@@ -108,7 +108,7 @@ fn command_card(h: &mut Harness<'_, App>, folder: &str, command: &str) -> String
         h.state_mut().world.projects.push(group);
     }
     let before: Vec<String> = h.state().world.cards.iter().map(|c| c.id.clone()).collect();
-    h.state_mut().dispatch(vec![Event::NewCard { at: None, project: Some("cmd".into()), command: Some(command.into()), cwd: None }]);
+    h.state_mut().dispatch(vec![Event::NewCard { at: None, project: Some("cmd".into()), command: Some(command.into()), setup: None, cwd: None }]);
     h.step();
     let id = h.state().world.cards.iter().map(|c| c.id.clone()).find(|c| !before.contains(c)).unwrap();
     wait(h, "terminal up", 30, |app| app.cards.is_running(&id));
@@ -257,7 +257,7 @@ fn scenario(dir: &Path, folder: &str, shell: &str, first: bool) {
     let mut h = harness(dir);
     h.step();
     let before: Vec<String> = h.state().world.cards.iter().map(|c| c.id.clone()).collect();
-    h.state_mut().dispatch(vec![Event::NewCard { at: None, project: None, command: Some("echo never".into()), cwd: None }]);
+    h.state_mut().dispatch(vec![Event::NewCard { at: None, project: None, command: Some("echo never".into()), setup: None, cwd: None }]);
     h.step();
     let e = h.state().world.cards.iter().map(|c| c.id.clone()).find(|c| !before.contains(c)).unwrap();
     wait(&mut h, "command reported as not run", 30, |app| app.cards.lost_command(&e) == Some("echo never"));

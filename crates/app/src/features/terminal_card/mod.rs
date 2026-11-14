@@ -26,7 +26,7 @@ use crate::shell::world::{Card, CardId, CardWorktree, World};
 pub use clipboard::{ClipboardSource, Fixed as FixedClipboard, FixedImage as FixedImageClipboard};
 use input::{ClipAction, MouseButton};
 use pty::{GridSize, TermRuntime};
-pub use pty::{Launch, attach_command};
+pub use pty::{Launch, Start, attach_command};
 
 /// Dimensions in world units (1 unit = 1 point at zoom 1).
 pub const TITLE_H: f32 = 28.0;
@@ -92,14 +92,13 @@ struct InFlight {
 /// Where a new card's command stands.
 enum CommandRun {
     /// To be staged on the Linux side before the first attach.
-    Pending(String),
-    /// Being staged (background process).
+    Pending(Start),
     /// Being staged (background process); the flag, set when the card goes meanwhile, makes the
     /// staging job delete what it staged.
-    Staging(String, Receiver<Result<(), String>>, Arc<AtomicBool>),
+    Staging(Start, Receiver<Result<(), String>>, Arc<AtomicBool>),
     /// Given to the first attach; kept until its shell has taken it (`true`) or it never will
     /// (`false`), as `pty::confirm_command` tells (`None`: cannot tell).
-    Launched(String, Receiver<Option<bool>>),
+    Launched(Start, Receiver<Option<bool>>),
 }
 
 /// After a staging job: when its card went meanwhile, delete what it staged.
@@ -447,8 +446,17 @@ impl TerminalCards {
 
     /// Command a card will run when its terminal starts (tests: nothing starts without a launcher).
     pub fn pending_command(&self, id: &str) -> Option<&str> {
+        self.pending_start(id)?.command.as_deref()
+    }
+
+    /// Setup a card will run before its command when its terminal starts.
+    pub fn pending_setup(&self, id: &str) -> Option<&str> {
+        self.pending_start(id)?.setup.as_deref()
+    }
+
+    fn pending_start(&self, id: &str) -> Option<&Start> {
         match self.commands.get(id)? {
-            CommandRun::Pending(text) | CommandRun::Staging(text, ..) => Some(text),
+            CommandRun::Pending(start) | CommandRun::Staging(start, ..) => Some(start),
             CommandRun::Launched(..) => None,
         }
     }
@@ -513,11 +521,11 @@ impl TerminalCards {
     fn confirm_launches(&mut self) {
         let lost = &mut self.lost_commands;
         self.commands.retain(|id, run| {
-            let CommandRun::Launched(text, rx) = run else { return true };
+            let CommandRun::Launched(start, rx) = run else { return true };
             match rx.try_recv() {
                 Err(mpsc::TryRecvError::Empty) => true,
                 Ok(Some(false)) => {
-                    lost.insert(id.clone(), text.clone());
+                    lost.insert(id.clone(), start.text());
                     false
                 }
                 _ => false,
@@ -629,7 +637,7 @@ impl TerminalCards {
                             _ => "?".into(),
                         };
                         self.spawn_errors.insert(card.id.clone(), (t().command_not_staged)(&e));
-                        self.lost_commands.insert(card.id.clone(), text);
+                        self.lost_commands.insert(card.id.clone(), text.text());
                         discard_in_background(card.session());
                         continue;
                     }
@@ -656,7 +664,7 @@ impl TerminalCards {
                 Err(e) => {
                     self.spawn_errors.insert(card.id.clone(), (t().spawn_failed)(&launch.program, &e.to_string()));
                     if let Some(text) = staged {
-                        self.lost_commands.insert(card.id.clone(), text);
+                        self.lost_commands.insert(card.id.clone(), text.text());
                         discard_in_background(card.session());
                     }
                 }
@@ -1094,7 +1102,7 @@ impl TerminalCards {
 
     pub fn handle(&mut self, ev: &Event, world: &mut World, out: &mut Vec<Event>) {
         match ev {
-            Event::NewCard { at, project, command, cwd } => {
+            Event::NewCard { at, project, command, setup, cwd } => {
                 let cell = base_cell(&self.ctx);
                 let size = card_size(cell, DEFAULT_COLS, DEFAULT_ROWS);
                 // With no project given, the terminal is born in the open space.
@@ -1110,8 +1118,8 @@ impl TerminalCards {
                 let mut card = Card::new(rect, cwd.clone().or_else(|| project.and_then(|p| p.cwd.clone())));
                 card.project = project.map(|p| p.id.clone());
                 let id = card.id.clone();
-                if let Some(text) = command.as_deref().and_then(pty::staged_text) {
-                    self.commands.insert(id.clone(), CommandRun::Pending(text));
+                if let Some(start) = Start::new(setup.as_deref(), command.as_deref()) {
+                    self.commands.insert(id.clone(), CommandRun::Pending(start));
                 }
                 world.add_card(card);
                 // Always fly to the new terminal: visible and large enough to type in.
@@ -1420,19 +1428,19 @@ mod tests {
     fn a_card_closed_while_its_command_is_staged_deletes_it() {
         let mut cards = TerminalCards::new(egui::Context::default(), Launcher::Disabled);
         // Not staged yet: nothing to delete on the Linux side.
-        cards.commands.insert("a".into(), CommandRun::Pending("echo a".into()));
+        cards.commands.insert("a".into(), CommandRun::Pending(Start::command("echo a")));
         assert!(!cards.forget_command("a", "tc_a"));
         assert!(cards.commands.is_empty());
         // Staging: the job is told to delete what it staged.
         let cancelled = Arc::new(AtomicBool::new(false));
         let (_tx, rx) = mpsc::channel();
-        cards.commands.insert("b".into(), CommandRun::Staging("echo b".into(), rx, cancelled.clone()));
+        cards.commands.insert("b".into(), CommandRun::Staging(Start::command("echo b"), rx, cancelled.clone()));
         assert!(cards.forget_command("b", "tc_b"), "a staged file may exist: discarded");
         assert!(cancelled.load(Ordering::SeqCst));
         assert_eq!(cards.pending_command("b"), None);
         // Attached, not yet taken: discarded too.
         let (_tx, rx) = mpsc::channel();
-        cards.commands.insert("c".into(), CommandRun::Launched("echo c".into(), rx));
+        cards.commands.insert("c".into(), CommandRun::Launched(Start::command("echo c"), rx));
         assert!(cards.forget_command("c", "tc_c"));
         assert!(!cards.forget_command("none", "tc_none"));
     }
@@ -1538,11 +1546,11 @@ mod tests {
         assert_eq!(outcome_of(&send(&mut cards, &mut world, "gone", "x", true), "gone"), (Some(SendOutcome::Refused(SendRefusal::NoCard)), false));
         assert_eq!(cards.unsent_text("gone"), None, "no card to keep it on: only its sender is told");
         // Its start command not taken yet: text sent now would land in front of it.
-        cards.commands.insert(id.clone(), CommandRun::Pending("claude".into()));
+        cards.commands.insert(id.clone(), CommandRun::Pending(Start::command("claude")));
         assert!(refused(&send(&mut cards, &mut world, &id, "go on", true), &id, SendRefusal::Starting));
         assert_eq!(cards.unsent_text(&id), Some(("go on", &SendRefusal::Starting)));
         let (_tx, rx) = mpsc::channel();
-        cards.commands.insert(id.clone(), CommandRun::Launched("claude".into(), rx));
+        cards.commands.insert(id.clone(), CommandRun::Launched(Start::command("claude"), rx));
         assert!(refused(&send(&mut cards, &mut world, &id, "go on", true), &id, SendRefusal::Starting), "until its shell took it");
         cards.commands.clear();
         // Its session not seen by the agent yet.

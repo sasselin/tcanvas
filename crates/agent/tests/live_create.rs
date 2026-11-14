@@ -109,7 +109,7 @@ impl Agent {
     /// The next answer to the creation `id`.
     fn answer(&self, id: u64) -> (Option<String>, Option<Problem>, bool) {
         self.wait(&format!("answer to creation {id}"), |e| match e {
-            AgentEvent::WorktreeCreated { id: i, key, path, problem, excluded } if *i == id && key == "shop" => Some((path.clone(), problem.clone(), *excluded)),
+            AgentEvent::WorktreeCreated { id: i, key, path, problem, excluded, .. } if *i == id && key == "shop" => Some((path.clone(), problem.clone(), *excluded)),
             _ => None,
         })
     }

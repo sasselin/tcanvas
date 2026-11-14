@@ -610,6 +610,7 @@ fn new_worktree() {
         problem: None,
         free_folder: None,
         exclude: Some("/.claude/worktrees/".into()),
+        recipe: None,
     };
     h.state_mut().dispatch(vec![Event::Agent(AgentEvent::WorktreePlan(Box::new(plan)))]);
     steps(&mut h, 3);

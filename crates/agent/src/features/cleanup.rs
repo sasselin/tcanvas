@@ -268,6 +268,11 @@ pub fn holds_repository(root: &Path) -> Option<bool> {
         if path.file_name().is_some_and(|n| n == ".git") {
             return Some(true);
         }
+        // An ignored symbolic link (one a worktree recipe made, to a folder of the main
+        // checkout): git's removal deletes the link only, so what it points to is not walked.
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            continue;
+        }
         let mut found = false;
         walk.each(&path, |entry, _| {
             if entry.file_name() == ".git" {

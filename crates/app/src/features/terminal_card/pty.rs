@@ -143,14 +143,79 @@ pub fn staged_file(session: &str, text: &str) -> String {
     format!("/bin/sed -n -e '2s/^/\x1b[2m/' -e '$s/$/\x1b[0m/' -e '2,$p' {path}; /bin/rm {path} 2>/dev/null || return\n{text}\n")
 }
 
+/// The staged file for a setup followed by a command: the command runs only if the setup
+/// succeeded (its last command), and the card shows both.
+///
+/// The setup waits in comment lines (`#` + the line: no shell runs them). The first line claims
+/// the file (`mv`, racing `CONFIRM_SCRIPT` on one name like the plain file's `rm`), shows both
+/// texts dimmed, writes the setup lines (from the line deleting their own file) into a file next
+/// to it, `-setup` (by `sed` itself: no shell redirection, which `noclobber` could refuse), and
+/// deletes the claimed copy. Then the shell sources the setup file through `builtin source` (an
+/// alias or a function named `source` in the user's rc files cannot step in), and if it failed,
+/// deletes the setup file (in case it never ran) and returns before the command; the next line
+/// deletes it in any case. Every line of ours is valid in bash, zsh and fish 3 (`builtin
+/// source`, `||`, `!`, `return` from a sourced file); the two texts reach the shell byte for
+/// byte.
+pub fn staged_file_with_setup(session: &str, setup: &str, text: &str) -> String {
+    let path = format!("{STAGE_DIR}/{session}");
+    let claimed = format!("{path}-run");
+    let setup_file = format!("{path}-setup");
+    let setup_lines = setup.split('\n').count();
+    // Line 2 deletes the setup file, the setup is on lines 3 to `last`, then the `source` line and
+    // the line deleting the setup file, then the command.
+    let last = 2 + setup_lines;
+    let command = last + 3;
+    let commented: String = setup.split('\n').map(|line| format!("#{line}\n")).collect();
+    let show = format!("/bin/sed -n -e '3,{last}s/^#//' -e '3s/^/\x1b[2m/' -e '$s/$/\x1b[0m/' -e '3,{last}p' -e '{command},$p' {claimed}");
+    let write = format!("/bin/sed -n -e '2,{last}s/^#//' -e \"2,{last}w $HOME/.local/share/tcanvas/commands/{session}-setup\" {claimed}");
+    format!(
+        "/bin/mv {path} {claimed} 2>/dev/null || return; {show}; {write}; /bin/rm -f {claimed}\n#/bin/rm -f {setup_file}\n{commented}builtin source {setup_file} || ! /bin/rm -f {setup_file} || return\n/bin/rm -f {setup_file}\n{text}\n"
+    )
+}
+
+/// What a new card runs once: a setup (a worktree recipe's), then its command only if the setup
+/// succeeded; either may be missing, not both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Start {
+    pub setup: Option<String>,
+    pub command: Option<String>,
+}
+
+impl Start {
+    /// Each text as staged (`staged_text`); `None` when both are blank.
+    pub fn new(setup: Option<&str>, command: Option<&str>) -> Option<Start> {
+        let (setup, command) = (setup.and_then(staged_text), command.and_then(staged_text));
+        (setup.is_some() || command.is_some()).then_some(Start { setup, command })
+    }
+
+    /// A command alone.
+    pub fn command(text: &str) -> Start {
+        Start { setup: None, command: Some(text.to_string()) }
+    }
+
+    /// Both texts, the setup first, as offered for copying when they did not run.
+    pub fn text(&self) -> String {
+        [self.setup.as_deref(), self.command.as_deref()].into_iter().flatten().collect::<Vec<_>>().join("\n")
+    }
+
+    /// The staged file for this start.
+    pub fn file(&self, session: &str) -> String {
+        match (self.setup.as_deref(), self.command.as_deref()) {
+            (Some(setup), Some(command)) => staged_file_with_setup(session, setup, command),
+            (Some(text), None) | (None, Some(text)) => staged_file(session, text),
+            (None, None) => staged_file(session, ""),
+        }
+    }
+}
+
 /// Stores a card's command on the Linux side before its first attach (`sh` reading stdin,
 /// through `wsl.exe` on Windows). The text travels on a pipe, never on a command line: no
 /// quoting, no length limit of Windows or tmux arguments.
-pub fn stage_command(session: &str, text: &str) -> io::Result<()> {
+pub fn stage_command(session: &str, start: &Start) -> io::Result<()> {
     if !session_is_plain(session) {
         return Err(io::Error::other(format!("session name {session:?}")));
     }
-    let out = run_with_stdin(&stage_launch(cfg!(windows), test_home().as_deref(), session), staged_file(session, text).as_bytes())?;
+    let out = run_with_stdin(&stage_launch(cfg!(windows), test_home().as_deref(), session), start.file(session).as_bytes())?;
     if out.status.success() { Ok(()) } else { Err(io::Error::other(format!("{} {}", out.status, String::from_utf8_lossy(&out.stderr).trim()))) }
 }
 
@@ -497,7 +562,7 @@ mod tests {
         assert_eq!(windows, Launch { program: "wsl.exe".into(), args: ["--cd", "~", "-e", "sh", "-c", &expected].map(String::from).to_vec() });
         // A session name that would need quoting is never put in a typed path.
         assert_eq!(attach_launch(false, None, "s", "tc_x;y", None, size), attach_launch(false, None, "s", "tc_x;y", None, None));
-        assert!(stage_command("tc_x y", "echo").is_err());
+        assert!(stage_command("tc_x y", &Start::command("echo")).is_err());
     }
 
     #[test]
@@ -588,8 +653,11 @@ mod tests {
         }
 
         fn stage(&self, session: &str, command: &str) {
-            let file = staged_file(session, &staged_text(command).unwrap());
-            assert_eq!(self.sh(&stage_launch(false, Some(&self.home.display().to_string()), session), file.as_bytes()), Some(0));
+            self.stage_start(session, &Start::new(None, Some(command)).unwrap());
+        }
+
+        fn stage_start(&self, session: &str, start: &Start) {
+            assert_eq!(self.sh(&stage_launch(false, Some(&self.home.display().to_string()), session), start.file(session).as_bytes()), Some(0));
         }
 
         /// The attach script without its final `exec tmux new-session -A` (it needs a terminal).
@@ -644,7 +712,7 @@ mod tests {
 
     /// Definitions an rc file could hold that must not change what the staged file does.
     #[cfg(unix)]
-    const HOSTILE_RC: &str = "command() { return 0; }\nrm() { echo fn-rm; }\nalias sed='echo alias-sed'\ntail() { echo fn-tail; }\nalias mv='echo alias-mv'\n";
+    const HOSTILE_RC: &str = "command() { return 0; }\nrm() { echo fn-rm; }\nalias sed='echo alias-sed'\ntail() { echo fn-tail; }\nalias mv='echo alias-mv'\nsource() { echo fn-source; }\n";
 
     /// The whole Linux side on a fresh throwaway tmux server with a scratch `HOME`: bash with
     /// bracketed paste turned off, then zsh, as the user's shell, both with hostile rc files.
@@ -682,7 +750,7 @@ mod tests {
             // The command was shown (dimmed), and no rc definition stepped in.
             let screen = live.tmux(&["capture-pane", "-p", "-t", "=tc_x:"]);
             assert!(screen.contains("echo once >> runs.txt"), "{shell}: {screen}");
-            assert!(!["fn-rm", "alias-sed", "fn-tail", "alias-mv"].iter().any(|m| screen.contains(m)), "{shell}: {screen}");
+            assert!(!["fn-rm", "alias-sed", "fn-tail", "alias-mv", "fn-source"].iter().any(|m| screen.contains(m)), "{shell}: {screen}");
             assert!(live.tmux(&["send-keys", "-t", "=tc_x:", "echo typed > typed.txt", "Enter"]).is_empty());
             assert_eq!(live.wait_file("typed.txt", "typed\n"), "typed\n", "{shell}: the shell stays usable");
             // The session exists: attaching again never runs a command, even a newly staged one,
@@ -693,6 +761,73 @@ mod tests {
             assert!(!live.staged().join("tc_x").exists());
             assert_eq!(std::fs::read_to_string(live.home.join("runs.txt")).unwrap(), "once\n", "{shell}");
         }
+    }
+
+    /// A setup and a command (a worktree recipe's, then a template's), in bash then zsh with hostile
+    /// rc files: the setup runs first, byte for byte, the command only if it succeeded; the card
+    /// shows both; nothing is left in the staging folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_setup_runs_before_the_command_and_a_failed_one_stops_it() {
+        if !tmux_available() {
+            return;
+        }
+        for shell in ["bash", "zsh"] {
+            let Some(path) = shell_path(shell) else { continue };
+            let live = Live::new(&format!("setup-{shell}"));
+            std::fs::write(live.home.join(".zshrc"), format!("setopt noclobber append_create\n{HOSTILE_RC}")).unwrap();
+            std::fs::write(live.home.join(".bashrc"), format!("bind 'set enable-bracketed-paste off'\nset -o noclobber\n{HOSTILE_RC}")).unwrap();
+            std::fs::write(live.home.join(".bash_profile"), ". ~/.bashrc\n").unwrap();
+            // A setup with a comment, a here-document and `!`, its last command succeeding.
+            let setup = "# seed\ncat >> order.txt <<'EOF'\nsetup !x $HOME\nEOF\ntest -f order.txt";
+            live.stage_start("tc_ok", &Start::new(Some(setup), Some("echo command >> order.txt")).unwrap());
+            live.create("tc_ok", &path);
+            assert_eq!(live.confirm("tc_ok", 300), Some(0), "{shell}");
+            let want = "setup !x $HOME\ncommand\n";
+            assert_eq!(live.wait_file("order.txt", want), want, "{shell}");
+            let screen = live.tmux(&["capture-pane", "-p", "-t", "=tc_ok:"]);
+            assert!(screen.contains("setup !x $HOME") && screen.contains("echo command >> order.txt"), "{shell}: both shown\n{screen}");
+            assert!(!["fn-rm", "alias-sed", "fn-tail", "alias-mv", "fn-source"].iter().any(|m| screen.contains(m)), "{shell}: {screen}");
+            // A failing setup: the command never runs, the shell stays.
+            live.stage_start("tc_ko", &Start::new(Some("echo failing >> fail.txt\nfalse"), Some("echo command >> fail.txt")).unwrap());
+            live.create("tc_ko", &path);
+            assert_eq!(live.confirm("tc_ko", 300), Some(0), "{shell}");
+            assert_eq!(live.wait_file("fail.txt", "failing\n"), "failing\n", "{shell}");
+            assert!(live.tmux(&["send-keys", "-t", "=tc_ko:", "echo typed > typed.txt", "Enter"]).is_empty());
+            assert_eq!(live.wait_file("typed.txt", "typed\n"), "typed\n", "{shell}");
+            assert_eq!(std::fs::read_to_string(live.home.join("fail.txt")).unwrap(), "failing\n", "{shell}: the command did not run");
+            let left: Vec<_> = std::fs::read_dir(live.staged()).unwrap().map(|e| e.unwrap().file_name()).collect();
+            assert!(left.is_empty(), "{shell}: {left:?}");
+        }
+    }
+
+    #[test]
+    fn a_start_is_a_setup_a_command_or_both() {
+        assert_eq!(Start::new(None, Some(" ")), None);
+        assert_eq!(Start::new(Some("\r\n"), None), None);
+        assert_eq!(Start::new(Some("npm ci\r\n"), Some("claude")), Some(Start { setup: Some("npm ci".into()), command: Some("claude".into()) }));
+        let both = Start::new(Some("npm ci\nnpm run seed"), Some("claude")).unwrap();
+        assert_eq!(both.text(), "npm ci\nnpm run seed\nclaude");
+        // Alone, either is the plain staged file.
+        assert_eq!(Start::new(Some("npm ci"), None).unwrap().file("tc_x"), staged_file("tc_x", "npm ci"));
+        assert_eq!(Start::command("claude").file("tc_x"), staged_file("tc_x", "claude"));
+        // Both: the setup commented out, then sourced, the command after it as written.
+        let file = both.file("tc_x");
+        let lines: Vec<&str> = file.lines().collect();
+        let dir = "~/.local/share/tcanvas/commands";
+        assert!(lines[0].starts_with(&format!("/bin/mv {dir}/tc_x {dir}/tc_x-run 2>/dev/null || return; /bin/sed ")), "{}", lines[0]);
+        assert_eq!(
+            lines[1..],
+            [
+                format!("#/bin/rm -f {dir}/tc_x-setup").as_str(),
+                "#npm ci",
+                "#npm run seed",
+                &format!("builtin source {dir}/tc_x-setup || ! /bin/rm -f {dir}/tc_x-setup || return"),
+                &format!("/bin/rm -f {dir}/tc_x-setup"),
+                "claude"
+            ]
+        );
+        assert!(!lines[0].replace("2>/dev/null", "").contains('>'), "no shell redirection");
     }
 
     /// An rc file that waits for an answer (a passphrase...) never receives the typed line: it
